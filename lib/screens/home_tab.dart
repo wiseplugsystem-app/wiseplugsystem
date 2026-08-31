@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
-import '../models/models.dart';
-import '../services/firebase_service.dart';
+import 'package:wiseplug/models/models.dart';
+import 'package:wiseplug/services/firebase_service.dart';
 
 class HomeTab extends StatelessWidget {
   final String deviceID;
@@ -171,7 +171,7 @@ class HomeTab extends StatelessWidget {
                       'Outlet ${profile.outlet} • ${profile.applianceType} (${profile.isOn ? 'Active' : 'Idle'})',
                     ),
                     secondary: CircleAvatar(
-                      backgroundColor: profile.color.withOpacity(0.15),
+                      backgroundColor: profile.color.withValues(alpha: 0.15),
                       child: Icon(profile.icon, color: profile.color),
                     ),
                     value: profile.isOn,

@@ -1,11 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'models.dart';
-import 'firebase_service.dart';
+import 'package:wiseplug/models/models.dart';
+import 'package:wiseplug/services/firebase_service.dart';
+import 'package:wiseplug/firebase_options.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Firebase.initializeApp(); // Connects to your wiseplug-capstone project
+
+  await Firebase.initializeApp(
+    options: DefaultFirebaseOptions.currentPlatform,
+  );
+
   runApp(const WisePlugApp());
 }
 
@@ -19,7 +24,7 @@ class WisePlugApp extends StatefulWidget {
 class _WisePlugAppState extends State<WisePlugApp> {
   bool darkMode = false;
   bool notifications = true;
-  String currentDeviceID = "DEV_WISEPLUG_001"; // WiseplugDevice primary key
+  String currentDeviceID = "DEV_WISEPLUG_001";
 
   @override
   Widget build(BuildContext context) {
@@ -45,7 +50,7 @@ class _WisePlugAppState extends State<WisePlugApp> {
   }
 }
 
-/// Represents the WiseplugDevice controller from the Class Diagram
+/// Represents the WiseplugDevice controller dashboard
 class WiseplugDeviceDashboard extends StatefulWidget {
   final String deviceID;
   final bool darkMode;
@@ -59,12 +64,90 @@ class WiseplugDeviceDashboard extends StatefulWidget {
   });
 
   @override
-  State<WiseplugDeviceDashboard> createState() => _WiseplugDeviceDashboardState();
+  State<WiseplugDeviceDashboard> createState() =>
+      _WiseplugDeviceDashboardState();
 }
 
 class _WiseplugDeviceDashboardState extends State<WiseplugDeviceDashboard> {
   final FirebaseBackendService _backend = FirebaseBackendService();
   int _currentIndex = 0;
+
+  void _showAddProfileDialog() {
+    final nameController = TextEditingController();
+    String selectedType = 'Electric Fan';
+    String selectedOutlet = 'A';
+
+    showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Add Appliance Profile'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameController,
+                decoration: const InputDecoration(
+                  labelText: 'Appliance Name',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                initialValue: selectedType,
+                decoration: const InputDecoration(
+                  labelText: 'Appliance Type',
+                  border: OutlineInputBorder(),
+                ),
+                items: ['Rice cooker', 'Flat Iron', 'Electric Fan', 'Other']
+                    .map((t) => DropdownMenuItem(value: t, child: Text(t)))
+                    .toList(),
+                onChanged: (val) {
+                  if (val != null) setDialogState(() => selectedType = val);
+                },
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                initialValue: selectedOutlet,
+                decoration: const InputDecoration(
+                  labelText: 'Assigned Outlet',
+                  border: OutlineInputBorder(),
+                ),
+                items: ['A', 'B']
+                    .map((o) => DropdownMenuItem(value: o, child: Text('Outlet $o')))
+                    .toList(),
+                onChanged: (val) {
+                  if (val != null) setDialogState(() => selectedOutlet = val);
+                },
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                if (nameController.text.trim().isNotEmpty) {
+                  final newProfile = ApplianceProfile(
+                    profileID: DateTime.now().millisecondsSinceEpoch.toString(),
+                    deviceID: widget.deviceID,
+                    applianceName: nameController.text.trim(),
+                    applianceType: selectedType,
+                    outlet: selectedOutlet,
+                  );
+                  _backend.saveProfile(newProfile);
+                  Navigator.pop(context);
+                }
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -83,13 +166,8 @@ class _WiseplugDeviceDashboardState extends State<WiseplugDeviceDashboard> {
               return IndexedStack(
                 index: _currentIndex,
                 children: [
-                  // --- Home Tab ---
                   _buildHomeScreen(profiles, activePower),
-
-                  // --- Profiles Management Tab ---
                   _buildProfilesScreen(profiles),
-
-                  // --- Settings Tab ---
                   _buildSettingsScreen(),
                 ],
               );
@@ -101,9 +179,21 @@ class _WiseplugDeviceDashboardState extends State<WiseplugDeviceDashboard> {
         selectedIndex: _currentIndex,
         onDestinationSelected: (idx) => setState(() => _currentIndex = idx),
         destinations: const [
-          NavigationDestination(icon: Icon(Icons.home_outlined), selectedIcon: Icon(Icons.home), label: 'Home'),
-          NavigationDestination(icon: Icon(Icons.tune), selectedIcon: Icon(Icons.tune), label: 'Profiles'),
-          NavigationDestination(icon: Icon(Icons.settings_outlined), selectedIcon: Icon(Icons.settings), label: 'Settings'),
+          NavigationDestination(
+            icon: Icon(Icons.home_outlined),
+            selectedIcon: Icon(Icons.home),
+            label: 'Home',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.tune),
+            selectedIcon: Icon(Icons.tune),
+            label: 'Profiles',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.settings_outlined),
+            selectedIcon: Icon(Icons.settings),
+            label: 'Settings',
+          ),
         ],
       ),
     );
@@ -119,8 +209,18 @@ class _WiseplugDeviceDashboardState extends State<WiseplugDeviceDashboard> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text('WisePlug', style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Colors.blue)),
-              IconButton(icon: const Icon(Icons.settings_outlined), onPressed: () => setState(() => _currentIndex = 2)),
+              const Text(
+                'WisePlug',
+                style: TextStyle(
+                  fontSize: 28,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.blue,
+                ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.settings_outlined),
+                onPressed: () => setState(() => _currentIndex = 2),
+              ),
             ],
           ),
           const SizedBox(height: 16),
@@ -132,7 +232,13 @@ class _WiseplugDeviceDashboardState extends State<WiseplugDeviceDashboard> {
                     padding: const EdgeInsets.all(16),
                     child: Column(
                       children: [
-                        Text('${activePower.toStringAsFixed(1)} W', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+                        Text(
+                          '${activePower.toStringAsFixed(1)} W',
+                          style: const TextStyle(
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
                         const Text('Total Draw', style: TextStyle(color: Colors.grey)),
                       ],
                     ),
@@ -146,7 +252,13 @@ class _WiseplugDeviceDashboardState extends State<WiseplugDeviceDashboard> {
                     padding: const EdgeInsets.all(16),
                     child: Column(
                       children: [
-                        Text('$activeCount Active', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+                        Text(
+                          '$activeCount Active',
+                          style: const TextStyle(
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
                         const Text('Outlets Running', style: TextStyle(color: Colors.grey)),
                       ],
                     ),
@@ -156,19 +268,24 @@ class _WiseplugDeviceDashboardState extends State<WiseplugDeviceDashboard> {
             ],
           ),
           const SizedBox(height: 20),
-          const Text('Power Control', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          const Text(
+            'Power Control',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
           const SizedBox(height: 10),
-          ...profiles.map((profile) => Card(
-                child: SwitchListTile(
-                  title: Text(profile.applianceName),
-                  subtitle: Text('Outlet ${profile.outlet} • ${profile.applianceType}'),
-                  secondary: Icon(profile.icon, color: profile.color),
-                  value: profile.isOn,
-                  onChanged: (val) {
-                    _backend.toggleAppliancePower(profile.profileID, val);
-                  },
-                ),
-              )),
+          ...profiles.map(
+            (profile) => Card(
+              child: SwitchListTile(
+                title: Text(profile.applianceName),
+                subtitle: Text('Outlet ${profile.outlet} • ${profile.applianceType}'),
+                secondary: Icon(profile.icon, color: profile.color),
+                value: profile.isOn,
+                onChanged: (val) {
+                  _backend.toggleAppliancePower(profile.profileID, val);
+                },
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -176,42 +293,54 @@ class _WiseplugDeviceDashboardState extends State<WiseplugDeviceDashboard> {
 
   Widget _buildProfilesScreen(List<ApplianceProfile> profiles) {
     return SafeArea(
-      child: ListView(
-        padding: const EdgeInsets.all(18),
+      child: Column(
         children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text('Appliance Profiles', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-              IconButton(
-                icon: const Icon(Icons.add_circle_outline, color: Colors.blue, size: 28),
-                onPressed: () {
-                  // Prompt to register a new profile
-                  _backend.saveProfile(
-                    ApplianceProfile(
-                      profileID: '',
-                      deviceID: widget.deviceID,
-                      applianceName: 'New Device',
-                      applianceType: 'Electric Fan',
-                      outlet: 'A',
-                    ),
-                  );
-                },
-              )
-            ],
-          ),
-          const SizedBox(height: 16),
-          ...profiles.map((profile) => Card(
-                child: ListTile(
-                  leading: Icon(profile.icon, color: profile.color),
-                  title: Text(profile.applianceName),
-                  subtitle: Text('Threshold: ${profile.thresholdWattage}W | Safety Limit: ${profile.safetyCeilingDuration}m'),
-                  trailing: IconButton(
-                    icon: const Icon(Icons.delete_outline, color: Colors.red),
-                    onPressed: () => _backend.removeProfile(profile.profileID),
-                  ),
+          Padding(
+            padding: const EdgeInsets.all(18),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  'Appliance Profiles',
+                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
                 ),
-              )),
+                IconButton(
+                  icon: const Icon(
+                    Icons.add_circle_outline,
+                    color: Colors.blue,
+                    size: 28,
+                  ),
+                  onPressed: _showAddProfileDialog,
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: profiles.isEmpty
+                ? const Center(child: Text('No appliance profiles registered.'))
+                : ListView.builder(
+                    padding: const EdgeInsets.symmetric(horizontal: 18),
+                    itemCount: profiles.length,
+                    itemBuilder: (context, index) {
+                      final profile = profiles[index];
+                      return Card(
+                        margin: const EdgeInsets.only(bottom: 10),
+                        child: ListTile(
+                          leading: Icon(profile.icon, color: profile.color),
+                          title: Text(profile.applianceName),
+                          subtitle: Text(
+                            'Threshold: ${profile.thresholdWattage}W | Safety Limit: ${profile.safetyCeilingDuration}m',
+                          ),
+                          trailing: IconButton(
+                            icon: const Icon(Icons.delete_outline, color: Colors.red),
+                            onPressed: () =>
+                                _backend.removeProfile(profile.profileID),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
         ],
       ),
     );
@@ -222,7 +351,10 @@ class _WiseplugDeviceDashboardState extends State<WiseplugDeviceDashboard> {
       child: ListView(
         padding: const EdgeInsets.all(18),
         children: [
-          const Text('Settings', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+          const Text(
+            'Settings',
+            style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+          ),
           const SizedBox(height: 16),
           Card(
             child: SwitchListTile(

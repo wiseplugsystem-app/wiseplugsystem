@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
-import '../models/models.dart';
-import '../services/firebase_service.dart';
+import 'package:wiseplug/models/models.dart';
+import 'package:wiseplug/services/firebase_service.dart';
 
 class ProfilesTab extends StatefulWidget {
   final String deviceID;
@@ -43,7 +43,7 @@ class _ProfilesTabState extends State<ProfilesTab> {
               ),
               const SizedBox(height: 12),
               DropdownButtonFormField<String>(
-                value: selectedType,
+                initialValue: selectedType,
                 decoration: const InputDecoration(
                   labelText: 'Appliance Type',
                   border: OutlineInputBorder(),
@@ -51,11 +51,13 @@ class _ProfilesTabState extends State<ProfilesTab> {
                 items: ['Rice cooker', 'Flat Iron', 'Electric Fan', 'Other']
                     .map((t) => DropdownMenuItem(value: t, child: Text(t)))
                     .toList(),
-                onChanged: (val) => setDialogState(() => selectedType = val!),
+                onChanged: (val) {
+                  if (val != null) setDialogState(() => selectedType = val);
+                },
               ),
               const SizedBox(height: 12),
               DropdownButtonFormField<String>(
-                value: selectedOutlet,
+                initialValue: selectedOutlet,
                 decoration: const InputDecoration(
                   labelText: 'Assigned Outlet',
                   border: OutlineInputBorder(),
@@ -63,7 +65,9 @@ class _ProfilesTabState extends State<ProfilesTab> {
                 items: ['A', 'B']
                     .map((o) => DropdownMenuItem(value: o, child: Text('Outlet $o')))
                     .toList(),
-                onChanged: (val) => setDialogState(() => selectedOutlet = val!),
+                onChanged: (val) {
+                  if (val != null) setDialogState(() => selectedOutlet = val);
+                },
               ),
             ],
           ),
@@ -74,11 +78,11 @@ class _ProfilesTabState extends State<ProfilesTab> {
             ),
             ElevatedButton(
               onPressed: () {
-                if (nameController.text.isNotEmpty) {
+                if (nameController.text.trim().isNotEmpty) {
                   final newProfile = ApplianceProfile(
-                    profileID: '',
+                    profileID: DateTime.now().millisecondsSinceEpoch.toString(),
                     deviceID: widget.deviceID,
-                    applianceName: nameController.text,
+                    applianceName: nameController.text.trim(),
                     applianceType: selectedType,
                     outlet: selectedOutlet,
                   );
@@ -147,8 +151,13 @@ class _ProfilesTabState extends State<ProfilesTab> {
                         margin: const EdgeInsets.only(bottom: 12),
                         child: ListTile(
                           leading: Icon(profile.icon, color: profile.color, size: 30),
-                          title: Text(profile.applianceName, style: const TextStyle(fontWeight: FontWeight.bold)),
-                          subtitle: Text('Threshold: ${profile.thresholdWattage}W | Safety Limit: ${profile.safetyCeilingDuration}m'),
+                          title: Text(
+                            profile.applianceName,
+                            style: const TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                          subtitle: Text(
+                            'Threshold: ${profile.thresholdWattage}W | Safety Limit: ${profile.safetyCeilingDuration}m',
+                          ),
                           trailing: IconButton(
                             icon: const Icon(Icons.delete_outline, color: Colors.red),
                             onPressed: () => widget.backend.removeProfile(profile.profileID),

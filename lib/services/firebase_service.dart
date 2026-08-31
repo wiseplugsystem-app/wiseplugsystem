@@ -1,5 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'models.dart';
+import '../models/models.dart';
 
 class FirebaseBackendService {
   final FirebaseFirestore _db = FirebaseFirestore.instance;
@@ -17,31 +17,53 @@ class FirebaseBackendService {
   }
 
   Future<void> saveProfile(ApplianceProfile profile) async {
-    if (profile.profileID.isEmpty) {
-      final docRef = _db.collection('applianceProfiles').doc();
+  try {
+    DocumentReference docRef;
+    if (profile.profileID.trim().isEmpty) {
+      // Auto-generate doc ID from Firestore if empty
+      docRef = _db.collection('applianceProfiles').doc();
       profile.profileID = docRef.id;
-      await docRef.set(profile.toMap());
     } else {
-      await _db
-          .collection('applianceProfiles')
-          .doc(profile.profileID)
-          .update(profile.toMap());
+      docRef = _db.collection('applianceProfiles').doc(profile.profileID);
+    }
+
+    // Use .set with merge: true to safely handle BOTH new documents and updates
+    await docRef.set(profile.toFirestore(), SetOptions(merge: true));
+    print("✅ [Firestore] Profile saved successfully: ${profile.applianceName} (ID: ${profile.profileID})");
+  } catch (e) {
+    print("❌ [Firestore Error] Failed to save profile: $e");
+    rethrow;
+  }
+}
+
+  Future<void> editProfile(String profileID, Map<String, dynamic> updates) async {
+    try {
+      await _db.collection('applianceProfiles').doc(profileID).update(updates);
+      print("✅ [Firestore] Updated profile $profileID");
+    } catch (e) {
+      print("❌ [Firestore Error] Failed to edit profile: $e");
     }
   }
 
-  Future<void> editProfile(String profileID, Map<String, dynamic> updates) async {
-    await _db.collection('applianceProfiles').doc(profileID).update(updates);
-  }
-
   Future<void> removeProfile(String profileID) async {
-    await _db.collection('applianceProfiles').doc(profileID).delete();
+    try {
+      await _db.collection('applianceProfiles').doc(profileID).delete();
+      print("🗑️ [Firestore] Removed profile $profileID");
+    } catch (e) {
+      print("❌ [Firestore Error] Failed to delete profile: $e");
+    }
   }
 
   Future<void> toggleAppliancePower(String profileID, bool isOn) async {
-    await _db
-        .collection('applianceProfiles')
-        .doc(profileID)
-        .update({'isOn': isOn});
+    try {
+      await _db
+          .collection('applianceProfiles')
+          .doc(profileID)
+          .update({'isOn': isOn});
+      print("⚡ [Firestore] Toggled power for $profileID -> isOn: $isOn");
+    } catch (e) {
+      print("❌ [Firestore Error] Failed to toggle power: $e");
+    }
   }
 
   // --- Telemetry & Sensor Streaming ---
@@ -76,12 +98,18 @@ class FirebaseBackendService {
   }
 
   Future<void> requestSmartOverride(SmartOverride override) async {
-    // Record the override request
-    await _db.collection('smartOverrides').doc(override.overrideID).set(override.toMap());
-    
-    // Resolve the triggered anomaly alert
-    await _db.collection('anomalyAlerts').doc(override.alertID).update({
-      'resolution': 'Extended by User (${override.extensionDuration} mins)',
-    });
+    try {
+      await _db
+          .collection('smartOverrides')
+          .doc(override.overrideID)
+          .set(override.toMap());
+
+      await _db.collection('anomalyAlerts').doc(override.alertID).update({
+        'resolution': 'Extended by User (${override.extensionDuration} mins)',
+      });
+      print("🛡️ [Firestore] Override registered for alert: ${override.alertID}");
+    } catch (e) {
+      print("❌ [Firestore Error] Failed to execute override: $e");
+    }
   }
 }

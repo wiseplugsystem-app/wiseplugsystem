@@ -1,3 +1,4 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 
 /// User Class matching Class Diagram specifications
@@ -28,6 +29,7 @@ class WiseUser {
     };
   }
 }
+
 
 /// ApplianceProfile Class matching Class Diagram specifications
 class ApplianceProfile {
@@ -70,7 +72,10 @@ class ApplianceProfile {
     );
   }
 
-  Map<String, dynamic> toMap() {
+  factory ApplianceProfile.fromFirestore(Map<String, dynamic> map, String id) =>
+      ApplianceProfile.fromMap(map, id);
+
+  Map<String, dynamic> toFirestore() {
     return {
       'profileID': profileID,
       'deviceID': deviceID,
@@ -84,6 +89,9 @@ class ApplianceProfile {
       'outlet': outlet,
     };
   }
+
+  // Added alias toMap() in case your service calls toMap()
+  Map<String, dynamic> toMap() => toFirestore();
 
   IconData get icon {
     switch (applianceType) {
@@ -131,17 +139,27 @@ class TelemetryLog {
   });
 
   factory TelemetryLog.fromMap(Map<String, dynamic> map, String id) {
+    DateTime parsedTimestamp = DateTime.now();
+    if (map['timestamp'] != null) {
+      if (map['timestamp'] is Timestamp) {
+        parsedTimestamp = (map['timestamp'] as Timestamp).toDate();
+      } else if (map['timestamp'] is String) {
+        parsedTimestamp = DateTime.tryParse(map['timestamp']) ?? DateTime.now();
+      }
+    }
+
     return TelemetryLog(
       logID: id,
       deviceID: map['deviceID'] ?? '',
-      voltage: (map['voltage'] ?? 0).toDouble(),
-      current: (map['current'] ?? 0).toDouble(),
-      activePower: (map['activePower'] ?? 0).toDouble(),
-      timestamp: map['timestamp'] != null
-          ? DateTime.parse(map['timestamp'])
-          : DateTime.now(),
+      voltage: (map['voltage'] as num?)?.toDouble() ?? 0.0,
+      current: (map['current'] as num?)?.toDouble() ?? 0.0,
+      activePower: (map['activePower'] as num?)?.toDouble() ?? 0.0,
+      timestamp: parsedTimestamp,
     );
   }
+
+  factory TelemetryLog.fromFirestore(Map<String, dynamic> map, String id) =>
+      TelemetryLog.fromMap(map, id);
 
   Map<String, dynamic> toMap() {
     return {
@@ -153,6 +171,8 @@ class TelemetryLog {
       'timestamp': timestamp.toIso8601String(),
     };
   }
+
+  Map<String, dynamic> toFirestore() => toMap();
 }
 
 /// AnomalyAlert Class matching Class Diagram specifications
@@ -174,19 +194,26 @@ class AnomalyAlert {
   });
 
   factory AnomalyAlert.fromMap(Map<String, dynamic> map, String id) {
+    DateTime parseDate(dynamic raw) {
+      if (raw is Timestamp) return raw.toDate();
+      if (raw is String) return DateTime.tryParse(raw) ?? DateTime.now();
+      return DateTime.now();
+    }
+
     return AnomalyAlert(
       alertID: id,
       deviceID: map['deviceID'] ?? '',
       alertType: map['alertType'] ?? 'General Anomaly',
-      triggerTime: map['triggerTime'] != null
-          ? DateTime.parse(map['triggerTime'])
-          : DateTime.now(),
+      triggerTime: parseDate(map['triggerTime']),
       countdownExpiry: map['countdownExpiry'] != null
-          ? DateTime.parse(map['countdownExpiry'])
+          ? parseDate(map['countdownExpiry'])
           : DateTime.now().add(const Duration(minutes: 5)),
       resolution: map['resolution'] ?? 'Pending',
     );
   }
+
+  factory AnomalyAlert.fromFirestore(Map<String, dynamic> map, String id) =>
+      AnomalyAlert.fromMap(map, id);
 
   Map<String, dynamic> toMap() {
     return {
@@ -198,6 +225,8 @@ class AnomalyAlert {
       'resolution': resolution,
     };
   }
+
+  Map<String, dynamic> toFirestore() => toMap();
 }
 
 /// SmartOverride Class matching Class Diagram specifications
@@ -214,6 +243,18 @@ class SmartOverride {
     required this.extensionDuration,
   });
 
+  factory SmartOverride.fromMap(Map<String, dynamic> map, String id) {
+    return SmartOverride(
+      overrideID: id,
+      alertID: map['alertID'] ?? '',
+      userID: map['userID'] ?? '',
+      extensionDuration: (map['extensionDuration'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  factory SmartOverride.fromFirestore(Map<String, dynamic> map, String id) =>
+      SmartOverride.fromMap(map, id);
+
   Map<String, dynamic> toMap() {
     return {
       'overrideID': overrideID,
@@ -222,4 +263,6 @@ class SmartOverride {
       'extensionDuration': extensionDuration,
     };
   }
+
+  Map<String, dynamic> toFirestore() => toMap();
 }
