@@ -1,5 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
-import '../models/models.dart';
+import 'models.dart';
 
 class FirebaseBackendService {
   final FirebaseFirestore _db = FirebaseFirestore.instance;

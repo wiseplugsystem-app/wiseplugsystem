@@ -43,7 +43,7 @@ class _ProfilesTabState extends State<ProfilesTab> {
               ),
               const SizedBox(height: 12),
               DropdownButtonFormField<String>(
-                initialValue: selectedType,
+                value: selectedType,
                 decoration: const InputDecoration(
                   labelText: 'Appliance Type',
                   border: OutlineInputBorder(),
@@ -55,7 +55,7 @@ class _ProfilesTabState extends State<ProfilesTab> {
               ),
               const SizedBox(height: 12),
               DropdownButtonFormField<String>(
-                initialValue: selectedOutlet,
+                value: selectedOutlet,
                 decoration: const InputDecoration(
                   labelText: 'Assigned Outlet',
                   border: OutlineInputBorder(),
