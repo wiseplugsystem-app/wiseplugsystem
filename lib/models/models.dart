@@ -30,7 +30,6 @@ class WiseUser {
   }
 }
 
-
 /// ApplianceProfile Class matching Class Diagram specifications
 class ApplianceProfile {
   String profileID;
@@ -43,6 +42,7 @@ class ApplianceProfile {
   int safetyCeilingDuration; // in minutes
   bool isOn;
   String outlet;
+  DateTime? startTime;
 
   ApplianceProfile({
     required this.profileID,
@@ -55,9 +55,19 @@ class ApplianceProfile {
     this.safetyCeilingDuration = 180,
     this.isOn = false,
     required this.outlet,
+    this.startTime,
   });
 
   factory ApplianceProfile.fromMap(Map<String, dynamic> map, String id) {
+    DateTime? parsedStartTime;
+    if (map['startTime'] != null) {
+      if (map['startTime'] is Timestamp) {
+        parsedStartTime = (map['startTime'] as Timestamp).toDate();
+      } else if (map['startTime'] is String) {
+        parsedStartTime = DateTime.tryParse(map['startTime']);
+      }
+    }
+
     return ApplianceProfile(
       profileID: id,
       deviceID: map['deviceID'] ?? '',
@@ -69,11 +79,40 @@ class ApplianceProfile {
       safetyCeilingDuration: map['safetyCeilingDuration'] ?? 180,
       isOn: map['isOn'] ?? false,
       outlet: map['outlet'] ?? 'A',
+      startTime: parsedStartTime,
     );
   }
 
   factory ApplianceProfile.fromFirestore(Map<String, dynamic> map, String id) =>
       ApplianceProfile.fromMap(map, id);
+
+  ApplianceProfile copyWith({
+    String? profileID,
+    String? deviceID,
+    String? applianceName,
+    String? applianceType,
+    double? baselineWattage,
+    double? thresholdWattage,
+    int? maxRunTime,
+    int? safetyCeilingDuration,
+    bool? isOn,
+    String? outlet,
+    DateTime? startTime,
+  }) {
+    return ApplianceProfile(
+      profileID: profileID ?? this.profileID,
+      deviceID: deviceID ?? this.deviceID,
+      applianceName: applianceName ?? this.applianceName,
+      applianceType: applianceType ?? this.applianceType,
+      baselineWattage: baselineWattage ?? this.baselineWattage,
+      thresholdWattage: thresholdWattage ?? this.thresholdWattage,
+      maxRunTime: maxRunTime ?? this.maxRunTime,
+      safetyCeilingDuration: safetyCeilingDuration ?? this.safetyCeilingDuration,
+      isOn: isOn ?? this.isOn,
+      outlet: outlet ?? this.outlet,
+      startTime: startTime ?? this.startTime,
+    );
+  }
 
   Map<String, dynamic> toFirestore() {
     return {
@@ -87,10 +126,10 @@ class ApplianceProfile {
       'safetyCeilingDuration': safetyCeilingDuration,
       'isOn': isOn,
       'outlet': outlet,
+      'startTime': startTime?.toIso8601String(),
     };
   }
 
-  // Added alias toMap() in case your service calls toMap()
   Map<String, dynamic> toMap() => toFirestore();
 
   IconData get icon {
@@ -98,6 +137,7 @@ class ApplianceProfile {
       case 'Rice cooker':
         return Icons.rice_bowl;
       case 'Flat Iron':
+      case 'Flat iron / hair straightener':
         return Icons.iron;
       case 'Electric Fan':
         return Icons.air;
@@ -111,6 +151,7 @@ class ApplianceProfile {
       case 'Rice cooker':
         return Colors.green;
       case 'Flat Iron':
+      case 'Flat iron / hair straightener':
         return Colors.deepOrange;
       case 'Electric Fan':
         return Colors.blue;
@@ -178,6 +219,7 @@ class TelemetryLog {
 /// AnomalyAlert Class matching Class Diagram specifications
 class AnomalyAlert {
   final String alertID;
+  final String profileID;
   final String deviceID;
   final String alertType;
   final DateTime triggerTime;
@@ -186,6 +228,7 @@ class AnomalyAlert {
 
   AnomalyAlert({
     required this.alertID,
+    this.profileID = '',
     required this.deviceID,
     required this.alertType,
     required this.triggerTime,
@@ -202,6 +245,7 @@ class AnomalyAlert {
 
     return AnomalyAlert(
       alertID: id,
+      profileID: map['profileID'] ?? '',
       deviceID: map['deviceID'] ?? '',
       alertType: map['alertType'] ?? 'General Anomaly',
       triggerTime: parseDate(map['triggerTime']),
@@ -218,6 +262,7 @@ class AnomalyAlert {
   Map<String, dynamic> toMap() {
     return {
       'alertID': alertID,
+      'profileID': profileID,
       'deviceID': deviceID,
       'alertType': alertType,
       'triggerTime': triggerTime.toIso8601String(),
@@ -265,4 +310,37 @@ class SmartOverride {
   }
 
   Map<String, dynamic> toFirestore() => toMap();
+}
+
+/// DetectedAppliance Class matching real-time pattern detection
+class DetectedAppliance {
+  final String outlet;
+  final double estimatedWattage;
+  final String signature;
+  final String? suggestedType;
+
+  DetectedAppliance({
+    required this.outlet,
+    required this.estimatedWattage,
+    required this.signature,
+    this.suggestedType,
+  });
+
+  factory DetectedAppliance.fromMap(Map<String, dynamic> map, String id) {
+    return DetectedAppliance(
+      outlet: map['outlet']?.toString() ?? 'A',
+      estimatedWattage: (map['estimatedWattage'] as num?)?.toDouble() ?? 0.0,
+      signature: map['signature'] ?? '',
+      suggestedType: map['suggestedType'],
+    );
+  }
+
+  Map<String, dynamic> toMap() {
+    return {
+      'outlet': outlet,
+      'estimatedWattage': estimatedWattage,
+      'signature': signature,
+      'suggestedType': suggestedType,
+    };
+  }
 }

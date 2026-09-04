@@ -12,6 +12,8 @@ class SettingsTab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
     return SafeArea(
       child: ListView(
         padding: const EdgeInsets.all(18),
@@ -22,6 +24,11 @@ class SettingsTab extends StatelessWidget {
           ),
           const SizedBox(height: 20),
           Card(
+            elevation: 0,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+              side: BorderSide(color: isDark ? Colors.grey.shade800 : Colors.grey.shade300),
+            ),
             child: Column(
               children: [
                 SwitchListTile(
@@ -32,21 +39,21 @@ class SettingsTab extends StatelessWidget {
                 ),
                 const Divider(height: 1),
                 const ListTile(
-                  leading: Icon(Icons.wifi),
+                  leading: Icon(Icons.wifi, color: Colors.blue),
                   title: Text('Connected Device'),
                   subtitle: Text('WisePlug Dual Outlet'),
                   trailing: Icon(Icons.check_circle, color: Colors.green),
                 ),
                 const Divider(height: 1),
                 const ListTile(
-                  leading: Icon(Icons.security),
+                  leading: Icon(Icons.security, color: Colors.blue),
                   title: Text('Safety Ceiling Protection'),
                   subtitle: Text('Auto shut-off enabled on limit breach'),
                   trailing: Icon(Icons.shield, color: Colors.blue),
                 ),
                 const Divider(height: 1),
                 const ListTile(
-                  leading: Icon(Icons.info_outline),
+                  leading: Icon(Icons.info_outline, color: Colors.blue),
                   title: Text('App Version'),
                   subtitle: Text('v1.0.0'),
                 ),

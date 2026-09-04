@@ -1,4 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart';
 import '../models/models.dart';
 
 class FirebaseBackendService {
@@ -17,40 +18,41 @@ class FirebaseBackendService {
   }
 
   Future<void> saveProfile(ApplianceProfile profile) async {
-  try {
-    DocumentReference docRef;
-    if (profile.profileID.trim().isEmpty) {
-      // Auto-generate doc ID from Firestore if empty
-      docRef = _db.collection('applianceProfiles').doc();
-      profile.profileID = docRef.id;
-    } else {
-      docRef = _db.collection('applianceProfiles').doc(profile.profileID);
-    }
+    try {
+      DocumentReference docRef;
+      if (profile.profileID.trim().isEmpty) {
+        docRef = _db.collection('applianceProfiles').doc();
+        profile.profileID = docRef.id;
+      } else {
+        docRef = _db.collection('applianceProfiles').doc(profile.profileID);
+      }
 
-    // Use .set with merge: true to safely handle BOTH new documents and updates
-    await docRef.set(profile.toFirestore(), SetOptions(merge: true));
-    print("✅ [Firestore] Profile saved successfully: ${profile.applianceName} (ID: ${profile.profileID})");
-  } catch (e) {
-    print("❌ [Firestore Error] Failed to save profile: $e");
-    rethrow;
+      final data = profile.toFirestore();
+      data['profileID'] = profile.profileID;
+
+      await docRef.set(data, SetOptions(merge: true));
+      debugPrint("✅ [Firestore] Profile saved successfully: ${profile.applianceName} (ID: ${profile.profileID})");
+    } catch (e) {
+      debugPrint("❌ [Firestore Error] Failed to save profile: $e");
+      rethrow;
+    }
   }
-}
 
   Future<void> editProfile(String profileID, Map<String, dynamic> updates) async {
     try {
       await _db.collection('applianceProfiles').doc(profileID).update(updates);
-      print("✅ [Firestore] Updated profile $profileID");
+      debugPrint("✅ [Firestore] Updated profile $profileID");
     } catch (e) {
-      print("❌ [Firestore Error] Failed to edit profile: $e");
+      debugPrint("❌ [Firestore Error] Failed to edit profile: $e");
     }
   }
 
   Future<void> removeProfile(String profileID) async {
     try {
       await _db.collection('applianceProfiles').doc(profileID).delete();
-      print("🗑️ [Firestore] Removed profile $profileID");
+      debugPrint("🗑️ [Firestore] Removed profile $profileID");
     } catch (e) {
-      print("❌ [Firestore Error] Failed to delete profile: $e");
+      debugPrint("❌ [Firestore Error] Failed to delete profile: $e");
     }
   }
 
@@ -60,9 +62,9 @@ class FirebaseBackendService {
           .collection('applianceProfiles')
           .doc(profileID)
           .update({'isOn': isOn});
-      print("⚡ [Firestore] Toggled power for $profileID -> isOn: $isOn");
+      debugPrint("⚡ [Firestore] Toggled power for $profileID -> isOn: $isOn");
     } catch (e) {
-      print("❌ [Firestore Error] Failed to toggle power: $e");
+      debugPrint("❌ [Firestore Error] Failed to toggle power: $e");
     }
   }
 
@@ -107,9 +109,41 @@ class FirebaseBackendService {
       await _db.collection('anomalyAlerts').doc(override.alertID).update({
         'resolution': 'Extended by User (${override.extensionDuration} mins)',
       });
-      print("🛡️ [Firestore] Override registered for alert: ${override.alertID}");
+      debugPrint("🛡️ [Firestore] Override registered for alert: ${override.alertID}");
     } catch (e) {
-      print("❌ [Firestore Error] Failed to execute override: $e");
+      debugPrint("❌ [Firestore Error] Failed to execute override: $e");
+    }
+  }
+
+  Future<void> acknowledgeShutdown(String alertID) async {
+    try {
+      await _db.collection('anomalyAlerts').doc(alertID).update({
+        'resolution': 'Acknowledged Shutdown',
+      });
+      debugPrint("✅ [Firestore] Acknowledged shutdown for alert: $alertID");
+    } catch (e) {
+      debugPrint("❌ [Firestore Error] Failed to acknowledge shutdown: $e");
+    }
+  }
+
+  // --- Pattern Detection Stream & Dismissal ---
+
+  Stream<List<DetectedAppliance>> streamDetectedAppliances(String deviceID) {
+    return _db
+        .collection('detectedAppliances')
+        .where('deviceID', isEqualTo: deviceID)
+        .snapshots()
+        .map((snapshot) => snapshot.docs
+            .map((doc) => DetectedAppliance.fromMap(doc.data(), doc.id))
+            .toList());
+  }
+
+  Future<void> dismissDetectedAppliance(String signature) async {
+    try {
+      await _db.collection('detectedAppliances').doc(signature).delete();
+      debugPrint("🗑️ [Firestore] Dismissed pattern: $signature");
+    } catch (e) {
+      debugPrint("❌ [Firestore Error] Failed to dismiss pattern: $e");
     }
   }
 }
