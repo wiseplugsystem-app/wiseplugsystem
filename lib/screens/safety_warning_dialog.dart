@@ -1,4 +1,5 @@
 import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:wiseplug/models/models.dart';
 import 'package:wiseplug/services/firebase_service.dart';
@@ -12,7 +13,11 @@ class SafetyWarningDialog extends StatefulWidget {
   final AnomalyAlert alert;
   final FirebaseBackendService backend;
 
-  const SafetyWarningDialog({super.key, required this.alert, required this.backend});
+  const SafetyWarningDialog({
+    super.key,
+    required this.alert,
+    required this.backend,
+  });
 
   @override
   State<SafetyWarningDialog> createState() => _SafetyWarningDialogState();
@@ -21,6 +26,7 @@ class SafetyWarningDialog extends StatefulWidget {
 class _SafetyWarningDialogState extends State<SafetyWarningDialog> {
   Timer? _timer;
   late int _secondsRemaining;
+  bool _busy = false;
 
   @override
   void initState() {
@@ -38,7 +44,9 @@ class _SafetyWarningDialogState extends State<SafetyWarningDialog> {
   }
 
   int _computeSecondsRemaining() {
-    final diff = widget.alert.countdownExpiry.difference(DateTime.now()).inSeconds;
+    final diff = widget.alert.countdownExpiry
+        .difference(DateTime.now())
+        .inSeconds;
     return diff < 0 ? 0 : diff;
   }
 
@@ -54,15 +62,34 @@ class _SafetyWarningDialogState extends State<SafetyWarningDialog> {
     if (mounted) Navigator.of(context).pop();
   }
 
-  void _override() {
-    final override = SmartOverride(
-      overrideID: DateTime.now().millisecondsSinceEpoch.toString(),
-      alertID: widget.alert.alertID,
-      userID: 'USER_001',
-      extensionDuration: 15,
-    );
-    widget.backend.requestSmartOverride(override);
-    if (mounted) Navigator.of(context).pop();
+  Future<void> _override() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      final user = await widget.backend.loadConfiguredUser(
+        widget.alert.deviceID,
+      );
+      if (!mounted || _computeSecondsRemaining() <= 0) return;
+      if (user == null) {
+        throw StateError('No user is configured for this device.');
+      }
+      await widget.backend.requestSmartOverride(
+        SmartOverride(
+          overrideID: DateTime.now().microsecondsSinceEpoch.toString(),
+          alertID: widget.alert.alertID,
+          userID: user.userID,
+          extensionDuration: 15,
+        ),
+      );
+      if (mounted) Navigator.of(context).pop();
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Override failed: $error')));
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
   }
 
   @override
@@ -85,22 +112,43 @@ class _SafetyWarningDialogState extends State<SafetyWarningDialog> {
                 ),
                 child: const Column(
                   children: [
-                    Icon(Icons.warning_amber_rounded, color: Colors.white, size: 32),
+                    Icon(
+                      Icons.warning_amber_rounded,
+                      color: Colors.white,
+                      size: 32,
+                    ),
                     SizedBox(height: 6),
                     Text(
                       'WARNING',
-                      style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold),
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 22,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
                     Text(
                       'Safety Limit Exceeded!',
-                      style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w600),
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                   ],
                 ),
               ),
               const SizedBox(height: 28),
-              Text('$_secondsRemaining', style: const TextStyle(fontSize: 56, fontWeight: FontWeight.bold)),
-              const Text('Seconds Remaining', style: TextStyle(color: Colors.grey)),
+              Text(
+                '$_secondsRemaining',
+                style: const TextStyle(
+                  fontSize: 56,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const Text(
+                'Seconds Remaining',
+                style: TextStyle(color: Colors.grey),
+              ),
               const SizedBox(height: 20),
               const Text(
                 'Are you still using the Appliance?',
@@ -117,7 +165,9 @@ class _SafetyWarningDialogState extends State<SafetyWarningDialog> {
                         foregroundColor: Colors.black87,
                         elevation: 0,
                         padding: const EdgeInsets.symmetric(vertical: 14),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
                       ),
                       onPressed: _turnOffNow,
                       child: const Text('Turn Off Now'),
@@ -131,9 +181,11 @@ class _SafetyWarningDialogState extends State<SafetyWarningDialog> {
                         foregroundColor: Colors.black87,
                         elevation: 0,
                         padding: const EdgeInsets.symmetric(vertical: 14),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
                       ),
-                      onPressed: _override,
+                      onPressed: _busy ? null : _override,
                       child: const Text('Yes, Override'),
                     ),
                   ),

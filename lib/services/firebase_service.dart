@@ -1,9 +1,21 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
+
 import '../models/models.dart';
 
 class FirebaseBackendService {
   final FirebaseFirestore _db = FirebaseFirestore.instance;
+
+  Future<User?> loadConfiguredUser(String deviceID) async {
+    const userID = String.fromEnvironment('WISEPLUG_USER_ID');
+    if (userID.isEmpty) return null;
+    final deviceDoc = await _db.collection('devices').doc(deviceID).get();
+    if (!deviceDoc.exists) return null;
+    final device = WiseplugDevice.fromMap(deviceDoc.data()!, deviceDoc.id);
+    if (device.userID != userID) return null;
+    final userDoc = await _db.collection('users').doc(userID).get();
+    return userDoc.exists ? User.fromMap(userDoc.data()!, userDoc.id) : null;
+  }
 
   // --- Appliance Profile Methods ---
 
@@ -12,9 +24,11 @@ class FirebaseBackendService {
         .collection('applianceProfiles')
         .where('deviceID', isEqualTo: deviceID)
         .snapshots()
-        .map((snapshot) => snapshot.docs
-            .map((doc) => ApplianceProfile.fromMap(doc.data(), doc.id))
-            .toList());
+        .map(
+          (snapshot) => snapshot.docs
+              .map((doc) => ApplianceProfile.fromMap(doc.data(), doc.id))
+              .toList(),
+        );
   }
 
   Future<void> saveProfile(ApplianceProfile profile) async {
@@ -31,14 +45,19 @@ class FirebaseBackendService {
       data['profileID'] = profile.profileID;
 
       await docRef.set(data, SetOptions(merge: true));
-      debugPrint("✅ [Firestore] Profile saved successfully: ${profile.applianceName} (ID: ${profile.profileID})");
+      debugPrint(
+        "✅ [Firestore] Profile saved successfully: ${profile.applianceName} (ID: ${profile.profileID})",
+      );
     } catch (e) {
       debugPrint("❌ [Firestore Error] Failed to save profile: $e");
       rethrow;
     }
   }
 
-  Future<void> editProfile(String profileID, Map<String, dynamic> updates) async {
+  Future<void> editProfile(
+    String profileID,
+    Map<String, dynamic> updates,
+  ) async {
     try {
       await _db.collection('applianceProfiles').doc(profileID).update(updates);
       debugPrint("✅ [Firestore] Updated profile $profileID");
@@ -58,10 +77,10 @@ class FirebaseBackendService {
 
   Future<void> toggleAppliancePower(String profileID, bool isOn) async {
     try {
-      await _db
-          .collection('applianceProfiles')
-          .doc(profileID)
-          .update({'isOn': isOn});
+      await _db.collection('applianceProfiles').doc(profileID).update({
+        'isOn': isOn,
+        'startTime': isOn ? FieldValue.serverTimestamp() : null,
+      });
       debugPrint("⚡ [Firestore] Toggled power for $profileID -> isOn: $isOn");
     } catch (e) {
       debugPrint("❌ [Firestore Error] Failed to toggle power: $e");
@@ -78,12 +97,14 @@ class FirebaseBackendService {
         .limit(1)
         .snapshots()
         .map((snapshot) {
-      if (snapshot.docs.isNotEmpty) {
-        return TelemetryLog.fromMap(
-            snapshot.docs.first.data(), snapshot.docs.first.id);
-      }
-      return null;
-    });
+          if (snapshot.docs.isNotEmpty) {
+            return TelemetryLog.fromMap(
+              snapshot.docs.first.data(),
+              snapshot.docs.first.id,
+            );
+          }
+          return null;
+        });
   }
 
   // --- Anomaly Alert & Smart Override Methods ---
@@ -94,13 +115,16 @@ class FirebaseBackendService {
         .where('deviceID', isEqualTo: deviceID)
         .where('resolution', isEqualTo: 'Pending')
         .snapshots()
-        .map((snapshot) => snapshot.docs
-            .map((doc) => AnomalyAlert.fromMap(doc.data(), doc.id))
-            .toList());
+        .map(
+          (snapshot) => snapshot.docs
+              .map((doc) => AnomalyAlert.fromMap(doc.data(), doc.id))
+              .toList(),
+        );
   }
 
   Future<void> requestSmartOverride(SmartOverride override) async {
     try {
+      if (override.userID.isEmpty) throw StateError('A user is required.');
       await _db
           .collection('smartOverrides')
           .doc(override.overrideID)
@@ -109,9 +133,12 @@ class FirebaseBackendService {
       await _db.collection('anomalyAlerts').doc(override.alertID).update({
         'resolution': 'Extended by User (${override.extensionDuration} mins)',
       });
-      debugPrint("🛡️ [Firestore] Override registered for alert: ${override.alertID}");
+      debugPrint(
+        "🛡️ [Firestore] Override registered for alert: ${override.alertID}",
+      );
     } catch (e) {
       debugPrint("❌ [Firestore Error] Failed to execute override: $e");
+      rethrow;
     }
   }
 
@@ -126,16 +153,18 @@ class FirebaseBackendService {
     }
   }
 
-  // --- Pattern Detection Stream & Dismissal ---
+  // --- Pattern Detection Stream, Dismissal & Command Dispatch ---
 
   Stream<List<DetectedAppliance>> streamDetectedAppliances(String deviceID) {
     return _db
         .collection('detectedAppliances')
         .where('deviceID', isEqualTo: deviceID)
         .snapshots()
-        .map((snapshot) => snapshot.docs
-            .map((doc) => DetectedAppliance.fromMap(doc.data(), doc.id))
-            .toList());
+        .map(
+          (snapshot) => snapshot.docs
+              .map((doc) => DetectedAppliance.fromMap(doc.data(), doc.id))
+              .toList(),
+        );
   }
 
   Future<void> dismissDetectedAppliance(String signature) async {
@@ -144,6 +173,22 @@ class FirebaseBackendService {
       debugPrint("🗑️ [Firestore] Dismissed pattern: $signature");
     } catch (e) {
       debugPrint("❌ [Firestore Error] Failed to dismiss pattern: $e");
+    }
+  }
+
+  Future<void> sendRegisterCommand({
+    required String nodeName,
+    required String applianceName,
+  }) async {
+    try {
+      await _db.collection('commands').doc(nodeName).set({
+        'register_name': applianceName,
+        'timestamp': FieldValue.serverTimestamp(),
+      });
+      debugPrint("✅ [Firestore] Sent register command to $nodeName: $applianceName");
+    } catch (e) {
+      debugPrint("❌ [Firestore Error] Failed to send register command: $e");
+      rethrow;
     }
   }
 }

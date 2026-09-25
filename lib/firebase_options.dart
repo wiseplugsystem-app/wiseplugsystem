@@ -44,13 +44,14 @@ class DefaultFirebaseOptions {
   }
 
   static const FirebaseOptions web = FirebaseOptions(
-    apiKey: 'AIzaSyDnaHbvtEohBqyxB8pA4Uqe7xLDs6FKH2w',
+    apiKey: 'AIzaSyDnaHbvtEohBqyxB8pA4Uqe7xLDs6fKH2w',
     appId: '1:573829770831:web:663d30e3ca0fd0ee51843a',
     messagingSenderId: '573829770831',
     projectId: 'wise-46f92',
     authDomain: 'wise-46f92.firebaseapp.com',
     storageBucket: 'wise-46f92.firebasestorage.app',
-    databaseURL: 'https://wise-46f92-default-rtdb.asia-southeast1.firebasedatabase.app',
+    databaseURL:
+        'https://wise-46f92-default-rtdb.asia-southeast1.firebasedatabase.app',
   );
 
   static const FirebaseOptions android = FirebaseOptions(
@@ -71,8 +72,10 @@ class DefaultFirebaseOptions {
   );
 
   static const FirebaseOptions windows = FirebaseOptions(
-    apiKey: 'AIzaSyDnaHbvtEohBqyxB8pA4Uqe7xLDs6FKH2w',
+    apiKey: 'AIzaSyDnaHbvtEohBqyxB8pA4Uqe7xLDs6fKH2w',
     appId: '1:573829770831:web:82c4b4632d8785a351843a',
+    databaseURL:
+        'https://wise-46f92-default-rtdb.asia-southeast1.firebasedatabase.app',
     messagingSenderId: '573829770831',
     projectId: 'wise-46f92',
     authDomain: 'wise-46f92.firebaseapp.com',

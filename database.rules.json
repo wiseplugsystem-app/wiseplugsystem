@@ -1,0 +1,107 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "device_owners": {
+      ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid"
+    },
+    "telemetry_logs": {
+      ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid"
+    },
+    "appliance_profiles": {
+      ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid"
+    },
+    "appliance_registrations": {
+      ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid",
+      "$catalog": {
+        "$profile": {
+          ".write": "auth != null && (($catalog === 'OUTLET_A' && root.child('device_owners/outlet_A').val() === auth.uid) || ($catalog === 'OUTLET_B' && root.child('device_owners/outlet_B').val() === auth.uid)) && (root.child('appliance_profiles').child($catalog).child($profile).exists() || root.child('appliance_profiles').child($catalog === 'OUTLET_A' ? 'OUTLET A' : 'OUTLET B').child($profile).exists())",
+          ".validate": "newData.hasChildren(['name', 'applianceType'])",
+          "name": { ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 63" },
+          "applianceType": { ".validate": "newData.val() === 'Rice cooker' || newData.val() === 'Flat iron / hair straightener' || newData.val() === 'Electric fan' || newData.val() === 'Other'" },
+          "$other": { ".validate": false }
+        }
+      }
+    },
+    "alerts": {
+      ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid"
+    },
+    "commands": {
+      "$outlet": {
+        ".read": "auth != null && root.child('device_owners').child($outlet).val() === auth.uid",
+        ".write": "auth != null && root.child('device_owners').child($outlet).val() === auth.uid && ($outlet === 'outlet_A' || $outlet === 'outlet_B') && newData.exists() && root.child('telemetry_logs').child($outlet).child('currentState').val() !== 'LOCKED_OUT'",
+        ".validate": "newData.hasChildren(['commandID','userID','type','sessionID','revision','expiresAt']) && newData.child('userID').val() === auth.uid && newData.child('sessionID').val() === root.child('telemetry_logs').child($outlet).child('sessionID').val() && newData.child('revision').val() === root.child('telemetry_logs').child($outlet).child('revision').val() && newData.child('expiresAt').isNumber() && newData.child('expiresAt').val() > now && newData.child('expiresAt').val() <= now + 30000 && (newData.child('type').val() === 'TURN_ON' || newData.child('type').val() === 'TURN_OFF' || (newData.child('type').val() === 'REMOVE_PROFILE' && newData.child('profileID').isString()) || (newData.child('type').val() === 'SMART_OVERRIDE' && newData.child('alertID').val() === root.child('telemetry_logs').child($outlet).child('alertID').val() && root.child('telemetry_logs').child($outlet).child('currentState').val() === 'WARNING' && newData.child('extensionDuration').isNumber() && newData.child('extensionDuration').val() > 0 && newData.child('extensionDuration').val() <= 3600) || (newData.child('type').val() === 'EDIT_PROFILE' && newData.child('name').isString() && newData.child('name').val().length > 0 && newData.child('name').val().length <= 63 && newData.child('maxRunTime').isNumber() && newData.child('maxRunTime').val() >= 1 && newData.child('safetyCeilingDuration').isNumber() && newData.child('safetyCeilingDuration').val() >= newData.child('maxRunTime').val() && newData.child('safetyCeilingDuration').val() <= 604800))",
+        "commandID": {
+          ".validate": "newData.isString() && newData.val().matches(/^[A-Za-z0-9_-]{1,63}$/)"
+        },
+        "sessionID": {
+          ".validate": "newData.isString() && newData.val().length <= 39"
+        },
+        "revision": {
+          ".validate": "newData.isNumber()"
+        },
+        "userID": {
+          ".validate": "newData.isString()"
+        },
+        "type": {
+          ".validate": "newData.isString()"
+        },
+        "expiresAt": {
+          ".validate": "newData.isNumber()"
+        },
+        "alertID": {
+          ".validate": "newData.isString() && newData.val().length <= 79"
+        },
+        "profileID": {
+          ".validate": "newData.isString() && newData.val().matches(/^[A-Za-z0-9_-]{1,63}$/)"
+        },
+        "name": {
+          ".validate": "newData.isString()"
+        },
+        "maxRunTime": {
+          ".validate": "newData.isNumber()"
+        },
+        "safetyCeilingDuration": {
+          ".validate": "newData.isNumber()"
+        },
+        "extensionDuration": {
+          ".validate": "newData.isNumber()"
+        },
+        "$other": {
+          ".validate": false
+        }
+      }
+    },
+    "command_results": {
+      "$outlet": {
+        ".read": "auth != null && root.child('device_owners').child($outlet).val() === auth.uid"
+      }
+    },
+    "users": {
+      "$uid": {
+        "preferences": {
+          ".read": "auth != null && auth.uid === $uid",
+          ".write": "auth != null && auth.uid === $uid",
+          "$key": {
+            ".validate": "($key === 'deviceAlerts' || $key === 'statusChanges' || $key === 'newDevices' || $key === 'safetyWarnings') && newData.isBoolean()"
+          }
+        },
+        "fcmTokens": {
+          ".read": "auth != null && auth.uid === $uid",
+          "$token": {
+            ".write": "auth != null && auth.uid === $uid",
+            ".validate": "newData.val() === true"
+          }
+        }
+      }
+    },
+    "acknowledgments": {
+      "$alert": {
+        "$uid": {
+          ".write": "auth != null && auth.uid === $uid && root.child('device_owners').child(root.child('alerts').child($alert).child('deviceID').val()).val() === auth.uid && root.child('alerts').child($alert).child('resolution').val() === 'SHUTDOWN'",
+          ".validate": "newData.val() === true"
+        }
+      }
+    }
+  }
+}
