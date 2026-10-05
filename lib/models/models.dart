@@ -416,12 +416,14 @@ class SmartOverride {
 
 /// DetectedAppliance Class matching real-time pattern detection
 class DetectedAppliance {
+  final String deviceID;
   final String outlet;
   final double estimatedWattage;
   final String signature;
   final String? suggestedType;
 
   DetectedAppliance({
+    required this.deviceID,
     required this.outlet,
     required this.estimatedWattage,
     required this.signature,
@@ -430,15 +432,17 @@ class DetectedAppliance {
 
   factory DetectedAppliance.fromMap(Map<String, dynamic> map, String id) {
     return DetectedAppliance(
+      deviceID: map['deviceID']?.toString() ?? '',
       outlet: map['outlet']?.toString() ?? 'A',
       estimatedWattage: (map['estimatedWattage'] as num?)?.toDouble() ?? 0.0,
-      signature: map['signature'] ?? '',
+      signature: map['signature'] ?? id,
       suggestedType: map['suggestedType'],
     );
   }
 
   Map<String, dynamic> toMap() {
     return {
+      'deviceID': deviceID,
       'outlet': outlet,
       'estimatedWattage': estimatedWattage,
       'signature': signature,

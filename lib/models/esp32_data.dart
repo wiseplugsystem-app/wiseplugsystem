@@ -81,6 +81,9 @@ class OutletReading {
 }
 
 class LearnedAppliance {
+  bool get needsRegistration =>
+      applianceType == null &&
+      (name.startsWith('UNNAMED_DEVICE_') || name == profileID);
   final String outlet, profileID, name;
   final double? baselineWattage, peakPower, current, voltage, powerFactor;
   final DateTime? registeredAt;

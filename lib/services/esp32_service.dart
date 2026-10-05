@@ -28,10 +28,78 @@ class Esp32Service {
       .onValue
       .map((event) => parseOutlets(event.snapshot.value));
 
-  Stream<List<LearnedAppliance>> streamProfiles() => database
-      .ref('appliance_profiles')
-      .onValue
-      .map((event) => parseLearnedAppliances(event.snapshot.value));
+  Stream<List<LearnedAppliance>> streamProfiles() {
+    late StreamController<List<LearnedAppliance>> controller;
+    final subscriptions = <StreamSubscription<DatabaseEvent>>[];
+    Object? catalog;
+    Map<String, dynamic> registrations = {};
+    var catalogReady = false, registrationsReady = false;
+    void emit() {
+      if (!catalogReady || !registrationsReady) return;
+      final root = databaseMap(catalog);
+      final merged = <String, dynamic>{};
+      for (final outlet in ['A', 'B']) {
+        final metadata = databaseMap(registrations['OUTLET_$outlet']);
+        merged['OUTLET_$outlet'] = {
+          for (final entry in databaseMap(
+            root['OUTLET_$outlet'] ?? root['OUTLET $outlet'],
+          ).entries)
+            entry.key: {
+              ...databaseMap(entry.value),
+              ...databaseMap(metadata[entry.key]),
+            },
+        };
+      }
+      controller.add(parseLearnedAppliances(merged));
+    }
+
+    controller = StreamController<List<LearnedAppliance>>(
+      onListen: () {
+        subscriptions.add(
+          database.ref('appliance_profiles').onValue.listen((event) {
+            catalog = event.snapshot.value;
+            catalogReady = true;
+            emit();
+          }, onError: controller.addError),
+        );
+        subscriptions.add(
+          database.ref('appliance_registrations').onValue.listen((event) {
+            registrations = databaseMap(event.snapshot.value);
+            registrationsReady = true;
+            emit();
+          }, onError: controller.addError),
+        );
+      },
+      onCancel: () async {
+        for (final subscription in subscriptions) {
+          await subscription.cancel();
+        }
+      },
+    );
+    return controller.stream;
+  }
+
+  Future<void> registerProfile(
+    LearnedAppliance profile,
+    String name,
+    String type,
+  ) async {
+    if (name.trim().isEmpty ||
+        utf8.encode(name.trim()).length > 63 ||
+        ![
+          'Rice cooker',
+          'Flat iron / hair straightener',
+          'Electric fan',
+          'Other',
+        ].contains(type)) {
+      throw ArgumentError('Enter a name up to 63 bytes and an appliance type.');
+    }
+    await database
+        .ref(
+          'appliance_registrations/OUTLET_${profile.outlet}/${profile.profileID}',
+        )
+        .set({'name': name.trim(), 'applianceType': type});
+  }
 
   Stream<Map<String, dynamic>> streamPreferences() {
     final uid = FirebaseAuth.instance.currentUser?.uid;

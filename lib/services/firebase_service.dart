@@ -113,7 +113,7 @@ class FirebaseBackendService {
     return _db
         .collection('anomalyAlerts')
         .where('deviceID', isEqualTo: deviceID)
-        .where('resolution', isEqualTo: 'Pending')
+        .where('resolution', isEqualTo: 'PENDING')
         .snapshots()
         .map(
           (snapshot) => snapshot.docs

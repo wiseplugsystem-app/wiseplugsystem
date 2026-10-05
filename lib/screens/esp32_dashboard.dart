@@ -202,6 +202,7 @@ class _OutletControlsState extends State<_OutletControls> {
 }
 
 class Esp32ProfileEditor extends StatefulWidget {
+  final bool registration;
   final Esp32Service service;
   final OutletReading reading;
   final LearnedAppliance profile;
@@ -210,13 +211,25 @@ class Esp32ProfileEditor extends StatefulWidget {
     required this.service,
     required this.reading,
     required this.profile,
+    this.registration = false,
   });
   @override
   State<Esp32ProfileEditor> createState() => Esp32ProfileEditorState();
 }
 
 class Esp32ProfileEditorState extends State<Esp32ProfileEditor> {
-  late final _name = TextEditingController(text: widget.profile.name);
+  late final _name = TextEditingController(
+    text: widget.registration ? '' : widget.profile.name,
+  );
+  static const types = [
+    'Rice cooker',
+    'Flat iron / hair straightener',
+    'Electric fan',
+    'Other',
+  ];
+  late String _type = types.contains(widget.profile.applianceType)
+      ? widget.profile.applianceType!
+      : 'Other';
   late final _runtime = TextEditingController(
     text: widget.profile.hasRuntimeLimit ? '${widget.profile.maxRunTime}' : '',
   );
@@ -241,14 +254,25 @@ class Esp32ProfileEditorState extends State<Esp32ProfileEditor> {
       _error = null;
     });
     try {
-      await widget.service.editProfile(
-        widget.reading,
-        widget.profile,
-        _name.text,
-        int.tryParse(_runtime.text) ?? 0,
-        int.tryParse(_ceiling.text) ?? 0,
-      );
-      if (mounted) Navigator.pop(context);
+      if (!widget.registration) {
+        await widget.service.editProfile(
+          widget.reading,
+          widget.profile,
+          _name.text,
+          int.tryParse(_runtime.text) ?? 0,
+          int.tryParse(_ceiling.text) ?? 0,
+        );
+      }
+      await widget.service.registerProfile(widget.profile, _name.text, _type);
+      if (mounted) {
+        final route = ModalRoute.of(context);
+        if (route != null && !route.isCurrent) {
+          // A safety warning may have opened above this form while saving.
+          Navigator.of(context).removeRoute(route);
+        } else {
+          Navigator.pop(context, true);
+        }
+      }
     } catch (error) {
       if (mounted) setState(() => _error = '$error');
     } finally {
@@ -258,29 +282,57 @@ class Esp32ProfileEditorState extends State<Esp32ProfileEditor> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-    title: const Text('Appliance profile'),
+    title: Text(
+      widget.registration ? 'Appliance Registration' : 'Edit Appliance Profile',
+    ),
     content: SingleChildScrollView(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          Text('Outlet ${widget.profile.outlet} · detected signature'),
+          SelectableText(
+            widget.profile.profileID,
+            style: const TextStyle(color: Colors.blue),
+          ),
+          const SizedBox(height: 20),
           TextField(
             controller: _name,
-            decoration: const InputDecoration(labelText: 'Name'),
-          ),
-          TextField(
-            controller: _runtime,
-            keyboardType: TextInputType.number,
+            enabled: !_busy,
             decoration: const InputDecoration(
-              labelText: 'Runtime warning (seconds)',
+              labelText: 'Appliance Name',
+              border: OutlineInputBorder(),
             ),
           ),
-          TextField(
-            controller: _ceiling,
-            keyboardType: TextInputType.number,
+          const SizedBox(height: 20),
+          DropdownButtonFormField<String>(
+            initialValue: _type,
+            isExpanded: true,
             decoration: const InputDecoration(
-              labelText: 'Safety ceiling (seconds)',
+              labelText: 'Type of Appliance',
+              border: OutlineInputBorder(),
             ),
+            items: [
+              for (final type in types)
+                DropdownMenuItem(value: type, child: Text(type)),
+            ],
+            onChanged: _busy ? null : (value) => setState(() => _type = value!),
           ),
+          if (!widget.registration) ...[
+            TextField(
+              controller: _runtime,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(
+                labelText: 'Runtime warning (seconds)',
+              ),
+            ),
+            TextField(
+              controller: _ceiling,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(
+                labelText: 'Safety ceiling (seconds)',
+              ),
+            ),
+          ],
           if (_error != null)
             Text(_error!, style: const TextStyle(color: Colors.red)),
         ],
@@ -293,7 +345,7 @@ class Esp32ProfileEditorState extends State<Esp32ProfileEditor> {
       ),
       FilledButton(
         onPressed: _busy ? null : _save,
-        child: Text(_busy ? 'Waiting for ESP32…' : 'Save'),
+        child: Text(_busy ? 'Saving…' : 'Save Profile'),
       ),
     ],
   );

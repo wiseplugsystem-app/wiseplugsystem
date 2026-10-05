@@ -106,12 +106,258 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
   int _tab = 0;
   String _filter = 'All';
   Timer? _clock;
+  final _promptedUses = <String>{};
+  final _shownWarnings = <String>{};
+  bool _registrationOpen = false, _warningOpen = false;
+
+  String _useKey(OutletReading r) =>
+      '${r.outlet}/${r.sessionID}/${r.profileID}/${r.startTime?.millisecondsSinceEpoch}';
+
+  void _checkPopups() {
+    if (!mounted || _loading || _readError) return;
+    final now = DateTime.now();
+    for (final r in _readings.values) {
+      final key = '${r.outlet}/${r.alertID}';
+      if (!_warningOpen &&
+          r.isFresh(now) &&
+          r.isWarning &&
+          r.alertID.isNotEmpty &&
+          !_shownWarnings.contains(key)) {
+        _shownWarnings.add(key);
+        _showWarning(r);
+        return;
+      }
+    }
+    if (_warningOpen ||
+        _registrationOpen ||
+        _profilesLoading ||
+        _profileError) {
+      return;
+    }
+    for (final r in _readings.values) {
+      final p = connectedProfile(r, _profiles);
+      if (r.hasConnectedAppliance(now) &&
+          !r.isWarning &&
+          p != null &&
+          p.needsRegistration &&
+          _promptedUses.add(_useKey(r))) {
+        _register(r, p);
+        return;
+      }
+    }
+  }
+
+  Future<void> _register(
+    OutletReading reading,
+    LearnedAppliance profile,
+  ) async {
+    if (_registrationOpen) return;
+    _registrationOpen = true;
+    try {
+      final yes = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Row(
+            children: [
+              Icon(Icons.warning_amber_rounded, color: Colors.redAccent),
+              SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'New Appliance Pattern Detected',
+                  style: TextStyle(color: Colors.redAccent, fontSize: 19),
+                ),
+              ),
+            ],
+          ),
+          content: SizedBox(
+            width: 380,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text('Do you want to register this appliance?'),
+                const SizedBox(height: 8),
+                Text('Detected on Outlet ${reading.outlet}'),
+                const SizedBox(height: 20),
+                _Panel(
+                  child: Column(
+                    children: [
+                      _Pair('Outlet', reading.outlet),
+                      _Pair(
+                        'Power draw',
+                        measurement(reading.activePower, 'W'),
+                      ),
+                      _Pair('Signature', profile.profileID, color: _blue),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('No, Disregard'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Yes, Register'),
+            ),
+          ],
+        ),
+      );
+      if (yes == true && mounted) {
+        await showDialog<bool>(
+          context: context,
+          barrierDismissible: false,
+          builder: (_) => Esp32ProfileEditor(
+            service: widget.service,
+            reading: reading,
+            profile: profile,
+            registration: true,
+          ),
+        );
+      }
+    } finally {
+      _registrationOpen = false;
+    }
+  }
+
+  Future<void> _showWarning(OutletReading initial) async {
+    _warningOpen = true;
+    var busy = false;
+    String? error;
+    try {
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogContext) => StatefulBuilder(
+          builder: (context, update) => AnimatedBuilder(
+            animation: _updates,
+            builder: (context, _) {
+              final r = _readings[initial.outlet];
+              final now = DateTime.now();
+              final current =
+                  !_readError &&
+                  r != null &&
+                  r.isFresh(now) &&
+                  r.alertID == initial.alertID;
+              final warning = current && r.isWarning;
+              return AlertDialog(
+                content: SizedBox(
+                  width: 340,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(18),
+                        decoration: BoxDecoration(
+                          color: Colors.red,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: const Column(
+                          children: [
+                            Icon(Icons.warning, color: Colors.white, size: 30),
+                            Text(
+                              'WARNING',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 23,
+                              ),
+                            ),
+                            Text(
+                              'Safety Limit Exceeded!',
+                              style: TextStyle(color: Colors.white),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      Text(
+                        'Outlet ${initial.outlet} · ${connectedProfile(initial, _profiles)?.name ?? initial.appliance}',
+                      ),
+                      Text(
+                        current
+                            ? '${warning ? r.secondsRemaining(now) : 0}'
+                            : '—',
+                        style: const TextStyle(fontSize: 58),
+                      ),
+                      const Text('Seconds Remaining'),
+                      const SizedBox(height: 16),
+                      Text(
+                        !current
+                            ? 'Live device state unavailable.'
+                            : warning
+                            ? 'Are you still using the Appliance?'
+                            : r.isLockedOut
+                            ? 'Outlet locked. Use its physical reset button.'
+                            : 'This warning has ended.',
+                      ),
+                      const SizedBox(height: 12),
+                      const Text(
+                        _safetyNote,
+                        style: TextStyle(fontSize: 11, color: Colors.grey),
+                      ),
+                      if (error != null)
+                        Text(error!, style: const TextStyle(color: Colors.red)),
+                    ],
+                  ),
+                ),
+                actions: [
+                  if (warning) ...[
+                    FilledButton(
+                      onPressed: busy || !r.canCommand(now)
+                          ? null
+                          : () async {
+                              update(() {
+                                busy = true;
+                                error = null;
+                              });
+                              try {
+                                await widget.service.command(r, 'TURN_OFF');
+                              } catch (e) {
+                                if (dialogContext.mounted) {
+                                  update(() => error = '$e');
+                                }
+                              } finally {
+                                if (dialogContext.mounted) {
+                                  update(() => busy = false);
+                                }
+                              }
+                            },
+                      child: Text(busy ? 'Waiting…' : 'Turn Off Now'),
+                    ),
+                    const Tooltip(
+                      message: 'Average-usage override is not implemented yet.',
+                      child: FilledButton(
+                        onPressed: null,
+                        child: Text('Yes, Override'),
+                      ),
+                    ),
+                  ],
+                  TextButton(
+                    onPressed: busy ? null : () => Navigator.pop(dialogContext),
+                    child: const Text('Close'),
+                  ),
+                ],
+              );
+            },
+          ),
+        ),
+      );
+    } finally {
+      _warningOpen = false;
+    }
+  }
+
   bool _enabled(String key) => _preferences[key] != false;
 
   void _refresh() {
     if (!mounted) return;
     setState(() {});
     _updates.value++;
+    WidgetsBinding.instance.addPostFrameCallback((_) => _checkPopups());
   }
 
   @override
@@ -476,7 +722,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
           const SizedBox(height: 16),
           Text(
             connected
-                ? reading!.appliance
+                ? profile?.name ?? reading!.appliance
                 : fresh
                 ? 'No appliance detected'
                 : 'Waiting for device',
@@ -575,58 +821,73 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
         _Panel(
           child: Text(
             _profiles.isEmpty
-                ? 'No learned appliances yet. Profiles will appear when the ESP32 registers an appliance.'
+                ? 'No appliance signatures received yet. Turn on an appliance to detect and register it.'
                 : 'No appliances match this filter.',
           ),
         ),
-      for (final profile in profiles)
-        Padding(
-          padding: const EdgeInsets.only(bottom: 16),
-          child: Card(
-            child: InkWell(
-              borderRadius: BorderRadius.circular(24),
-              onTap: () => _showProfile(profile),
-              child: Padding(
-                padding: const EdgeInsets.all(20),
-                child: Row(
-                  children: [
-                    _ApplianceIcon(type: profile.applianceType),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            profile.name,
-                            style: const TextStyle(
-                              fontSize: 19,
-                              fontWeight: FontWeight.w800,
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            '${profile.applianceType ?? 'Appliance'} · Outlet ${profile.outlet}',
-                            style: const TextStyle(color: Colors.grey),
-                          ),
-                          const SizedBox(height: 10),
-                          _Badge(
-                            _readError
-                                ? 'Offline'
-                                : profileStatus(
-                                    profile,
-                                    _readings[profile.outlet],
-                                    _profiles,
-                                    now,
-                                  ),
-                          ),
-                        ],
+      if (profiles.isNotEmpty)
+        _Panel(
+          padding: 0,
+          child: Column(
+            children: [
+              for (final profile in profiles) ...[
+                if (profile != profiles.first)
+                  const Divider(height: 1, indent: 18, endIndent: 18),
+                ListTile(
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 8,
+                  ),
+                  leading: Icon(
+                    Icons.circle,
+                    size: 9,
+                    color: _statusColor(
+                      profileStatus(
+                        profile,
+                        _readings[profile.outlet],
+                        _profiles,
+                        now,
                       ),
                     ),
-                    const Icon(Icons.chevron_right, color: Colors.grey),
-                  ],
+                  ),
+                  title: Text(
+                    profile.needsRegistration
+                        ? 'Unregistered appliance'
+                        : profile.name,
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                  subtitle: Text(
+                    '${profile.applianceType ?? 'Appliance'} · Outlet ${profile.outlet}',
+                  ),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _Badge(
+                        profile.needsRegistration
+                            ? 'Register'
+                            : _readError
+                            ? 'Offline'
+                            : profileStatus(
+                                profile,
+                                _readings[profile.outlet],
+                                _profiles,
+                                now,
+                              ),
+                      ),
+                      const Icon(Icons.chevron_right, color: Colors.grey),
+                    ],
+                  ),
+                  onTap: () {
+                    final reading = _readings[profile.outlet];
+                    if (profile.needsRegistration && reading != null) {
+                      _register(reading, profile);
+                    } else {
+                      _showProfile(profile);
+                    }
+                  },
                 ),
-              ),
-            ),
+              ],
+            ],
           ),
         ),
     ];
@@ -1270,10 +1531,8 @@ class _PowerControlState extends State<_PowerControl> {
               children: [
                 Text('${r!.secondsRemaining(widget.now)} s until lockout'),
                 TextButton(
-                  onPressed: enabled && r.secondsRemaining(widget.now) > 0
-                      ? () => _send('SMART_OVERRIDE')
-                      : null,
-                  child: const Text('Continue for 15 minutes'),
+                  onPressed: null,
+                  child: const Text('Override unavailable'),
                 ),
                 TextButton(
                   onPressed: enabled ? () => _send('TURN_OFF') : null,

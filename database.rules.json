@@ -11,6 +11,18 @@
     "appliance_profiles": {
       ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid"
     },
+    "appliance_registrations": {
+      ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid",
+      "$catalog": {
+        "$profile": {
+          ".write": "auth != null && (($catalog === 'OUTLET_A' && root.child('device_owners/outlet_A').val() === auth.uid) || ($catalog === 'OUTLET_B' && root.child('device_owners/outlet_B').val() === auth.uid)) && (root.child('appliance_profiles').child($catalog).child($profile).exists() || root.child('appliance_profiles').child($catalog === 'OUTLET_A' ? 'OUTLET A' : 'OUTLET B').child($profile).exists())",
+          ".validate": "newData.hasChildren(['name', 'applianceType'])",
+          "name": { ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 63" },
+          "applianceType": { ".validate": "newData.val() === 'Rice cooker' || newData.val() === 'Flat iron / hair straightener' || newData.val() === 'Electric fan' || newData.val() === 'Other'" },
+          "$other": { ".validate": false }
+        }
+      }
+    },
     "alerts": {
       ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid"
     },

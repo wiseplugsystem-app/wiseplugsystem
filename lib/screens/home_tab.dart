@@ -16,6 +16,7 @@ class HomeTab extends StatefulWidget {
   final bool telemetryHasError;
   final FirebaseBackendService backend;
   final VoidCallback onSettingsTap;
+  final void Function(DetectedAppliance pattern) onRegisterDetected;
 
   const HomeTab({
     super.key,
@@ -27,6 +28,7 @@ class HomeTab extends StatefulWidget {
     this.telemetryHasError = false,
     required this.backend,
     required this.onSettingsTap,
+    required this.onRegisterDetected,
   });
 
   @override
@@ -36,6 +38,9 @@ class HomeTab extends StatefulWidget {
 class _HomeTabState extends State<HomeTab> {
   Timer? _ticker;
   final Set<String> _shownAlertIDs = {};
+  final Set<String> _dismissedSignatures = {};
+  bool _detectionDialogOpen = false;
+  final Set<String> _pendingToggles = {};
 
   @override
   void initState() {
@@ -52,16 +57,31 @@ class _HomeTabState extends State<HomeTab> {
   }
 
   ApplianceProfile? _profileForOutlet(String outlet) {
-    final matches = widget.profiles.where((p) => p.outlet == outlet).toList();
+    final matches = widget.profiles
+        .where((p) => p.outlet.trim().toUpperCase() == outlet.trim().toUpperCase())
+        .toList();
     if (matches.isEmpty) return null;
-    return matches.firstWhere((p) => p.isOn, orElse: () => matches.first);
+    final activeMatches = matches.where((p) => p.isOn).toList();
+    if (activeMatches.isNotEmpty) return activeMatches.first;
+    return matches.first;
   }
 
   Duration? _remaining(ApplianceProfile profile) {
     if (!profile.isOn || profile.startTime == null) return null;
     final elapsed = DateTime.now().difference(profile.startTime!);
-    final limit = Duration(minutes: profile.safetyCeilingDuration);
+    final limit = Duration(seconds: profile.safetyCeilingDuration);
     return limit - elapsed;
+  }
+
+  double _outletPowerDraw(String outlet) {
+    final profile = _profileForOutlet(outlet);
+    if (profile == null || !profile.isOn) return 0.0;
+    final onProfiles = widget.profiles.where((p) => p.isOn).toList();
+    if (onProfiles.length == 1) return widget.activePower;
+    final totalBaseline = onProfiles.fold<double>(0, (s, p) => s + (p.baselineWattage > 0 ? p.baselineWattage : 1));
+    if (totalBaseline == 0) return widget.activePower / onProfiles.length;
+    final profileBase = profile.baselineWattage > 0 ? profile.baselineWattage : 1;
+    return widget.activePower * (profileBase / totalBaseline);
   }
 
   OutletStatus _statusFor(ApplianceProfile? profile) {
@@ -89,7 +109,7 @@ class _HomeTabState extends State<HomeTab> {
   double _progressFor(ApplianceProfile profile) {
     final remaining = _remaining(profile);
     if (remaining == null) return 0;
-    final limit = Duration(minutes: profile.safetyCeilingDuration);
+    final limit = Duration(seconds: profile.safetyCeilingDuration);
     if (limit.inSeconds == 0) return 0;
     final elapsedFraction = 1 - (remaining.inSeconds / limit.inSeconds);
     return elapsedFraction.clamp(0.0, 1.0);
@@ -97,9 +117,19 @@ class _HomeTabState extends State<HomeTab> {
 
   String _formatRemaining(Duration? remaining) {
     if (remaining == null) return '—';
-    if (remaining.isNegative) return '0 min';
+    if (remaining.isNegative) return '0s';
     if (remaining.inMinutes < 1) return '${remaining.inSeconds}s';
-    return '${remaining.inMinutes} min';
+    final hrs = remaining.inHours;
+    final mins = remaining.inMinutes.remainder(60);
+    if (hrs > 0) return '${hrs}h ${mins}m';
+    return '${remaining.inMinutes}m';
+  }
+
+  String _formatDurationTotal(int secondsTotal) {
+    final hrs = secondsTotal ~/ 3600;
+    final mins = (secondsTotal % 3600) ~/ 60;
+    if (hrs > 0) return '${hrs}h ${mins}m';
+    return '${mins}m';
   }
 
   String _formatClock(DateTime? time) {
@@ -212,6 +242,13 @@ class _HomeTabState extends State<HomeTab> {
                   final profile = _profileForOutlet(outlet);
                   final status = _statusFor(profile);
                   final isLast = outlet == outlets.last;
+                  final outletPower = _outletPowerDraw(outlet);
+                  final voltage = widget.telemetry?.voltage;
+                  final current = profile != null && profile.isOn
+                      ? (voltage != null && voltage > 0 && outletPower > 0
+                          ? outletPower / voltage
+                          : null)
+                      : null;
                   return Expanded(
                     child: Padding(
                       padding: EdgeInsets.only(right: isLast ? 0 : 12),
@@ -228,6 +265,12 @@ class _HomeTabState extends State<HomeTab> {
                         progress: profile == null || !profile.isOn
                             ? 0.0
                             : _progressFor(profile),
+                        powerDraw: outletPower,
+                        voltage: voltage,
+                        current: current,
+                        safetyCeilingLabel: profile == null
+                            ? '—'
+                            : _formatDurationTotal(profile.safetyCeilingDuration),
                       ),
                     ),
                   );
@@ -297,6 +340,21 @@ class _HomeTabState extends State<HomeTab> {
               return const SizedBox.shrink();
             },
           ),
+          StreamBuilder<List<DetectedAppliance>>(
+            stream: widget.backend.streamDetectedAppliances(widget.deviceID),
+            builder: (context, snapshot) {
+              final patterns = (snapshot.data ?? [])
+                  .where((p) => !_dismissedSignatures.contains(p.signature))
+                  .toList();
+              if (patterns.isNotEmpty && !_detectionDialogOpen) {
+                _detectionDialogOpen = true;
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (mounted) _showDetectionDialog(context, patterns.first);
+                });
+              }
+              return const SizedBox.shrink();
+            },
+          ),
         ],
       ),
     );
@@ -305,6 +363,12 @@ class _HomeTabState extends State<HomeTab> {
   Widget _buildPowerRow(String outlet, {required bool isLast}) {
     final profile = _profileForOutlet(outlet);
     final color = outlet == 'A' ? Colors.blue : Colors.orange;
+    bool isPending = false;
+    bool effectiveIsOn = profile?.isOn ?? false;
+    if (profile != null) {
+      isPending = _pendingToggles.contains(profile.profileID);
+      if (isPending) effectiveIsOn = !profile.isOn;
+    }
     return Column(
       children: [
         ListTile(
@@ -316,18 +380,168 @@ class _HomeTabState extends State<HomeTab> {
             'Outlet $outlet${profile != null ? ' — ${profile.applianceName}' : ''}',
             style: const TextStyle(fontWeight: FontWeight.w600),
           ),
+          subtitle: profile != null && profile.isOn
+              ? Text(
+                  'Drawing ${_outletPowerDraw(outlet).toStringAsFixed(1)} W',
+                  style: const TextStyle(fontSize: 12, color: Colors.grey),
+                )
+              : null,
           trailing: Switch(
-            value: profile?.isOn ?? false,
-            onChanged: profile == null
+            value: effectiveIsOn,
+            onChanged: (profile == null || isPending)
                 ? null
-                : (val) => widget.backend.toggleAppliancePower(
-                    profile.profileID,
-                    val,
-                  ),
+                : (val) async {
+                    setState(() => _pendingToggles.add(profile.profileID));
+                    try {
+                      await widget.backend.toggleAppliancePower(
+                        profile.profileID,
+                        val,
+                      );
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(
+                              '${profile.applianceName} ${val ? "powered on" : "powered off"}',
+                            ),
+                            duration: const Duration(seconds: 1),
+                            behavior: SnackBarBehavior.floating,
+                          ),
+                        );
+                      }
+                    } catch (e) {
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text('Failed to toggle power: $e'),
+                            backgroundColor: Colors.red,
+                            duration: const Duration(seconds: 2),
+                          ),
+                        );
+                      }
+                    } finally {
+                      if (mounted) {
+                        setState(() => _pendingToggles.remove(profile.profileID));
+                      }
+                    }
+                  },
           ),
         ),
         if (!isLast) const Divider(height: 1),
       ],
+    );
+  }
+
+  Future<void> _showDetectionDialog(
+    BuildContext context,
+    DetectedAppliance pattern,
+  ) async {
+    await showDialog(
+      context: context,
+      barrierColor: Colors.black54,
+      builder: (context) => AlertDialog(
+        backgroundColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Row(
+          children: [
+            Icon(Icons.power_outlined, color: Colors.blue),
+            SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'New Appliance Plug-in Detected',
+                style: TextStyle(fontSize: 16),
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            const Text(
+              'An unassigned appliance pattern has been detected on your WisePlug. Register it now?',
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Device: ${pattern.deviceID.isEmpty ? widget.deviceID : pattern.deviceID} · Outlet ${pattern.outlet}',
+              style: const TextStyle(color: Colors.grey, fontSize: 12),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade100,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Column(
+                children: [
+                  _detailRow('Outlet:', pattern.outlet),
+                  _detailRow(
+                    'Est. draw:',
+                    '~${pattern.estimatedWattage.toStringAsFixed(0)} W',
+                  ),
+                  _detailRow('Signature:', pattern.signature, chip: true),
+                  if (pattern.suggestedType != null && pattern.suggestedType!.isNotEmpty)
+                    _detailRow('Suggested:', pattern.suggestedType!),
+                ],
+              ),
+            ),
+          ],
+        ),
+        actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+        actions: [
+          OutlinedButton(
+            onPressed: () {
+              setState(() => _dismissedSignatures.add(pattern.signature));
+              widget.backend.dismissDetectedAppliance(pattern.signature);
+              Navigator.pop(context);
+            },
+            child: const Text('Not now'),
+          ),
+          const SizedBox(width: 8),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.blue),
+            onPressed: () {
+              Navigator.pop(context);
+              setState(() => _dismissedSignatures.add(pattern.signature));
+              widget.onRegisterDetected(pattern);
+            },
+            child: const Text('Yes, Register'),
+          ),
+        ],
+      ),
+    );
+    if (mounted) _detectionDialogOpen = false;
+  }
+
+  Widget _detailRow(String label, String value, {bool chip = false}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label, style: const TextStyle(color: Colors.grey)),
+          chip
+              ? Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 2,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.blue.shade50,
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    value,
+                    style: TextStyle(color: Colors.blue.shade700, fontSize: 12),
+                  ),
+                )
+              : Text(
+                  value,
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                ),
+        ],
+      ),
     );
   }
 
@@ -391,6 +605,10 @@ class _OutletCard extends StatelessWidget {
   final String remainingLabel;
   final String startLabel;
   final double progress;
+  final double powerDraw;
+  final double? voltage;
+  final double? current;
+  final String safetyCeilingLabel;
 
   const _OutletCard({
     required this.outlet,
@@ -399,11 +617,16 @@ class _OutletCard extends StatelessWidget {
     required this.remainingLabel,
     required this.startLabel,
     required this.progress,
+    required this.powerDraw,
+    this.voltage,
+    this.current,
+    required this.safetyCeilingLabel,
   });
 
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    final isActive = profile != null && profile!.isOn;
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
@@ -446,12 +669,65 @@ class _OutletCard extends StatelessWidget {
             style: const TextStyle(fontSize: 12, color: Colors.grey),
           ),
           const SizedBox(height: 10),
+          Container(
+            padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
+            decoration: BoxDecoration(
+              color: isActive
+                  ? statusColor.withValues(alpha: 0.12)
+                  : Colors.transparent,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  'Live Draw',
+                  style: TextStyle(fontSize: 11, color: Colors.grey),
+                ),
+                Text(
+                  '${powerDraw.toStringAsFixed(1)} W',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                    color: isActive ? statusColor : Colors.grey,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (isActive && (voltage != null || current != null))
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Row(
+                children: [
+                  if (voltage != null)
+                    Expanded(
+                      child: Text(
+                        '${voltage!.toStringAsFixed(0)} V',
+                        textAlign: TextAlign.center,
+                        style:
+                            const TextStyle(fontSize: 11, color: Colors.grey),
+                      ),
+                    ),
+                  if (voltage != null && current != null)
+                    const Text(' · ',
+                        style: TextStyle(fontSize: 11, color: Colors.grey)),
+                  if (current != null)
+                    Expanded(
+                      child: Text(
+                        '${current!.toStringAsFixed(2)} A',
+                        textAlign: TextAlign.center,
+                        style:
+                            const TextStyle(fontSize: 11, color: Colors.grey),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          const SizedBox(height: 8),
           _infoRow('Start', startLabel),
           const SizedBox(height: 4),
-          _infoRow(
-            'Safety Limit',
-            profile == null ? '—' : '${profile!.safetyCeilingDuration}m total',
-          ),
+          _infoRow('Safety Limit', safetyCeilingLabel),
           const SizedBox(height: 4),
           _infoRow('Remaining', remainingLabel, valueColor: statusColor),
           const SizedBox(height: 8),
