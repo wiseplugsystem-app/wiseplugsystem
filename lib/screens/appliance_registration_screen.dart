@@ -7,7 +7,8 @@ import 'package:wiseplug/services/firebase_service.dart';
 class ApplianceRegistrationScreen extends StatefulWidget {
   final String deviceID;
   final FirebaseBackendService backend;
-  final DetectedAppliance detectedPattern; // Required to enforce registration from pattern
+  final DetectedAppliance
+  detectedPattern; // Required to enforce registration from pattern
 
   const ApplianceRegistrationScreen({
     super.key,
@@ -17,11 +18,18 @@ class ApplianceRegistrationScreen extends StatefulWidget {
   });
 
   @override
-  State<ApplianceRegistrationScreen> createState() => _ApplianceRegistrationScreenState();
+  State<ApplianceRegistrationScreen> createState() =>
+      _ApplianceRegistrationScreenState();
 }
 
-class _ApplianceRegistrationScreenState extends State<ApplianceRegistrationScreen> {
-  static const _types = ['Rice cooker', 'Flat iron / hair straightener', 'Electric fan', 'Other'];
+class _ApplianceRegistrationScreenState
+    extends State<ApplianceRegistrationScreen> {
+  static const _types = [
+    'Rice cooker',
+    'Flat iron / hair straightener',
+    'Electric fan',
+    'Other',
+  ];
 
   late final TextEditingController _nameController;
   late String _selectedType;
@@ -45,25 +53,26 @@ class _ApplianceRegistrationScreenState extends State<ApplianceRegistrationScree
 
   Future<void> _save() async {
     if (_nameController.text.trim().isEmpty || _isLoading) return;
-    
+
     setState(() => _isLoading = true);
-    
+
     try {
       final profile = ApplianceProfile(
         profileID: '', // Let Firestore auto-generate ID safely
         deviceID: widget.deviceID,
         applianceName: _nameController.text.trim(),
         applianceType: _selectedType,
+        baselineWattage: widget.detectedPattern.estimatedWattage,
         outlet: _selectedOutlet,
       );
-      
+
       await widget.backend.saveProfile(profile);
       if (mounted) Navigator.pop(context);
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to save profile: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Failed to save profile: $e')));
       }
     } finally {
       if (mounted) setState(() => _isLoading = false);
@@ -88,29 +97,48 @@ class _ApplianceRegistrationScreenState extends State<ApplianceRegistrationScree
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text('Outlet ${detected.outlet} · detected signature',
-                    style: const TextStyle(color: Colors.grey, fontSize: 12)),
+                Text(
+                  'Outlet ${detected.outlet} · detected signature',
+                  style: const TextStyle(color: Colors.grey, fontSize: 12),
+                ),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                  decoration: BoxDecoration(color: Colors.blue.shade50, borderRadius: BorderRadius.circular(6)),
-                  child: Text(detected.signature, style: TextStyle(color: Colors.blue.shade700, fontSize: 12)),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 2,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.blue.shade50,
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    detected.signature,
+                    style: TextStyle(color: Colors.blue.shade700, fontSize: 12),
+                  ),
                 ),
               ],
             ),
             const SizedBox(height: 16),
-            const Text('Appliance Name', style: TextStyle(fontWeight: FontWeight.bold)),
+            const Text(
+              'Appliance Name',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
             const SizedBox(height: 8),
             TextField(
               controller: _nameController,
               decoration: const InputDecoration(border: OutlineInputBorder()),
             ),
             const SizedBox(height: 20),
-            const Text('Type of Appliance', style: TextStyle(fontWeight: FontWeight.bold)),
+            const Text(
+              'Type of Appliance',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
             const SizedBox(height: 8),
             DropdownButtonFormField<String>(
-              value: _selectedType,
+              initialValue: _selectedType,
               decoration: const InputDecoration(border: OutlineInputBorder()),
-              items: _types.map((t) => DropdownMenuItem(value: t, child: Text(t))).toList(),
+              items: _types
+                  .map((t) => DropdownMenuItem(value: t, child: Text(t)))
+                  .toList(),
               onChanged: (val) {
                 if (val != null) setState(() => _selectedType = val);
               },
@@ -120,7 +148,9 @@ class _ApplianceRegistrationScreenState extends State<ApplianceRegistrationScree
               children: [
                 Expanded(
                   child: OutlinedButton(
-                    style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 14)),
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                    ),
                     onPressed: _isLoading ? null : () => Navigator.pop(context),
                     child: const Text('Cancel'),
                   ),
@@ -137,7 +167,10 @@ class _ApplianceRegistrationScreenState extends State<ApplianceRegistrationScree
                         ? const SizedBox(
                             width: 20,
                             height: 20,
-                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
                           )
                         : const Text('Save Profile'),
                   ),

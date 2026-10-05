@@ -7,14 +7,25 @@ class EditApplianceProfileScreen extends StatefulWidget {
   final ApplianceProfile profile;
   final FirebaseBackendService backend;
 
-  const EditApplianceProfileScreen({super.key, required this.profile, required this.backend});
+  const EditApplianceProfileScreen({
+    super.key,
+    required this.profile,
+    required this.backend,
+  });
 
   @override
-  State<EditApplianceProfileScreen> createState() => _EditApplianceProfileScreenState();
+  State<EditApplianceProfileScreen> createState() =>
+      _EditApplianceProfileScreenState();
 }
 
-class _EditApplianceProfileScreenState extends State<EditApplianceProfileScreen> {
-  static const _types = ['Rice cooker', 'Flat iron / hair straightener', 'Electric fan', 'Other'];
+class _EditApplianceProfileScreenState
+    extends State<EditApplianceProfileScreen> {
+  static const _types = [
+    'Rice cooker',
+    'Flat iron / hair straightener',
+    'Electric fan',
+    'Other',
+  ];
 
   late final TextEditingController _nameController;
   late String _selectedType;
@@ -23,7 +34,9 @@ class _EditApplianceProfileScreenState extends State<EditApplianceProfileScreen>
   void initState() {
     super.initState();
     _nameController = TextEditingController(text: widget.profile.applianceName);
-    _selectedType = _types.contains(widget.profile.applianceType) ? widget.profile.applianceType : _types.first;
+    _selectedType = _types.contains(widget.profile.applianceType)
+        ? widget.profile.applianceType
+        : _types.first;
   }
 
   @override
@@ -48,9 +61,14 @@ class _EditApplianceProfileScreenState extends State<EditApplianceProfileScreen>
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Delete profile?'),
-        content: Text('This removes "${widget.profile.applianceName}" and its history.'),
+        content: Text(
+          'This removes "${widget.profile.applianceName}" and its history.',
+        ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
           TextButton(
             onPressed: () {
               widget.backend.removeProfile(widget.profile.profileID);
@@ -78,19 +96,27 @@ class _EditApplianceProfileScreenState extends State<EditApplianceProfileScreen>
         child: ListView(
           padding: const EdgeInsets.all(20),
           children: [
-            const Text('Appliance Name', style: TextStyle(fontWeight: FontWeight.bold)),
+            const Text(
+              'Appliance Name',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
             const SizedBox(height: 8),
             TextField(
               controller: _nameController,
               decoration: const InputDecoration(border: OutlineInputBorder()),
             ),
             const SizedBox(height: 20),
-            const Text('Type of Appliance', style: TextStyle(fontWeight: FontWeight.bold)),
+            const Text(
+              'Type of Appliance',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
             const SizedBox(height: 8),
             DropdownButtonFormField<String>(
               initialValue: _selectedType,
               decoration: const InputDecoration(border: OutlineInputBorder()),
-              items: _types.map((t) => DropdownMenuItem(value: t, child: Text(t))).toList(),
+              items: _types
+                  .map((t) => DropdownMenuItem(value: t, child: Text(t)))
+                  .toList(),
               onChanged: (val) {
                 if (val != null) setState(() => _selectedType = val);
               },

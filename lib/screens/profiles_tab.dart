@@ -25,12 +25,14 @@ class ProfilesTab extends StatefulWidget {
 class _ProfilesTabState extends State<ProfilesTab> {
   String selectedFilter = 'All';
   final Set<String> _dismissedSignatures = {};
+  bool _detectionDialogOpen = false;
 
   ProfileStatus _statusFor(ApplianceProfile profile) {
     if (!profile.isOn) return ProfileStatus.idle;
     if (profile.startTime != null) {
       final elapsed = DateTime.now().difference(profile.startTime!);
-      final remaining = Duration(minutes: profile.safetyCeilingDuration) - elapsed;
+      final remaining =
+          Duration(seconds: profile.safetyCeilingDuration) - elapsed;
       if (remaining.inMinutes < 5) return ProfileStatus.nearLimit;
     }
     return ProfileStatus.active;
@@ -52,7 +54,10 @@ class _ProfilesTabState extends State<ProfilesTab> {
             children: [
               const Padding(
                 padding: EdgeInsets.fromLTRB(20, 20, 20, 12),
-                child: Text('Appliance Profiles', style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold)),
+                child: Text(
+                  'Appliance Profiles',
+                  style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold),
+                ),
               ),
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 20),
@@ -92,7 +97,8 @@ class _ProfilesTabState extends State<ProfilesTab> {
               final patterns = (snapshot.data ?? [])
                   .where((p) => !_dismissedSignatures.contains(p.signature))
                   .toList();
-              if (patterns.isNotEmpty) {
+              if (patterns.isNotEmpty && !_detectionDialogOpen) {
+                _detectionDialogOpen = true;
                 WidgetsBinding.instance.addPostFrameCallback((_) {
                   if (mounted) _showDetectionDialog(context, patterns.first);
                 });
@@ -105,8 +111,11 @@ class _ProfilesTabState extends State<ProfilesTab> {
     );
   }
 
-  void _showDetectionDialog(BuildContext context, DetectedAppliance pattern) {
-    showDialog(
+  Future<void> _showDetectionDialog(
+    BuildContext context,
+    DetectedAppliance pattern,
+  ) async {
+    await showDialog(
       context: context,
       barrierColor: Colors.black54,
       builder: (context) => AlertDialog(
@@ -116,25 +125,41 @@ class _ProfilesTabState extends State<ProfilesTab> {
           children: [
             Icon(Icons.warning_amber_rounded, color: Colors.red),
             SizedBox(width: 8),
-            Expanded(child: Text('New Appliance Pattern Detected', style: TextStyle(fontSize: 16))),
+            Expanded(
+              child: Text(
+                'New Appliance Pattern Detected',
+                style: TextStyle(fontSize: 16),
+              ),
+            ),
           ],
         ),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            const Text('Do you want to register this appliance?', textAlign: TextAlign.center),
+            const Text(
+              'Do you want to register this appliance?',
+              textAlign: TextAlign.center,
+            ),
             const SizedBox(height: 4),
-            Text('Detected on Outlet ${pattern.outlet}',
-                style: const TextStyle(color: Colors.grey, fontSize: 12)),
+            Text(
+              'Detected on Outlet ${pattern.outlet}',
+              style: const TextStyle(color: Colors.grey, fontSize: 12),
+            ),
             const SizedBox(height: 12),
             Container(
               padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(12)),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade100,
+                borderRadius: BorderRadius.circular(12),
+              ),
               child: Column(
                 children: [
                   _detailRow('Outlet:', pattern.outlet),
-                  _detailRow('Power draw:', '~${pattern.estimatedWattage.toStringAsFixed(0)} W'),
+                  _detailRow(
+                    'Power draw:',
+                    '~${pattern.estimatedWattage.toStringAsFixed(0)} W',
+                  ),
                   _detailRow('Signature:', pattern.signature, chip: true),
                 ],
               ),
@@ -143,30 +168,28 @@ class _ProfilesTabState extends State<ProfilesTab> {
         ),
         actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
         actions: [
-          Expanded(
-            child: OutlinedButton(
-              onPressed: () {
-                setState(() => _dismissedSignatures.add(pattern.signature));
-                widget.backend.dismissDetectedAppliance(pattern.signature);
-                Navigator.pop(context);
-              },
-              child: const Text('No, Disregard'),
-            ),
+          OutlinedButton(
+            onPressed: () {
+              setState(() => _dismissedSignatures.add(pattern.signature));
+              widget.backend.dismissDetectedAppliance(pattern.signature);
+              Navigator.pop(context);
+            },
+            child: const Text('No, Disregard'),
           ),
           const SizedBox(width: 8),
-          Expanded(
-            child: ElevatedButton(
-              style: ElevatedButton.styleFrom(backgroundColor: Colors.blue),
-              onPressed: () {
-                Navigator.pop(context);
-                _openRegistration(context, pattern: pattern);
-              },
-              child: const Text('Yes, Register'),
-            ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.blue),
+            onPressed: () {
+              Navigator.pop(context);
+              setState(() => _dismissedSignatures.add(pattern.signature));
+              _openRegistration(context, pattern: pattern);
+            },
+            child: const Text('Yes, Register'),
           ),
         ],
       ),
     );
+    _detectionDialogOpen = false;
   }
 
   Widget _detailRow(String label, String value, {bool chip = false}) {
@@ -178,17 +201,32 @@ class _ProfilesTabState extends State<ProfilesTab> {
           Text(label, style: const TextStyle(color: Colors.grey)),
           chip
               ? Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                  decoration: BoxDecoration(color: Colors.blue.shade50, borderRadius: BorderRadius.circular(6)),
-                  child: Text(value, style: TextStyle(color: Colors.blue.shade700, fontSize: 12)),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 2,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.blue.shade50,
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    value,
+                    style: TextStyle(color: Colors.blue.shade700, fontSize: 12),
+                  ),
                 )
-              : Text(value, style: const TextStyle(fontWeight: FontWeight.w600)),
+              : Text(
+                  value,
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                ),
         ],
       ),
     );
   }
 
-  void _openRegistration(BuildContext context, {required DetectedAppliance pattern}) {
+  void _openRegistration(
+    BuildContext context, {
+    required DetectedAppliance pattern,
+  }) {
     Navigator.push(
       context,
       MaterialPageRoute(
@@ -205,7 +243,10 @@ class _ProfilesTabState extends State<ProfilesTab> {
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (context) => EditApplianceProfileScreen(profile: profile, backend: widget.backend),
+        builder: (context) => EditApplianceProfileScreen(
+          profile: profile,
+          backend: widget.backend,
+        ),
       ),
     );
   }
@@ -227,7 +268,11 @@ class _ProfileListTile extends StatelessWidget {
   final ProfileStatus status;
   final VoidCallback onTap;
 
-  const _ProfileListTile({required this.profile, required this.status, required this.onTap});
+  const _ProfileListTile({
+    required this.profile,
+    required this.status,
+    required this.onTap,
+  });
 
   Color get _dotColor {
     switch (status) {
@@ -267,8 +312,11 @@ class _ProfileListTile extends StatelessWidget {
           height: 10,
           decoration: BoxDecoration(color: _dotColor, shape: BoxShape.circle),
         ),
-        title: Text(profile.applianceName, style: const TextStyle(fontWeight: FontWeight.bold)),
-        subtitle: Text('${profile.applianceType} · Outlet ${profile.outlet}'),
+        title: Text(
+          profile.applianceName,
+          style: const TextStyle(fontWeight: FontWeight.bold),
+        ),
+        subtitle: Text('${profile.applianceType} Â· Outlet ${profile.outlet}'),
         trailing: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -278,7 +326,14 @@ class _ProfileListTile extends StatelessWidget {
                 color: _dotColor.withValues(alpha: 0.15),
                 borderRadius: BorderRadius.circular(20),
               ),
-              child: Text(_badgeLabel, style: TextStyle(color: _dotColor, fontWeight: FontWeight.bold, fontSize: 12)),
+              child: Text(
+                _badgeLabel,
+                style: TextStyle(
+                  color: _dotColor,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 12,
+                ),
+              ),
             ),
             const SizedBox(width: 4),
             const Icon(Icons.chevron_right, color: Colors.grey),

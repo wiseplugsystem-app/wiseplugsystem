@@ -27,7 +27,9 @@ class SettingsTab extends StatelessWidget {
             elevation: 0,
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(16),
-              side: BorderSide(color: isDark ? Colors.grey.shade800 : Colors.grey.shade300),
+              side: BorderSide(
+                color: isDark ? Colors.grey.shade800 : Colors.grey.shade300,
+              ),
             ),
             child: Column(
               children: [

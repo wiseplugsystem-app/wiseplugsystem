@@ -1,4 +1,5 @@
 import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:wiseplug/models/models.dart';
 import 'package:wiseplug/services/firebase_service.dart';
@@ -10,6 +11,9 @@ class HomeTab extends StatefulWidget {
   final String deviceID;
   final List<ApplianceProfile> profiles;
   final double activePower;
+  final TelemetryLog? telemetry;
+  final bool telemetryLoading;
+  final bool telemetryHasError;
   final FirebaseBackendService backend;
   final VoidCallback onSettingsTap;
 
@@ -18,6 +22,9 @@ class HomeTab extends StatefulWidget {
     required this.deviceID,
     required this.profiles,
     required this.activePower,
+    this.telemetry,
+    this.telemetryLoading = false,
+    this.telemetryHasError = false,
     required this.backend,
     required this.onSettingsTap,
   });
@@ -138,14 +145,19 @@ class _HomeTabState extends State<HomeTab> {
                   Row(
                     children: [
                       StreamBuilder<List<AnomalyAlert>>(
-                        stream: widget.backend.streamActiveAlerts(widget.deviceID),
+                        stream: widget.backend.streamActiveAlerts(
+                          widget.deviceID,
+                        ),
                         builder: (context, snapshot) {
                           final count = snapshot.data?.length ?? 0;
                           return Stack(
                             clipBehavior: Clip.none,
                             children: [
                               IconButton(
-                                icon: const Icon(Icons.notifications_none_rounded, size: 26),
+                                icon: const Icon(
+                                  Icons.notifications_none_rounded,
+                                  size: 26,
+                                ),
                                 onPressed: () => _showAlertsSheet(context),
                               ),
                               if (count > 0)
@@ -154,7 +166,10 @@ class _HomeTabState extends State<HomeTab> {
                                   top: 6,
                                   child: Container(
                                     padding: const EdgeInsets.all(4),
-                                    constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+                                    constraints: const BoxConstraints(
+                                      minWidth: 16,
+                                      minHeight: 16,
+                                    ),
                                     decoration: const BoxDecoration(
                                       color: Colors.red,
                                       shape: BoxShape.circle,
@@ -162,7 +177,10 @@ class _HomeTabState extends State<HomeTab> {
                                     child: Text(
                                       '$count',
                                       textAlign: TextAlign.center,
-                                      style: const TextStyle(color: Colors.white, fontSize: 10),
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 10,
+                                      ),
                                     ),
                                   ),
                                 ),
@@ -201,9 +219,15 @@ class _HomeTabState extends State<HomeTab> {
                         outlet: outlet,
                         profile: profile,
                         statusColor: _statusColor(status),
-                        remainingLabel: profile == null ? '—' : _formatRemaining(_remaining(profile)),
-                        startLabel: profile == null ? '—' : _formatClock(profile.startTime),
-                        progress: profile == null || !profile.isOn ? 0.0 : _progressFor(profile),
+                        remainingLabel: profile == null
+                            ? '—'
+                            : _formatRemaining(_remaining(profile)),
+                        startLabel: profile == null
+                            ? '—'
+                            : _formatClock(profile.startTime),
+                        progress: profile == null || !profile.isOn
+                            ? 0.0
+                            : _progressFor(profile),
                       ),
                     ),
                   );
@@ -237,7 +261,9 @@ class _HomeTabState extends State<HomeTab> {
                 elevation: 0,
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(16),
-                  side: BorderSide(color: isDark ? Colors.grey.shade800 : Colors.grey.shade300),
+                  side: BorderSide(
+                    color: isDark ? Colors.grey.shade800 : Colors.grey.shade300,
+                  ),
                 ),
                 child: Column(
                   children: [
@@ -260,7 +286,10 @@ class _HomeTabState extends State<HomeTab> {
                     showDialog(
                       context: context,
                       barrierDismissible: false,
-                      builder: (_) => SafetyWarningDialog(alert: alert, backend: widget.backend),
+                      builder: (_) => SafetyWarningDialog(
+                        alert: alert,
+                        backend: widget.backend,
+                      ),
                     );
                   });
                 }
@@ -279,7 +308,10 @@ class _HomeTabState extends State<HomeTab> {
     return Column(
       children: [
         ListTile(
-          leading: Icon(Icons.power, color: profile == null ? Colors.grey : color),
+          leading: Icon(
+            Icons.power,
+            color: profile == null ? Colors.grey : color,
+          ),
           title: Text(
             'Outlet $outlet${profile != null ? ' — ${profile.applianceName}' : ''}',
             style: const TextStyle(fontWeight: FontWeight.w600),
@@ -288,7 +320,10 @@ class _HomeTabState extends State<HomeTab> {
             value: profile?.isOn ?? false,
             onChanged: profile == null
                 ? null
-                : (val) => widget.backend.toggleAppliancePower(profile.profileID, val),
+                : (val) => widget.backend.toggleAppliancePower(
+                    profile.profileID,
+                    val,
+                  ),
           ),
         ),
         if (!isLast) const Divider(height: 1),
@@ -313,16 +348,32 @@ class _HomeTabState extends State<HomeTab> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('Active Alerts', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                  const Text(
+                    'Active Alerts',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
                   const SizedBox(height: 12),
                   if (alerts.isEmpty)
-                    const Text('No active alerts.', style: TextStyle(color: Colors.grey))
+                    const Text(
+                      'No active alerts.',
+                      style: TextStyle(color: Colors.grey),
+                    )
                   else
-                    ...alerts.map((a) => ListTile(
-                          leading: const Icon(Icons.warning_amber_rounded, color: Colors.red),
-                          title: Text(a.alertType, style: const TextStyle(fontWeight: FontWeight.bold)),
-                          subtitle: Text('Triggered: ${_formatClock(a.triggerTime)}'),
-                        )),
+                    ...alerts.map(
+                      (a) => ListTile(
+                        leading: const Icon(
+                          Icons.warning_amber_rounded,
+                          color: Colors.red,
+                        ),
+                        title: Text(
+                          a.alertType,
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        subtitle: Text(
+                          'Triggered: ${_formatClock(a.triggerTime)}',
+                        ),
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -365,13 +416,22 @@ class _OutletCard extends StatelessWidget {
         children: [
           Row(
             children: [
-              Text('Outlet $outlet',
-                  style: const TextStyle(fontSize: 12, color: Colors.grey, fontWeight: FontWeight.bold)),
+              Text(
+                'Outlet $outlet',
+                style: const TextStyle(
+                  fontSize: 12,
+                  color: Colors.grey,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
               const SizedBox(width: 6),
               Container(
                 width: 8,
                 height: 8,
-                decoration: BoxDecoration(color: statusColor, shape: BoxShape.circle),
+                decoration: BoxDecoration(
+                  color: statusColor,
+                  shape: BoxShape.circle,
+                ),
               ),
             ],
           ),
@@ -381,11 +441,17 @@ class _OutletCard extends StatelessWidget {
             style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
             overflow: TextOverflow.ellipsis,
           ),
-          Text(profile?.applianceType ?? '—', style: const TextStyle(fontSize: 12, color: Colors.grey)),
+          Text(
+            profile?.applianceType ?? '—',
+            style: const TextStyle(fontSize: 12, color: Colors.grey),
+          ),
           const SizedBox(height: 10),
           _infoRow('Start', startLabel),
           const SizedBox(height: 4),
-          _infoRow('Safety Limit', profile == null ? '—' : '${profile!.safetyCeilingDuration}m total'),
+          _infoRow(
+            'Safety Limit',
+            profile == null ? '—' : '${profile!.safetyCeilingDuration}m total',
+          ),
           const SizedBox(height: 4),
           _infoRow('Remaining', remainingLabel, valueColor: statusColor),
           const SizedBox(height: 8),
@@ -394,7 +460,9 @@ class _OutletCard extends StatelessWidget {
             child: LinearProgressIndicator(
               value: progress,
               minHeight: 4,
-              backgroundColor: isDark ? Colors.grey.shade800 : Colors.grey.shade200,
+              backgroundColor: isDark
+                  ? Colors.grey.shade800
+                  : Colors.grey.shade200,
               valueColor: AlwaysStoppedAnimation(statusColor),
             ),
           ),
@@ -408,7 +476,14 @@ class _OutletCard extends StatelessWidget {
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
         Text(label, style: const TextStyle(fontSize: 11, color: Colors.grey)),
-        Text(value, style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: valueColor)),
+        Text(
+          value,
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.bold,
+            color: valueColor,
+          ),
+        ),
       ],
     );
   }
@@ -429,15 +504,23 @@ class SummaryCard extends StatelessWidget {
       color: isDark ? Colors.grey.shade900 : Colors.white,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(16),
-        side: BorderSide(color: isDark ? Colors.grey.shade800 : Colors.grey.shade300),
+        side: BorderSide(
+          color: isDark ? Colors.grey.shade800 : Colors.grey.shade300,
+        ),
       ),
       child: Padding(
         padding: const EdgeInsets.all(18),
         child: Column(
           children: [
-            Text(value, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+            Text(
+              value,
+              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+            ),
             const SizedBox(height: 4),
-            Text(label, style: const TextStyle(color: Colors.grey, fontSize: 13)),
+            Text(
+              label,
+              style: const TextStyle(color: Colors.grey, fontSize: 13),
+            ),
           ],
         ),
       ),
