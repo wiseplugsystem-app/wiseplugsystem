@@ -92,7 +92,7 @@ void main() {
         Stream.value(catalog),
         Stream.value({
           'OUTLET_B': {
-            id: {'name': 'Desk fan', 'applianceType': 'Electric fan'},
+            id: {'name': 'Desk fan'}, // name only: no appliance type
           },
         }),
       ).first;

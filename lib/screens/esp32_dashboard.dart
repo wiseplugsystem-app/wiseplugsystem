@@ -290,15 +290,6 @@ class Esp32ProfileEditorState extends State<Esp32ProfileEditor> {
   late final _name = TextEditingController(
     text: widget.registration ? '' : widget.profile.name,
   );
-  static const types = [
-    'Rice cooker',
-    'Flat iron / hair straightener',
-    'Electric fan',
-    'Other',
-  ];
-  late String _type = types.contains(widget.profile.applianceType)
-      ? widget.profile.applianceType!
-      : 'Other';
   late final _runtime = TextEditingController(
     text: widget.profile.hasRuntimeLimit ? '${widget.profile.maxRunTime}' : '',
   );
@@ -344,7 +335,7 @@ class Esp32ProfileEditorState extends State<Esp32ProfileEditor> {
           int.tryParse(_ceiling.text) ?? 0,
         );
       }
-      await widget.service.registerProfile(widget.profile, _name.text, _type);
+      await widget.service.registerProfile(widget.profile, _name.text);
       if (mounted) _closeSelf(true);
     } catch (error) {
       if (mounted) setState(() => _error = '$error');
@@ -375,20 +366,6 @@ class Esp32ProfileEditorState extends State<Esp32ProfileEditor> {
               labelText: 'Appliance Name',
               border: OutlineInputBorder(),
             ),
-          ),
-          const SizedBox(height: 20),
-          DropdownButtonFormField<String>(
-            initialValue: _type,
-            isExpanded: true,
-            decoration: const InputDecoration(
-              labelText: 'Type of Appliance',
-              border: OutlineInputBorder(),
-            ),
-            items: [
-              for (final type in types)
-                DropdownMenuItem(value: type, child: Text(type)),
-            ],
-            onChanged: _busy ? null : (value) => setState(() => _type = value!),
           ),
           if (!widget.registration) ...[
             TextField(

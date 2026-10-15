@@ -353,4 +353,51 @@ void main() {
     await tester.pumpWidget(const SizedBox());
     await device.close();
   });
+
+  testWidgets('power control shows the registered appliance name', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(420, 920));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final device = TestDevice();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Esp32Dashboard(
+          service: device,
+          darkMode: false,
+          onDarkModeChanged: (_) {},
+        ),
+      ),
+    );
+    await tester.pump();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    device.profiles.add([
+      LearnedAppliance.fromMap('B', 'sig-1', {
+        'name': 'Desk fan',
+        'registered': true,
+      }),
+    ]);
+    device.readings.add({
+      'B': OutletReading.fromMap('B', {
+        'currentState': 'ACTIVE',
+        'status': 'Active',
+        'sessionID': 'boot',
+        'profileID': 'sig-1',
+        'appliance': 'UNNAMED_DEVICE_1',
+        'power_W': 45,
+        'last_updated_ms': now,
+      }),
+    });
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('Outlet B · On · monitoring enabled'),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    // Summary card and Power Control row both use the registered name.
+    expect(find.text('Desk fan'), findsNWidgets(2));
+    expect(find.text('UNNAMED_DEVICE_1'), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+    await device.close();
+  });
 }

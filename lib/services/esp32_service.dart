@@ -36,6 +36,9 @@ Stream<List<LearnedAppliance>> combineProfileStreams(
                     databaseMap(registrations['OUTLET_$outlet'])[entry.key],
                   ),
                   'firmwareName': databaseMap(entry.value)['name'] ?? entry.key,
+                  'registered': databaseMap(
+                    registrations['OUTLET_$outlet'],
+                  ).containsKey(entry.key),
                   'registrationMetadataAvailable': metadataAvailable,
                 },
           },
@@ -184,26 +187,17 @@ class Esp32Service {
         .onValue
         .map((event) => event.snapshot.value),
   );
-  Future<void> registerProfile(
-    LearnedAppliance profile,
-    String name,
-    String type,
-  ) async {
-    if (name.trim().isEmpty ||
-        utf8.encode(name.trim()).length > 63 ||
-        ![
-          'Rice cooker',
-          'Flat iron / hair straightener',
-          'Electric fan',
-          'Other',
-        ].contains(type)) {
-      throw ArgumentError('Enter a name up to 63 bytes and an appliance type.');
+  /// Saves the user's name for a learned signature. update() keeps any
+  /// appliance type saved by older versions of the app.
+  Future<void> registerProfile(LearnedAppliance profile, String name) async {
+    if (name.trim().isEmpty || utf8.encode(name.trim()).length > 63) {
+      throw ArgumentError('Enter an appliance name up to 63 bytes.');
     }
     await database
         .ref(
           'appliance_registrations/OUTLET_${profile.outlet}/${profile.profileID}',
         )
-        .set({'name': name.trim(), 'applianceType': type});
+        .update({'name': name.trim()});
   }
 
   Stream<Map<String, dynamic>> streamPreferences() {

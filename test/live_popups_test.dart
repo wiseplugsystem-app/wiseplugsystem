@@ -25,17 +25,13 @@ class PopupDevice extends Fake implements Esp32Service {
   @override
   Stream<Map<String, dynamic>> streamPreferences() => Stream.value({});
   @override
-  Future<void> registerProfile(
-    LearnedAppliance profile,
-    String name,
-    String type,
-  ) async {
+  Future<void> registerProfile(LearnedAppliance profile, String name) async {
     if (registrationGate != null) await registrationGate!.future;
     savedName = name;
     profiles.add([
       LearnedAppliance.fromMap(profile.outlet, profile.profileID, {
         'name': name,
-        'applianceType': type,
+        'registered': true,
       }),
     ]);
   }

@@ -82,8 +82,10 @@ class OutletReading {
 
 class LearnedAppliance {
   final bool registrationMetadataAvailable;
-  bool get needsRegistration =>
-      applianceType == null || applianceType!.trim().isEmpty;
+
+  /// Registered once the user has named it; a type is optional.
+  final bool registered;
+  bool get needsRegistration => !registered;
   final String firmwareName;
   final String outlet, profileID, name;
   final double? baselineWattage, peakPower, current, voltage, powerFactor;
@@ -103,6 +105,9 @@ class LearnedAppliance {
           map['firmwareName']?.toString() ??
           map['name']?.toString() ??
           profileID,
+      registered =
+          map['registered'] == true ||
+          (map['applianceType']?.toString().trim().isNotEmpty ?? false),
       applianceType = map['applianceType']?.toString(),
       totalSessions = sensorNumber(map['totalSessions'])?.toInt(),
       hasSafetyLimit = (sensorNumber(map['safetyCeilingDuration']) ?? 0) > 0,

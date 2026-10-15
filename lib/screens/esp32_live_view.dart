@@ -600,6 +600,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                   outlet: key,
                   now: now,
                   on: gadget?.outlet(key),
+                  applianceName: _applianceName(_readings[key], now),
                 ),
               ),
             const Text(
@@ -610,6 +611,16 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
         ),
       ),
     ];
+  }
+
+  /// Display name for the appliance running on an outlet, or null when none:
+  /// the registered name, "Unregistered appliance" for a new signature, or
+  /// the firmware's live label (e.g. while it is still recognizing).
+  String? _applianceName(OutletReading? reading, DateTime now) {
+    if (_readError || reading?.hasConnectedAppliance(now) != true) return null;
+    final profile = _profileError ? null : connectedProfile(reading, _profiles);
+    if (profile == null) return reading!.appliance;
+    return profile.needsRegistration ? 'Unregistered appliance' : profile.name;
   }
 
   Widget _summary(String key, DateTime now) {
@@ -652,7 +663,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
           const SizedBox(height: 16),
           Text(
             connected
-                ? profile?.name ?? reading!.appliance
+                ? _applianceName(reading, now)!
                 : fresh && reading?.sensorValid == false
                 ? 'Meter not responding'
                 : fresh
@@ -939,10 +950,11 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                                   ),
                                 ),
                                 const SizedBox(height: 8),
-                                Text(
-                                  'Type of Appliance: ${p.applianceType ?? 'Not available'}',
-                                  style: const TextStyle(color: Colors.grey),
-                                ),
+                                if (p.applianceType != null)
+                                  Text(
+                                    'Type of Appliance: ${p.applianceType}',
+                                    style: const TextStyle(color: Colors.grey),
+                                  ),
                               ],
                             ),
                           ),
@@ -981,6 +993,9 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                       outlet: p.outlet,
                       reading: connected && enabled ? reading : null,
                       now: now,
+                      applianceName: p.needsRegistration
+                          ? 'Unregistered appliance'
+                          : p.name,
                     ),
                     if (!connected)
                       const Padding(
@@ -1389,12 +1404,16 @@ class _PowerControl extends StatefulWidget {
 
   /// Live switch state from devices/gadget-1/status; falls back to telemetry.
   final bool? on;
+
+  /// Registered or recognized appliance on this outlet; null when empty.
+  final String? applianceName;
   const _PowerControl({
     required this.service,
     required this.reading,
     required this.outlet,
     required this.now,
     this.on,
+    this.applianceName,
   });
   @override
   State<_PowerControl> createState() => _PowerControlState();
@@ -1475,12 +1494,15 @@ class _PowerControlState extends State<_PowerControl> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Outlet ${widget.outlet}${r?.hasConnectedAppliance(widget.now) == true ? ' — ${r!.appliance}' : ''}',
+                      widget.applianceName ?? 'Outlet ${widget.outlet}',
                       style: const TextStyle(fontWeight: FontWeight.w700),
                     ),
                     const SizedBox(height: 5),
                     Text(
-                      _busy
+                      (widget.applianceName == null
+                          ? ''
+                          : 'Outlet ${widget.outlet} · ') +
+                      (_busy
                           ? 'Waiting for ESP32…'
                           : r == null || !r.isFresh(widget.now)
                           ? 'Unavailable'
@@ -1488,7 +1510,7 @@ class _PowerControlState extends State<_PowerControl> {
                           ? 'Locked · reset with button or safety alert'
                           : on
                           ? 'On · monitoring enabled'
-                          : 'Off · monitoring disabled',
+                          : 'Off · monitoring disabled'),
                       style: const TextStyle(color: Colors.grey),
                     ),
                   ],
