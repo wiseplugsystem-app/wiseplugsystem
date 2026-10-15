@@ -8,6 +8,9 @@ import 'dart:convert';
 import '../models/esp32_data.dart';
 import '../models/gadget_status.dart';
 import 'device_binding.dart';
+import 'wifi_provisioning.dart';
+
+export 'wifi_provisioning.dart' show WifiProvisionStage, WifiProvisionUpdate;
 
 /// Registration metadata is optional for displaying the firmware catalog.
 Stream<List<LearnedAppliance>> combineProfileStreams(
@@ -86,6 +89,26 @@ Stream<List<LearnedAppliance>> combineProfileStreams(
     },
   );
   return controller.stream;
+}
+
+/// The ESP32 refused a command; [toString] explains it for the user.
+class DeviceRejection implements Exception {
+  final String code;
+  const DeviceRejection(this.code);
+
+  @override
+  String toString() => switch (code) {
+    'REJECTED_STORAGE_FAILURE' =>
+      'The WisePlug could not save to its memory, so the outlet stays off for safety. '
+          'Restart the WisePlug and try again; if this repeats, re-upload the firmware with '
+          '"Erase All Flash Before Sketch Upload" enabled.',
+    'REJECTED_STALE' =>
+      'The outlet changed state before the command arrived. Try again.',
+    'REJECTED_PHYSICAL_RESET_REQUIRED' =>
+      'This outlet is locked. Use Reset Safety in the alert or the outlet\'s button.',
+    'REJECTED_INVALID' => 'The outlet cannot do that in its current state.',
+    _ => 'The WisePlug refused the command ($code).',
+  };
 }
 
 class Esp32Service {
@@ -173,6 +196,21 @@ class Esp32Service {
     }
   }
 
+  /// Sends new Wi-Fi credentials and reports progress until the ESP32 is
+  /// back online on the new network, has rolled back, or timed out.
+  Stream<WifiProvisionUpdate> provisionWifi(
+    String ssid,
+    String password,
+  ) async* {
+    await saveWifiConfig(ssid, password);
+    // Watch only after saving: set() replaced any earlier acknowledgement.
+    yield* trackWifiProvisioning(
+      config: streamWifiConfig(),
+      status: streamGadgetStatus(),
+      ssid: ssid,
+    );
+  }
+
   /// Remotely clears a WARNING or LOCKED_OUT outlet back to IDLE.
   Future<void> resetSafety(OutletReading reading) =>
       command(reading, 'RESET_SAFETY');
@@ -256,7 +294,7 @@ class Esp32Service {
         if (result == 'ACCEPTED') {
           completer.complete();
         } else {
-          completer.completeError(StateError('ESP32: $result'));
+          completer.completeError(DeviceRejection('$result'));
         }
       },
       onError: (Object error) {

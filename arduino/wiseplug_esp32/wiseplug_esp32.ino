@@ -128,13 +128,46 @@ void lock(SocketChannel& ch) {
   endSession(ch); persistSafety(ch);
   Serial.printf("[%s] LOCKED OUT, relay off\n", ch.outlet);
 }
+// Keys left by earlier sketches. NVS is only ~16 KB (shared with Wi-Fi), so
+// stale blobs make later saves fail.
+void removeStaleKeys(SocketChannel& ch) {
+  for (const char* key : {"profiles_v2", "count_v2", "count"}) {
+    if (ch.prefs.isKey(key)) ch.prefs.remove(key);
+  }
+  for (uint32_t n = 0; n < MAX_APPLIANCES; ++n) {
+    char key[16]; snprintf(key, sizeof(key), "app_%lu", (unsigned long)n);
+    if (ch.prefs.isKey(key)) ch.prefs.remove(key);
+  }
+}
+// Stores only the learned entries; the blob length gives the count.
+bool writeProfiles(SocketChannel& ch) {
+  bool ok;
+  if (!ch.data.count) {
+    ok = !ch.prefs.isKey("profiles_v3") || ch.prefs.remove("profiles_v3");
+  } else {
+    size_t bytes = ch.data.count * sizeof(ApplianceSignature);
+    ok = ch.prefs.putBytes("profiles_v3", ch.data.profiles, bytes) == bytes;
+  }
+  if (ok && ch.prefs.isKey("count_v3")) ch.prefs.remove("count_v3");  // older fixed-size format
+  return ok;
+}
 bool saveProfiles(SocketChannel& ch) {
-  if (ch.prefs.putBytes("profiles_v3", ch.data.profiles, sizeof(ch.data.profiles)) != sizeof(ch.data.profiles) ||
-      ch.prefs.putUInt("count_v3", ch.data.count) != sizeof(uint32_t)) {
-    ch.storageOK = false; lock(ch); return false;
+  if (!writeProfiles(ch)) {
+    removeStaleKeys(ch);  // free space, then retry once
+    if (!writeProfiles(ch)) {
+      Serial.printf("[%s] Flash storage full: cannot save appliances\n", ch.outlet);
+      ch.storageOK = false; lock(ch); return false;
+    }
   }
   ++ch.data.profilesVersion;
   return true;
+}
+// Called before accepting a reset when storage had failed.
+bool repairStorage(SocketChannel& ch) {
+  ch.prefs.end();
+  if (!ch.prefs.begin(ch.ns, false)) return false;
+  removeStaleKeys(ch);
+  return writeProfiles(ch);
 }
 void beginAlert(SocketChannel& ch, const char* type, uint64_t now) {
   ch.data.safety.state = SocketState::Warning;
@@ -148,19 +181,30 @@ void beginAlert(SocketChannel& ch, const char* type, uint64_t now) {
 }
 void loadProfiles(SocketChannel& ch) {
   auto& d = ch.data;
-  d.count = ch.prefs.getUInt("count_v3", 0);
-  if (d.count > MAX_APPLIANCES || (d.count && ch.prefs.getBytes("profiles_v3", d.profiles, sizeof(d.profiles)) != sizeof(d.profiles))) {
-    d.count = 0; ch.storageOK = false; return;
+  size_t len = ch.prefs.isKey("profiles_v3") ? ch.prefs.getBytesLength("profiles_v3") : 0;
+  uint32_t stored = len / sizeof(ApplianceSignature);
+  bool rewrite = ch.prefs.isKey("count_v3");  // older fixed-size format: count stored separately
+  if (rewrite) stored = min(stored, ch.prefs.getUInt("count_v3", 0));
+  if (len % sizeof(ApplianceSignature) || stored > MAX_APPLIANCES ||
+      (stored && ch.prefs.getBytes("profiles_v3", d.profiles, sizeof(d.profiles)) != len)) {
+    // A corrupt catalog is not a hazard: drop it instead of locking the outlet.
+    Serial.printf("[%s] Stored appliances unreadable, starting a new list\n", ch.outlet);
+    stored = 0; rewrite = true;
   }
-  for (uint32_t n = 0; n < d.count; ++n) {
-    auto& p = d.profiles[n];
+  d.count = 0;
+  for (uint32_t n = 0; n < stored; ++n) {
+    auto p = d.profiles[n];
     if (!memchr(p.name, 0, sizeof(p.name)) || !memchr(p.profileID, 0, sizeof(p.profileID)) || !p.maxRunTime ||
-        p.safetyCeilingDuration < p.maxRunTime || p.safetyCeilingDuration > 604800) ch.storageOK = false;
-    p.name[63] = 0; p.profileID[63] = 0;
+        p.safetyCeilingDuration < p.maxRunTime || p.safetyCeilingDuration > 604800) { rewrite = true; continue; }
+    d.profiles[d.count++] = p;
   }
   // One-time migration of appliances learned by the previous sketch.
-  int legacy = ch.prefs.getInt("count", 0);
-  if (legacy <= 0) return;
+  int legacy = ch.prefs.isKey("count") ? ch.prefs.getInt("count", 0) : 0;
+  if (legacy <= 0) {
+    if (rewrite) saveProfiles(ch);
+    removeStaleKeys(ch);
+    return;
+  }
   for (int n = 0; n < legacy && n < int(MAX_APPLIANCES) && d.count < MAX_APPLIANCES; ++n) {
     char key[16]; snprintf(key, sizeof(key), "app_%d", n);
     LegacySignature old;
@@ -174,7 +218,7 @@ void loadProfiles(SocketChannel& ch) {
     uint32_t limit = old.safetyLimitMinutes > 0 ? uint32_t(old.safetyLimitMinutes) * 60 : DEFAULT_LIMIT_S;
     p.maxRunTime = p.safetyCeilingDuration = min(limit, uint32_t(604800));
   }
-  if (saveProfiles(ch)) ch.prefs.remove("count");
+  if (saveProfiles(ch)) removeStaleKeys(ch);
 }
 
 // ==========================================
@@ -253,7 +297,7 @@ void handleCommand(SocketChannel& ch, const Command& cmd, uint64_t now) {
   if (strcmp(cmd.type, "RESET_SAFETY") == 0) {
     // The only remote command accepted while locked out.
     if (!fresh) result = "REJECTED_STALE";
-    else if (!ch.storageOK) result = "REJECTED_STORAGE_FAILURE";
+    else if (!ch.storageOK && !(ch.storageOK = repairStorage(ch))) result = "REJECTED_STORAGE_FAILURE";
     else if (!d.safety.remoteReset()) result = "REJECTED_INVALID";
     else {
       endSession(ch);
@@ -382,7 +426,7 @@ void addOutlet(JsonDocument& root, int i, const Snapshot& s, bool includeCatalog
   root[b + "status"] = st == SocketState::LockedOut ? "LOCKED_OUT" : (running ? "Active" : "Idle");
   root[b + "currentState"] = stateName(st); root[b + "sessionID"] = sessionID;
   root[b + "revision"] = s.safety.revision; root[b + "runtime_warning"] = s.safety.runtimeWarning;
-  root[b + "relay_on"] = relayEnergized(st);
+  root[b + "relay_on"] = relayEnergized(st); root[b + "storage_ok"] = ch.storageOK;
   root[b + "profileID"] = s.activeID >= 0 ? s.profiles[s.activeID].profileID : "";
   // The effective deadline, including any accepted runtime override.
   root[b + "safetyDeadline"] = running && s.safety.deadline > s.capturedMono && s.capturedEpoch
@@ -440,6 +484,7 @@ void addStatus(JsonDocument& root, const Snapshot* s) {
   }
   root[b + "powerDraw"] = draw; root[b + "connectionStatus"] = "Online";
   root[b + "safetyTriggered"] = triggered; root[b + "lastSeen"][".sv"] = "timestamp";
+  root[b + "wifiSSID"] = WiFi.SSID();  // lets the app confirm a Wi-Fi change
   if (remainingMs >= 0) root[b + "remainingLimit"] = double(remainingMs) / 1000.0;
   else root[b + "remainingLimit"] = nullptr;  // null deletes the field
 }
@@ -464,7 +509,9 @@ void checkWifiConfig() {
   String ssid = doc["ssid"].as<const char*>(), pass = doc["password"].as<const char*>();
   if (!updatedAt || updatedAt == appliedConfig || !ssid.length() || ssid.length() > 32 || pass.length() > 63) return;
   appliedConfig = updatedAt; wifiPrefs.putLong64("applied", updatedAt);
-  JsonDocument ack; ack["receivedAt"] = updatedAt; String ackBody; serializeJson(ack, ackBody);
+  // ackAt (server time) marks the switch: later status updates come from the new attempt.
+  JsonDocument ack; ack["receivedAt"] = updatedAt; ack["ackAt"][".sv"] = "timestamp";
+  String ackBody; serializeJson(ack, ackBody);
   firebaseRequest("PATCH", path, ackBody);
   firebaseRequest("DELETE", path + "/password");  // keep the secret only on the device
   previousSsid = WiFi.SSID(); previousPass = WiFi.psk();

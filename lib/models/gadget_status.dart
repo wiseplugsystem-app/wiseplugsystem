@@ -15,6 +15,9 @@ class GadgetStatus {
   final double? remainingLimit;
   final DateTime? lastSeen;
 
+  /// Wi-Fi network the ESP32 is connected to.
+  final String? wifiSSID;
+
   const GadgetStatus({
     this.outletA = false,
     this.outletB = false,
@@ -23,6 +26,7 @@ class GadgetStatus {
     this.remainingLimit,
     this.safetyTriggered = false,
     this.lastSeen,
+    this.wifiSSID,
   });
 
   factory GadgetStatus.fromMap(Map<String, dynamic> map) => GadgetStatus(
@@ -33,6 +37,7 @@ class GadgetStatus {
     remainingLimit: sensorNumber(map['remainingLimit']),
     safetyTriggered: map['safetyTriggered'] == true,
     lastSeen: deviceTime(map['lastSeen']),
+    wifiSSID: map['wifiSSID']?.toString(),
   );
 
   bool isOnline(DateTime now) =>
