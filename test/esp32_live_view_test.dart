@@ -7,6 +7,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:wiseplug/models/esp32_data.dart';
+import 'package:wiseplug/models/gadget_status.dart';
 import 'package:wiseplug/screens/esp32_dashboard.dart';
 import 'package:wiseplug/screens/esp32_live_view.dart';
 import 'package:wiseplug/services/esp32_service.dart';
@@ -14,6 +15,9 @@ import 'package:wiseplug/services/esp32_service.dart';
 class TestDevice extends Fake implements Esp32Service {
   final readings = StreamController<Map<String, OutletReading>>.broadcast();
   final profiles = StreamController<List<LearnedAppliance>>.broadcast();
+  final gadget = StreamController<GadgetStatus>.broadcast();
+  @override
+  Stream<GadgetStatus> streamGadgetStatus() => gadget.stream;
   Map<String, bool>? saved;
   final commands = <String>[];
   @override
@@ -39,6 +43,7 @@ class TestDevice extends Fake implements Esp32Service {
   Future<void> close() async {
     await readings.close();
     await profiles.close();
+    await gadget.close();
   }
 }
 
@@ -139,7 +144,14 @@ void main() {
         }),
       };
       device.profiles.add(profiles);
+      GadgetStatus online(double watts) => GadgetStatus(
+        outletA: true,
+        powerDraw: watts,
+        connectionStatus: 'Online',
+        lastSeen: DateTime.now(),
+      );
       device.readings.add(readings(321));
+      device.gadget.add(online(321));
       await tester.pumpAndSettle();
       expect(find.text('321 W'), findsOneWidget);
       expect(find.text('1 / 2'), findsOneWidget);
@@ -159,6 +171,7 @@ void main() {
         });
       }
       device.readings.add(readings(654));
+      device.gadget.add(online(654));
       await tester.pumpAndSettle();
       expect(find.text('654 W'), findsOneWidget);
       await tester.tap(find.text('Profiles'));
@@ -225,12 +238,13 @@ void main() {
       expect(find.text('— / 2'), findsOneWidget);
       expect(find.text('847 W'), findsNothing);
       await tester.scrollUntilVisible(
-        find.text('Power Control'),
+        find.byType(Switch).first,
         200,
         scrollable: find.byType(Scrollable).first,
       );
       expect(find.byType(Switch), findsNWidgets(2));
       expect(find.text('Measurements'), findsNothing);
+      await tester.pumpAndSettle();
       await tester.tap(find.byType(Switch).first);
       await tester.pumpAndSettle();
       expect(find.textContaining('Connect the ESP32'), findsOneWidget);
@@ -244,13 +258,15 @@ void main() {
           }),
         });
         await tester.pumpAndSettle();
+        await tester.ensureVisible(find.byType(Switch).first);
+        await tester.pumpAndSettle();
         await tester.tap(find.byType(Switch).first);
         await tester.pumpAndSettle();
       }
       expect(device.commands, ['A:TURN_OFF', 'A:TURN_ON']);
       await tester.tap(find.text('Settings').last);
       await tester.pumpAndSettle();
-      expect(find.text('Waiting for ESP32 connection'), findsOneWidget);
+      expect(find.text('gadget-1 · Offline'), findsOneWidget);
       await tester.tap(find.text('Alert Types'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('New devices').last);

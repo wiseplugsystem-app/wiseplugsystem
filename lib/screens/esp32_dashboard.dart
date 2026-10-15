@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../models/esp32_data.dart';
 import '../services/esp32_service.dart';
+import '../widgets/safety_alert_listener.dart';
 
 String measurement(double? value, String unit, [int digits = 1]) =>
     value == null
@@ -27,10 +28,13 @@ class Esp32Dashboard extends StatefulWidget {
 class _Esp32DashboardState extends State<Esp32Dashboard> {
   late final Esp32Service _service = widget.service ?? Esp32Service();
   @override
-  Widget build(BuildContext context) => Esp32LiveView(
+  Widget build(BuildContext context) => SafetyAlertListener(
     service: _service,
-    darkMode: widget.darkMode,
-    onDarkModeChanged: widget.onDarkModeChanged,
+    child: Esp32LiveView(
+      service: _service,
+      darkMode: widget.darkMode,
+      onDarkModeChanged: widget.onDarkModeChanged,
+    ),
   );
 }
 
@@ -84,7 +88,7 @@ class Esp32OutletCard extends StatelessWidget {
               ),
               if (data.isLockedOut)
                 const Text(
-                  'LOCKED OUT — inspect the appliance, then press its physical button to reset.',
+                  'LOCKED OUT — inspect the appliance, then reset it with its physical button or the safety alert.',
                   style: TextStyle(
                     color: Colors.red,
                     fontWeight: FontWeight.bold,
@@ -218,18 +222,9 @@ class Esp32ProfileEditor extends StatefulWidget {
 }
 
 class Esp32ProfileEditorState extends State<Esp32ProfileEditor> {
-  late final _name = TextEditingController(
-    text: widget.registration ? '' : widget.profile.name,
-  );
-  static const types = [
-    'Rice cooker',
-    'Flat iron / hair straightener',
-    'Electric fan',
-    'Other',
-  ];
-  late String _type = types.contains(widget.profile.applianceType)
-      ? widget.profile.applianceType!
-      : 'Other';
+  late final _name = TextEditingController(text: widget.registration ? '' : widget.profile.name);
+  static const types = ['Rice cooker', 'Flat iron / hair straightener', 'Electric fan', 'Other'];
+  late String _type = types.contains(widget.profile.applianceType) ? widget.profile.applianceType! : 'Other';
   late final _runtime = TextEditingController(
     text: widget.profile.hasRuntimeLimit ? '${widget.profile.maxRunTime}' : '',
   );
@@ -248,6 +243,18 @@ class Esp32ProfileEditorState extends State<Esp32ProfileEditor> {
     super.dispose();
   }
 
+  /// Closes this editor even if a safety alert was pushed above it; a plain
+  /// pop would dismiss that alert instead.
+  void _closeSelf(bool result) {
+    final route = ModalRoute.of(context);
+    if (route == null || !route.isActive) return;
+    if (route.isCurrent) {
+      Navigator.pop(context, result);
+    } else {
+      Navigator.removeRoute(context, route, result);
+    }
+  }
+
   Future<void> _save() async {
     setState(() {
       _busy = true;
@@ -264,15 +271,7 @@ class Esp32ProfileEditorState extends State<Esp32ProfileEditor> {
         );
       }
       await widget.service.registerProfile(widget.profile, _name.text, _type);
-      if (mounted) {
-        final route = ModalRoute.of(context);
-        if (route != null && !route.isCurrent) {
-          // A safety warning may have opened above this form while saving.
-          Navigator.of(context).removeRoute(route);
-        } else {
-          Navigator.pop(context, true);
-        }
-      }
+      if (mounted) _closeSelf(true);
     } catch (error) {
       if (mounted) setState(() => _error = '$error');
     } finally {
@@ -282,39 +281,25 @@ class Esp32ProfileEditorState extends State<Esp32ProfileEditor> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-    title: Text(
-      widget.registration ? 'Appliance Registration' : 'Edit Appliance Profile',
-    ),
+    title: Text(widget.registration ? 'Appliance Registration' : 'Edit Appliance Profile'),
     content: SingleChildScrollView(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           Text('Outlet ${widget.profile.outlet} · detected signature'),
-          SelectableText(
-            widget.profile.profileID,
-            style: const TextStyle(color: Colors.blue),
-          ),
+          SelectableText(widget.profile.profileID, style: const TextStyle(color: Colors.blue)),
           const SizedBox(height: 20),
           TextField(
             controller: _name,
             enabled: !_busy,
-            decoration: const InputDecoration(
-              labelText: 'Appliance Name',
-              border: OutlineInputBorder(),
-            ),
+            decoration: const InputDecoration(labelText: 'Appliance Name', border: OutlineInputBorder()),
           ),
           const SizedBox(height: 20),
           DropdownButtonFormField<String>(
             initialValue: _type,
             isExpanded: true,
-            decoration: const InputDecoration(
-              labelText: 'Type of Appliance',
-              border: OutlineInputBorder(),
-            ),
-            items: [
-              for (final type in types)
-                DropdownMenuItem(value: type, child: Text(type)),
-            ],
+            decoration: const InputDecoration(labelText: 'Type of Appliance', border: OutlineInputBorder()),
+            items: [for (final type in types) DropdownMenuItem(value: type, child: Text(type))],
             onChanged: _busy ? null : (value) => setState(() => _type = value!),
           ),
           if (!widget.registration) ...[

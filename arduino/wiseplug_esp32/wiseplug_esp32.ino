@@ -1,21 +1,59 @@
+// WisePlug ESP32 firmware: two PZEM-004T v3 meters, two relays, Firebase
+// Realtime Database over REST. Matches the Flutter app's protocol:
+//   telemetry_logs/outlet_A|B              live state, read by the app
+//   appliance_profiles/OUTLET_A|B/<id>     learned appliance catalog
+//   commands/outlet_A|B -> command_results confirmed app commands
+//   alerts/<alertID>                       push-notification records
+//   devices/gadget-1/status, /wifiConfig   gadget summary, Wi-Fi provisioning
+//
+// Libraries: PZEM004Tv30, WiFiManager (tzapu), ArduinoJson 7.
 #include <PZEM004Tv30.h>
 #include <Preferences.h>
 #include <WiFi.h>
-#include <FirebaseESP32.h>
+#include <WiFiManager.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+// Exact 64-bit millisecond timestamps (doubles would be rounded in JSON).
+#define ARDUINOJSON_USE_LONG_LONG 1
+#include <ArduinoJson.h>
 #include <esp_timer.h>
 #include <time.h>
-#include "secrets.h"
-#include "safety_state.h"
+#include "secrets.h"        // FIREBASE_HOST, FIREBASE_AUTH. Never commit or share.
+#include "safety_state.h"   // shared state machine, unit-tested in test/
 
-constexpr float START_W_THRESHOLD = 3.5f, TOLERANCE = 0.15f;
-constexpr uint32_t SAMPLE_TIME = 2000, MAX_APPLIANCES = 20;
+// ==========================================
+// CONFIGURATION
+// ==========================================
+constexpr const char* DEVICE_ID = "gadget-1";  // must match the app's DeviceBinding
+
+// Relay polarity (swap if your relay board is active-low).
+#define RELAY_ON  HIGH
+#define RELAY_OFF LOW
+
+constexpr int PZEM_A_RX = 32, PZEM_A_TX = 33, PZEM_B_RX = 25, PZEM_B_TX = 26;
+constexpr int RELAY_A_PIN = 18, RELAY_B_PIN = 19;
+constexpr int BUTTON_A_PIN = 4, BUTTON_B_PIN = 5;  // optional reset buttons to GND
+
+constexpr float START_W_THRESHOLD = 3.5f, IDLE_W_THRESHOLD = 1.5f;
+constexpr float POWER_TOLERANCE = 0.15f, CURRENT_TOLERANCE = 0.20f, PF_TOLERANCE = 0.10f;
+constexpr uint32_t SAMPLE_TIME_MS = 1500, MAX_APPLIANCES = 20;
+constexpr uint32_t DEFAULT_LIMIT_S = 30 * 60;  // runtime warning and safety ceiling for new appliances
+constexpr uint64_t SENSOR_TIMEOUT_MS = 5000;
+
+// ==========================================
+// DATA STRUCTURES
+// ==========================================
 struct ApplianceSignature {
   char name[64] = {}, profileID[64] = {};
   float steadyPower = 0, peakPower = 0, current = 0, voltage = 0, pf = 0;
-  uint32_t maxRunTime = 3600, safetyCeilingDuration = 3600;
+  uint32_t maxRunTime = DEFAULT_LIMIT_S, safetyCeilingDuration = DEFAULT_LIMIT_S, totalSessions = 0;
   int64_t registeredAt = 0;
 };
-struct SensorSample { float power, current, voltage, pf; bool valid; uint64_t captured; };
+// Record layout written by the previous sketch ("app_N" keys), migrated once.
+struct LegacySignature {
+  char name[32]; float steadyPower, peakPower, current, voltage, pf; int safetyLimitMinutes;
+};
+struct SensorSample { float power, current, voltage, pf, energy; bool valid; uint64_t captured; };
 struct Command {
   char id[64] = {}, session[40] = {}, type[24] = {}, alertID[80] = {}, profileID[64] = {}, name[64] = {};
   uint32_t revision = 0, extension = 0, maxRunTime = 0, ceiling = 0;
@@ -29,7 +67,7 @@ struct Snapshot {
   SafetyState safety;
   SensorSample sensor = {};
   ApplianceSignature profiles[MAX_APPLIANCES];
-  uint32_t count = 0;
+  uint32_t count = 0, profilesVersion = 0;
   int activeID = -1;
   float peak = 0;
   int64_t startEpoch = 0, capturedEpoch = 0;
@@ -39,8 +77,8 @@ struct Snapshot {
 };
 struct SocketChannel {
   Preferences prefs;
-  const char* ns; const char* outlet; const char* catalog;
-  int button;
+  const char *ns, *outlet, *catalog, *legacyCatalog;
+  int relay, button;
   Snapshot data;
   ApplianceSignature pending;
   uint32_t samples = 0;
@@ -48,10 +86,14 @@ struct SocketChannel {
   bool rawButton = true, stableButton = true, storageOK = true;
   QueueHandle_t sensors, commands, snapshots;
 };
-PZEM004Tv30 pzemA(Serial2, 32, 33), pzemB(Serial1, 25, 26);
+
+PZEM004Tv30 pzemA(Serial2, PZEM_A_RX, PZEM_A_TX), pzemB(Serial1, PZEM_B_RX, PZEM_B_TX);
 SocketChannel outlets[2];
-FirebaseData fbdo; FirebaseAuth auth; FirebaseConfig config;
 char sessionID[40];
+
+// ==========================================
+// TIME HELPERS (never block waiting for NTP)
+// ==========================================
 uint64_t monotonicMs() { return esp_timer_get_time() / 1000; }
 int64_t epochMs() { time_t t = time(nullptr); return t > 1700000000 ? int64_t(t) * 1000 : 0; }
 String timestamp(int64_t ms) {
@@ -60,6 +102,14 @@ String timestamp(int64_t ms) {
   char buffer[32]; strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &utc);
   return String(buffer);
 }
+
+// ==========================================
+// SAFETY STATE & STORAGE (control loop only)
+// ==========================================
+bool relayEnergized(SocketState s) { return s != SocketState::Disabled && s != SocketState::LockedOut; }
+void applyRelay(SocketChannel& ch) {
+  digitalWrite(ch.relay, relayEnergized(ch.data.safety.state) ? RELAY_ON : RELAY_OFF);
+}
 bool persistSafety(SocketChannel& ch) {
   auto state = ch.data.safety.state;
   bool hazardous = state == SocketState::Sampling || state == SocketState::Active || state == SocketState::Warning || state == SocketState::LockedOut;
@@ -67,18 +117,22 @@ bool persistSafety(SocketChannel& ch) {
   ok = (ch.prefs.putBool("disabled", state == SocketState::Disabled) == 1) && ok;
   if (ch.data.alert.id[0]) ok = (ch.prefs.putBytes("alert", &ch.data.alert, sizeof(AlertRecord)) == sizeof(AlertRecord)) && ok;
   if (!ok) { ch.storageOK = false; ch.data.safety.state = SocketState::LockedOut; }
+  applyRelay(ch);
   return ok;
 }
+void endSession(SocketChannel& ch) { ch.data.activeID = -1; ch.data.peak = 0; }
 void lock(SocketChannel& ch) {
   ch.data.safety.state = SocketState::LockedOut; ++ch.data.safety.revision;
   if (ch.data.alert.id[0]) strlcpy(ch.data.alert.resolution, "SHUTDOWN", sizeof(ch.data.alert.resolution));
-  persistSafety(ch);
+  endSession(ch); persistSafety(ch);
+  Serial.printf("[%s] LOCKED OUT, relay off\n", ch.outlet);
 }
 bool saveProfiles(SocketChannel& ch) {
-  if (ch.prefs.putBytes("profiles_v2", ch.data.profiles, sizeof(ch.data.profiles)) != sizeof(ch.data.profiles) ||
-      ch.prefs.putUInt("count_v2", ch.data.count) != sizeof(uint32_t)) {
+  if (ch.prefs.putBytes("profiles_v3", ch.data.profiles, sizeof(ch.data.profiles)) != sizeof(ch.data.profiles) ||
+      ch.prefs.putUInt("count_v3", ch.data.count) != sizeof(uint32_t)) {
     ch.storageOK = false; lock(ch); return false;
   }
+  ++ch.data.profilesVersion;
   return true;
 }
 void beginAlert(SocketChannel& ch, const char* type, uint64_t now) {
@@ -89,123 +143,221 @@ void beginAlert(SocketChannel& ch, const char* type, uint64_t now) {
   strlcpy(a.type, type, sizeof(a.type)); strlcpy(a.resolution, "PENDING", sizeof(a.resolution));
   a.trigger = epochMs(); a.expiry = a.trigger ? a.trigger + 60000 : 0;
   persistSafety(ch);
+  Serial.printf("[%s] WARNING %s: 60 s until lockout\n", ch.outlet, type);
 }
-bool closeEnough(float live, float stored) {
-  return isfinite(live) && isfinite(stored) && fabsf(live - stored) <= max(fabsf(stored) * TOLERANCE, 0.001f);
+void loadProfiles(SocketChannel& ch) {
+  auto& d = ch.data;
+  d.count = ch.prefs.getUInt("count_v3", 0);
+  if (d.count > MAX_APPLIANCES || (d.count && ch.prefs.getBytes("profiles_v3", d.profiles, sizeof(d.profiles)) != sizeof(d.profiles))) {
+    d.count = 0; ch.storageOK = false; return;
+  }
+  for (uint32_t n = 0; n < d.count; ++n) {
+    auto& p = d.profiles[n];
+    if (!memchr(p.name, 0, sizeof(p.name)) || !memchr(p.profileID, 0, sizeof(p.profileID)) || !p.maxRunTime ||
+        p.safetyCeilingDuration < p.maxRunTime || p.safetyCeilingDuration > 604800) ch.storageOK = false;
+    p.name[63] = 0; p.profileID[63] = 0;
+  }
+  // One-time migration of appliances learned by the previous sketch.
+  int legacy = ch.prefs.getInt("count", 0);
+  if (legacy <= 0) return;
+  for (int n = 0; n < legacy && n < int(MAX_APPLIANCES) && d.count < MAX_APPLIANCES; ++n) {
+    char key[16]; snprintf(key, sizeof(key), "app_%d", n);
+    LegacySignature old;
+    if (ch.prefs.getBytes(key, &old, sizeof(old)) != sizeof(old)) continue;
+    old.name[31] = 0;
+    auto& p = d.profiles[d.count++]; p = ApplianceSignature{};
+    strlcpy(p.name, old.name[0] ? old.name : "Migrated appliance", sizeof(p.name));
+    snprintf(p.profileID, sizeof(p.profileID), "%s_LEGACY_%d", ch.catalog, n);
+    p.steadyPower = old.steadyPower; p.peakPower = old.peakPower; p.current = old.current;
+    p.voltage = old.voltage; p.pf = old.pf;
+    uint32_t limit = old.safetyLimitMinutes > 0 ? uint32_t(old.safetyLimitMinutes) * 60 : DEFAULT_LIMIT_S;
+    p.maxRunTime = p.safetyCeilingDuration = min(limit, uint32_t(604800));
+  }
+  if (saveProfiles(ch)) ch.prefs.remove("count");
+}
+
+// ==========================================
+// APPLIANCE RECOGNITION
+// ==========================================
+bool within(float live, float stored, float tolerance) {
+  return isfinite(live) && isfinite(stored) && fabsf(live - stored) <= max(fabsf(stored) * tolerance, 0.05f);
+}
+bool matches(const ApplianceSignature& scan, const ApplianceSignature& p) {
+  return within(scan.steadyPower, p.steadyPower, POWER_TOLERANCE) &&
+         within(scan.current, p.current, CURRENT_TOLERANCE) &&
+         isfinite(scan.pf) && fabsf(scan.pf - p.pf) <= PF_TOLERANCE;
 }
 void finishSampling(SocketChannel& ch) {
-  auto& sig = ch.pending;
-  if (!ch.samples) { lock(ch); return; }
+  auto& d = ch.data; auto& sig = ch.pending;
+  if (!ch.samples) return;
   sig.steadyPower /= ch.samples; sig.current /= ch.samples; sig.voltage /= ch.samples; sig.pf /= ch.samples;
-  ch.data.activeID = -1;
-  for (uint32_t i = 0; i < ch.data.count; ++i) {
-    const auto& p = ch.data.profiles[i];
-    if (closeEnough(sig.steadyPower, p.steadyPower) && closeEnough(sig.peakPower, p.peakPower) &&
-        closeEnough(sig.current, p.current) && closeEnough(sig.voltage, p.voltage) && closeEnough(sig.pf, p.pf)) {
-      ch.data.activeID = i; break;
-    }
+  d.activeID = -1;
+  float best = INFINITY;  // closest power match wins
+  for (uint32_t i = 0; i < d.count; ++i) {
+    float diff = fabsf(sig.steadyPower - d.profiles[i].steadyPower);
+    if (matches(sig, d.profiles[i]) && diff < best) { best = diff; d.activeID = i; }
   }
-  if (ch.data.activeID < 0) {
-    if (ch.data.count == MAX_APPLIANCES) { beginAlert(ch, "PROFILE_STORAGE_FULL", monotonicMs()); return; }
-    snprintf(sig.name, sizeof(sig.name), "UNNAMED_DEVICE_%lld_%08lx", (long long)(epochMs() ? epochMs() : monotonicMs()), (unsigned long)esp_random());
-    strlcpy(sig.profileID, sig.name, sizeof(sig.profileID)); sig.registeredAt = epochMs();
-    ch.data.activeID = ch.data.count; ch.data.profiles[ch.data.count++] = sig;
+  if (d.activeID < 0 && d.count < MAX_APPLIANCES) {
+    // Unknown appliance: add it to the catalog so the app prompts the user to register it.
+    snprintf(sig.profileID, sizeof(sig.profileID), "UNNAMED_DEVICE_%lld_%08lx",
+             (long long)(epochMs() ? epochMs() : monotonicMs()), (unsigned long)esp_random());
+    strlcpy(sig.name, sig.profileID, sizeof(sig.name)); sig.registeredAt = epochMs();
+    d.activeID = d.count; d.profiles[d.count++] = sig;
+  }
+  if (d.activeID >= 0) {
+    ++d.profiles[d.activeID].totalSessions;
     if (!saveProfiles(ch)) return;
   }
-  ch.data.safety.state = SocketState::Active; ++ch.data.safety.revision;
-  ch.data.safety.deadline = ch.data.safety.started + uint64_t(ch.data.profiles[ch.data.activeID].safetyCeilingDuration) * 1000;
+  uint32_t ceiling = d.activeID >= 0 ? d.profiles[d.activeID].safetyCeilingDuration : DEFAULT_LIMIT_S;
+  d.safety.state = SocketState::Active; ++d.safety.revision;
+  d.safety.deadline = d.safety.started + uint64_t(ceiling) * 1000;
+  Serial.printf("[%s] Active: %s (limit %lu s)\n", ch.outlet,
+                d.activeID >= 0 ? d.profiles[d.activeID].name : "unrecognized, catalog full", (unsigned long)ceiling);
 }
 void handleSensor(SocketChannel& ch, const SensorSample& sample, uint64_t now) {
-  ch.data.sensor = sample;
+  auto& d = ch.data;
+  d.sensor = sample;
   if (!sample.valid) return;
-  auto state = ch.data.safety.state;
-  if (state == SocketState::Disabled || state == SocketState::LockedOut) return;
-  if (state != SocketState::Warning && sample.power < START_W_THRESHOLD) {
-    if (state != SocketState::Idle) {
-      ch.data.safety.state = SocketState::Idle; ++ch.data.safety.revision;
-      ch.data.activeID = -1; ch.data.peak = 0; persistSafety(ch);
-    }
+  auto state = d.safety.state;
+  if (state == SocketState::Disabled || state == SocketState::LockedOut || state == SocketState::Warning) return;
+  if (state == SocketState::Idle) {
+    if (sample.power <= START_W_THRESHOLD) return;
+    d.safety.begin(now, DEFAULT_LIMIT_S); ch.pending = ApplianceSignature{};
+    ch.samples = 0; d.startEpoch = epochMs(); d.peak = 0;
+    if (!persistSafety(ch)) return;
+  } else if (sample.power < IDLE_W_THRESHOLD) {
+    d.safety.state = SocketState::Idle; ++d.safety.revision;  // appliance switched off
+    endSession(ch); persistSafety(ch);
     return;
   }
-  if (state == SocketState::Idle && sample.power > START_W_THRESHOLD) {
-    ch.data.safety.begin(now, 3600); ch.pending = ApplianceSignature{};
-    ch.samples = 0; ch.data.startEpoch = epochMs();
-    if (!persistSafety(ch)) return;
-  }
-  ch.data.peak = max(ch.data.peak, sample.power);
-  if (ch.data.safety.state == SocketState::Sampling) {
+  d.peak = max(d.peak, sample.power);
+  if (d.safety.state == SocketState::Sampling) {
     ch.pending.steadyPower += sample.power; ch.pending.peakPower = max(ch.pending.peakPower, sample.power);
     ch.pending.current += sample.current; ch.pending.voltage += sample.voltage; ch.pending.pf += sample.pf;
     ++ch.samples;
-    if (now - ch.data.safety.started >= SAMPLE_TIME) finishSampling(ch);
+    if (now - d.safety.started >= SAMPLE_TIME_MS) finishSampling(ch);
   }
 }
+
+// ==========================================
+// APP COMMANDS (validated against session + revision)
+// ==========================================
 void handleCommand(SocketChannel& ch, const Command& cmd, uint64_t now) {
-  if (!cmd.id[0] || strcmp(cmd.id, ch.data.commandID) == 0) return;
-  strlcpy(ch.data.commandID, cmd.id, sizeof(ch.data.commandID));
+  auto& d = ch.data;
+  if (!cmd.id[0] || strcmp(cmd.id, d.commandID) == 0) return;
+  strlcpy(d.commandID, cmd.id, sizeof(d.commandID));
   const char* result = "REJECTED_STALE";
-  if (ch.data.safety.state == SocketState::LockedOut) result = "REJECTED_PHYSICAL_RESET_REQUIRED";
-  else if (strcmp(cmd.session, sessionID) == 0 && cmd.revision == ch.data.safety.revision &&
-      epochMs() && cmd.expires > epochMs() && cmd.expires <= epochMs() + 30000) {
+  bool fresh = strcmp(cmd.session, sessionID) == 0 && cmd.revision == d.safety.revision &&
+      epochMs() && cmd.expires > epochMs() && cmd.expires <= epochMs() + 30000;
+  if (strcmp(cmd.type, "RESET_SAFETY") == 0) {
+    // The only remote command accepted while locked out.
+    if (!fresh) result = "REJECTED_STALE";
+    else if (!ch.storageOK) result = "REJECTED_STORAGE_FAILURE";
+    else if (!d.safety.remoteReset()) result = "REJECTED_INVALID";
+    else {
+      endSession(ch);
+      if (d.alert.id[0]) strlcpy(d.alert.resolution, "RESET", sizeof(d.alert.resolution));
+      result = persistSafety(ch) ? "ACCEPTED" : "REJECTED_STORAGE_FAILURE";
+    }
+  } else if (d.safety.state == SocketState::LockedOut) result = "REJECTED_PHYSICAL_RESET_REQUIRED";
+  else if (fresh) {
     result = "REJECTED_INVALID";
     if (strcmp(cmd.type, "SMART_OVERRIDE") == 0) {
-      if (strcmp(cmd.alertID, ch.data.alert.id) == 0 && ch.data.safety.overrideRuntime(now, cmd.extension)) {
-        strlcpy(ch.data.alert.resolution, "OVERRIDDEN", sizeof(ch.data.alert.resolution)); result = "ACCEPTED";
+      if (strcmp(cmd.alertID, d.alert.id) == 0 && d.safety.overrideRuntime(now, cmd.extension)) {
+        strlcpy(d.alert.resolution, "OVERRIDDEN", sizeof(d.alert.resolution)); result = "ACCEPTED";
       }
-    } else if (strcmp(cmd.type, "TURN_OFF") == 0 && ch.data.safety.state == SocketState::Warning) {
+    } else if (strcmp(cmd.type, "TURN_OFF") == 0 && d.safety.state == SocketState::Warning) {
       lock(ch); result = "ACCEPTED";
     } else if (strcmp(cmd.type, "TURN_ON") == 0 || strcmp(cmd.type, "TURN_OFF") == 0) {
-      if (ch.data.safety.remotePower(strcmp(cmd.type, "TURN_ON") == 0)) result = "ACCEPTED";
+      if (d.safety.remotePower(strcmp(cmd.type, "TURN_ON") == 0)) {
+        if (d.safety.state == SocketState::Disabled) endSession(ch);
+        result = "ACCEPTED";
+      }
     } else if (strcmp(cmd.type, "REMOVE_PROFILE") == 0 &&
-        (ch.data.safety.state == SocketState::Idle || ch.data.safety.state == SocketState::Disabled)) {
-      for (uint32_t i = 0; i < ch.data.count; ++i) {
-        if (strcmp(cmd.profileID, ch.data.profiles[i].profileID) != 0) continue;
-        for (uint32_t j = i + 1; j < ch.data.count; ++j) ch.data.profiles[j - 1] = ch.data.profiles[j];
-        --ch.data.count; ch.data.activeID = -1;
-        if (saveProfiles(ch)) { ++ch.data.safety.revision; result = "ACCEPTED"; }
+        (d.safety.state == SocketState::Idle || d.safety.state == SocketState::Disabled)) {
+      for (uint32_t i = 0; i < d.count; ++i) {
+        if (strcmp(cmd.profileID, d.profiles[i].profileID) != 0) continue;
+        for (uint32_t j = i + 1; j < d.count; ++j) d.profiles[j - 1] = d.profiles[j];
+        --d.count; d.activeID = -1;
+        if (saveProfiles(ch)) { ++d.safety.revision; result = "ACCEPTED"; }
         break;
       }
-    } else if (strcmp(cmd.type, "EDIT_PROFILE") == 0 && ch.data.safety.state != SocketState::Warning) {
-      for (uint32_t i = 0; i < ch.data.count; ++i) {
-        if (strcmp(cmd.profileID, ch.data.profiles[i].profileID) != 0) continue;
+    } else if (strcmp(cmd.type, "EDIT_PROFILE") == 0 && d.safety.state != SocketState::Warning) {
+      for (uint32_t i = 0; i < d.count; ++i) {
+        if (strcmp(cmd.profileID, d.profiles[i].profileID) != 0) continue;
         if (!cmd.maxRunTime || cmd.ceiling < cmd.maxRunTime || cmd.ceiling > 604800 || !cmd.name[0]) break;
-        auto& p = ch.data.profiles[i]; strlcpy(p.name, cmd.name, sizeof(p.name));
+        auto& p = d.profiles[i]; strlcpy(p.name, cmd.name, sizeof(p.name));
         p.maxRunTime = cmd.maxRunTime; p.safetyCeilingDuration = cmd.ceiling;
         if (saveProfiles(ch)) {
-          if (ch.data.activeID == int(i)) ch.data.safety.deadline = ch.data.safety.started + uint64_t(cmd.ceiling) * 1000;
-          ++ch.data.safety.revision; result = "ACCEPTED";
+          if (d.activeID == int(i)) d.safety.deadline = d.safety.started + uint64_t(cmd.ceiling) * 1000;
+          ++d.safety.revision; result = "ACCEPTED";
         }
         break;
       }
     }
     if (!persistSafety(ch)) result = "REJECTED_STORAGE_FAILURE";
   }
-  strlcpy(ch.data.commandResult, result, sizeof(ch.data.commandResult));
+  strlcpy(d.commandResult, result, sizeof(d.commandResult));
+  Serial.printf("[%s] %s -> %s\n", ch.outlet, cmd.type, result);
 }
+
+// ==========================================
+// SENSOR TASK (core 0)
+// ==========================================
 void sensorTask(void*) {
   PZEM004Tv30* meters[] = {&pzemA, &pzemB};
   for (;;) {
     for (int i = 0; i < 2; ++i) {
       SensorSample s;
-      s.power = meters[i]->power(); s.current = meters[i]->current(); s.voltage = meters[i]->voltage(); s.pf = meters[i]->pf();
-      s.valid = isfinite(s.power) && s.power >= 0 && isfinite(s.current) && s.current >= 0 && isfinite(s.voltage) && s.voltage > 0 && isfinite(s.pf) && s.pf >= 0 && s.pf <= 1;
+      s.power = meters[i]->power(); s.current = meters[i]->current(); s.voltage = meters[i]->voltage();
+      s.pf = meters[i]->pf(); s.energy = meters[i]->energy();
+      s.valid = isfinite(s.power) && s.power >= 0 && isfinite(s.current) && s.current >= 0 &&
+                isfinite(s.voltage) && s.voltage > 0 && isfinite(s.pf) && s.pf >= 0 && s.pf <= 1;
       s.captured = monotonicMs(); xQueueOverwrite(outlets[i].sensors, &s);
     }
     vTaskDelay(pdMS_TO_TICKS(200));
   }
 }
-String jsonString(FirebaseJson& j, const char* key) { FirebaseJsonData d; j.get(d, key); return d.success ? d.to<String>() : String(); }
-int64_t jsonInt(FirebaseJson& j, const char* key) { FirebaseJsonData d; j.get(d, key); return d.success ? int64_t(d.to<double>()) : 0; }
-void readCommand(int i) {
-  if (!Firebase.getJSON(fbdo, String("commands/") + outlets[i].outlet)) return;
-  FirebaseJson& j = fbdo.jsonObject(); Command c;
-  jsonString(j, "commandID").toCharArray(c.id, sizeof(c.id)); jsonString(j, "sessionID").toCharArray(c.session, sizeof(c.session));
-  jsonString(j, "type").toCharArray(c.type, sizeof(c.type)); jsonString(j, "alertID").toCharArray(c.alertID, sizeof(c.alertID));
-  jsonString(j, "profileID").toCharArray(c.profileID, sizeof(c.profileID)); jsonString(j, "name").toCharArray(c.name, sizeof(c.name));
-  c.revision = jsonInt(j, "revision"); c.expires = jsonInt(j, "expiresAt"); c.extension = jsonInt(j, "extensionDuration");
-  c.maxRunTime = jsonInt(j, "maxRunTime"); c.ceiling = jsonInt(j, "safetyCeilingDuration");
-  xQueueSend(outlets[i].commands, &c, 0);
+
+// ==========================================
+// FIREBASE REST (network task only)
+// ==========================================
+WiFiClientSecure tls;
+HTTPClient http;
+String firebaseHost;
+int firebaseRequest(const char* method, const String& path, const String& body = "", String* response = nullptr) {
+  if (WiFi.status() != WL_CONNECTED) return -1;
+  if (!http.begin(tls, "https://" + firebaseHost + "/" + path + ".json?auth=" + FIREBASE_AUTH)) return -1;
+  http.setTimeout(5000);
+  int code;
+  if (strcmp(method, "GET") == 0) code = http.GET();
+  else { http.addHeader("Content-Type", "application/json"); code = http.sendRequest(method, body); }
+  if (response && code == HTTP_CODE_OK) *response = http.getString();
+  http.end();  // keeps the TLS connection open for reuse
+  return code;
 }
+
+char lastQueued[2][64] = {};
+void readCommands() {
+  String body;
+  if (firebaseRequest("GET", "commands", "", &body) != HTTP_CODE_OK) return;
+  JsonDocument doc;
+  if (deserializeJson(doc, body)) return;
+  for (int i = 0; i < 2; ++i) {
+    JsonObjectConst j = doc[outlets[i].outlet];
+    if (j.isNull()) continue;
+    Command c;
+    strlcpy(c.id, j["commandID"] | "", sizeof(c.id)); strlcpy(c.session, j["sessionID"] | "", sizeof(c.session));
+    strlcpy(c.type, j["type"] | "", sizeof(c.type)); strlcpy(c.alertID, j["alertID"] | "", sizeof(c.alertID));
+    strlcpy(c.profileID, j["profileID"] | "", sizeof(c.profileID)); strlcpy(c.name, j["name"] | "", sizeof(c.name));
+    c.revision = uint32_t(j["revision"].as<double>()); c.expires = j["expiresAt"].as<int64_t>();
+    c.extension = uint32_t(j["extensionDuration"].as<double>());
+    c.maxRunTime = uint32_t(j["maxRunTime"].as<double>()); c.ceiling = uint32_t(j["safetyCeilingDuration"].as<double>());
+    if (!c.id[0] || strcmp(c.id, lastQueued[i]) == 0) continue;
+    if (xQueueSend(outlets[i].commands, &c, 0) == pdTRUE) strlcpy(lastQueued[i], c.id, sizeof(lastQueued[i]));
+  }
+}
+
 const char* stateName(SocketState s) {
   switch (s) {
     case SocketState::Sampling: return "SAMPLING"; case SocketState::Active: return "ACTIVE";
@@ -213,93 +365,201 @@ const char* stateName(SocketState s) {
     case SocketState::Disabled: return "DISABLED"; default: return "IDLE";
   }
 }
-bool publish(int i, const Snapshot& s) {
-  FirebaseJson root; String b = String("telemetry_logs/") + outlets[i].outlet + "/";
-  bool running = s.safety.state == SocketState::Active || s.safety.state == SocketState::Sampling || s.safety.state == SocketState::Warning;
-  root.add(b + "status", s.safety.state == SocketState::LockedOut ? "LOCKED_OUT" : (running ? "Active" : "Idle"));
-  root.add(b + "currentState", stateName(s.safety.state)); root.add(b + "sessionID", sessionID);
-  root.add(b + "revision", int(s.safety.revision)); root.add(b + "runtime_warning", s.safety.runtimeWarning);
-  root.add(b + "profileID", s.activeID >= 0 ? s.profiles[s.activeID].profileID : "");
-  // Publish the effective deadline, including any accepted runtime override.
-  root.add(b + "safetyDeadline", running && s.safety.deadline > s.capturedMono
-      ? timestamp(s.capturedEpoch + (s.safety.deadline - s.capturedMono)) : "N/A");
-  root.add(b + "appliance", s.activeID >= 0 ? s.profiles[s.activeID].name : (running ? "Recognizing appliance" : "None"));
-  root.add(b + "sensor_valid", s.sensor.valid && s.capturedMono - s.sensor.captured < 5000);
-  root.add(b + "power_W", s.sensor.valid ? s.sensor.power : 0); root.add(b + "current_A", s.sensor.valid ? s.sensor.current : 0);
-  root.add(b + "voltage_V", s.sensor.valid ? s.sensor.voltage : 0); root.add(b + "power_factor", s.sensor.valid ? s.sensor.pf : 0);
-  root.add(b + "peak_power_W", s.peak); root.add(b + "start_time", timestamp(s.startEpoch));
-  root.add(b + "last_updated", timestamp(s.capturedEpoch)); root.add(b + "last_updated_ms", double(s.capturedEpoch));
-  root.add(b + "alertID", s.alert.id); root.add(b + "countdownExpiry", timestamp(s.alert.expiry));
-  root.add(b + "countdownRemaining", s.safety.state == SocketState::Warning ? int((60000 - min(uint64_t(60000), s.capturedMono - s.safety.warningStarted) + 999) / 1000) : 0);
+void addOutlet(JsonDocument& root, int i, const Snapshot& s, bool includeCatalog) {
+  const auto& ch = outlets[i];
+  String b = String("telemetry_logs/") + ch.outlet + "/";
+  auto st = s.safety.state;
+  bool running = st == SocketState::Active || st == SocketState::Sampling || st == SocketState::Warning;
+  bool sensorOK = s.sensor.valid && s.capturedMono - s.sensor.captured < SENSOR_TIMEOUT_MS;
+  root[b + "status"] = st == SocketState::LockedOut ? "LOCKED_OUT" : (running ? "Active" : "Idle");
+  root[b + "currentState"] = stateName(st); root[b + "sessionID"] = sessionID;
+  root[b + "revision"] = s.safety.revision; root[b + "runtime_warning"] = s.safety.runtimeWarning;
+  root[b + "relay_on"] = relayEnergized(st);
+  root[b + "profileID"] = s.activeID >= 0 ? s.profiles[s.activeID].profileID : "";
+  // The effective deadline, including any accepted runtime override.
+  root[b + "safetyDeadline"] = running && s.safety.deadline > s.capturedMono && s.capturedEpoch
+      ? timestamp(s.capturedEpoch + int64_t(s.safety.deadline - s.capturedMono)) : String("N/A");
+  root[b + "appliance"] = s.activeID >= 0 ? s.profiles[s.activeID].name : (running ? "Recognizing appliance" : "None");
+  root[b + "sensor_valid"] = sensorOK;
+  root[b + "power_W"] = sensorOK ? s.sensor.power : 0; root[b + "current_A"] = sensorOK ? s.sensor.current : 0;
+  root[b + "voltage_V"] = sensorOK ? s.sensor.voltage : 0; root[b + "power_factor"] = sensorOK ? s.sensor.pf : 0;
+  if (sensorOK && isfinite(s.sensor.energy)) root[b + "energy_kWh"] = s.sensor.energy;
+  root[b + "peak_power_W"] = s.peak; root[b + "start_time"] = timestamp(running ? s.startEpoch : 0);
+  root[b + "last_updated"] = timestamp(s.capturedEpoch); root[b + "last_updated_ms"] = s.capturedEpoch;
+  root[b + "alertID"] = s.alert.id; root[b + "countdownExpiry"] = timestamp(s.alert.expiry);
+  root[b + "countdownRemaining"] = st == SocketState::Warning
+      ? int((60000 - min(uint64_t(60000), s.capturedMono - s.safety.warningStarted) + 999) / 1000) : 0;
   if (s.commandID[0]) {
-    String a = String("command_results/") + outlets[i].outlet + "/" + s.commandID + "/";
-    root.add(a + "result", s.commandResult); root.add(a + "revision", int(s.safety.revision));
+    String a = String("command_results/") + ch.outlet + "/" + s.commandID + "/";
+    root[a + "result"] = s.commandResult; root[a + "revision"] = s.safety.revision;
   }
-  FirebaseJson catalog;
-  for (uint32_t n = 0; n < s.count; ++n) {
-    const auto& p = s.profiles[n]; FirebaseJson profile; String path;
-    profile.add(path + "name", p.name); profile.add(path + "steadyPower_W", p.steadyPower); profile.add(path + "peakPower_W", p.peakPower);
-    profile.add(path + "current_A", p.current); profile.add(path + "voltage_V", p.voltage); profile.add(path + "powerFactor", p.pf);
-    profile.add(path + "maxRunTime", int(p.maxRunTime)); profile.add(path + "safetyCeilingDuration", int(p.safetyCeilingDuration));
-    profile.add(path + "registered_at", timestamp(p.registeredAt));
-    catalog.add(p.profileID, profile);
-  }
-  root.add(String("appliance_profiles/") + outlets[i].catalog, catalog);
   if (s.alert.id[0]) {
-    String path = String("alerts/") + s.alert.id + "/";
-    root.add(path + "deviceID", outlets[i].outlet); root.add(path + "alertType", s.alert.type);
-    root.add(path + "triggerTime", timestamp(s.alert.trigger)); root.add(path + "countdownExpiry", timestamp(s.alert.expiry));
-    root.add(path + "resolution", s.alert.resolution);
+    String a = String("alerts/") + s.alert.id + "/";
+    root[a + "deviceID"] = ch.outlet; root[a + "alertType"] = s.alert.type;
+    root[a + "triggerTime"] = timestamp(s.alert.trigger); root[a + "countdownExpiry"] = timestamp(s.alert.expiry);
+    root[a + "resolution"] = s.alert.resolution;
   }
-  return Firebase.updateNode(fbdo, "/", root);
+  if (includeCatalog) {
+    String path = String("appliance_profiles/") + ch.catalog;
+    root[String("appliance_profiles/") + ch.legacyCatalog] = nullptr;  // drop the old sketch's catalog
+    if (!s.count) { root[path] = nullptr; return; }
+    JsonObject catalog = root[path].to<JsonObject>();
+    for (uint32_t n = 0; n < s.count; ++n) {
+      const auto& p = s.profiles[n];
+      JsonObject profile = catalog[p.profileID].to<JsonObject>();
+      profile["name"] = p.name; profile["steadyPower_W"] = p.steadyPower; profile["peakPower_W"] = p.peakPower;
+      profile["current_A"] = p.current; profile["voltage_V"] = p.voltage; profile["powerFactor"] = p.pf;
+      profile["maxRunTime"] = p.maxRunTime; profile["safetyCeilingDuration"] = p.safetyCeilingDuration;
+      profile["totalSessions"] = p.totalSessions; profile["registered_at"] = timestamp(p.registeredAt);
+    }
+  }
 }
+// Device summary at devices/gadget-1/status. The app treats a stale lastSeen
+// as Offline, since a powered-off board cannot report it.
+void addStatus(JsonDocument& root, const Snapshot* s) {
+  String b = String("devices/") + DEVICE_ID + "/status/";
+  float draw = 0; bool triggered = false;
+  int64_t remainingMs = -1;  // -1: nothing running, so no limit applies
+  for (int i = 0; i < 2; ++i) {
+    auto st = s[i].safety.state;
+    root[b + (i == 0 ? "outletA" : "outletB")] = relayEnergized(st);
+    if (s[i].sensor.valid && s[i].capturedMono - s[i].sensor.captured < SENSOR_TIMEOUT_MS) draw += s[i].sensor.power;
+    if (st == SocketState::Warning || st == SocketState::LockedOut) { triggered = true; remainingMs = 0; }
+    else if ((st == SocketState::Active || st == SocketState::Sampling) && remainingMs != 0) {
+      int64_t left = s[i].safety.deadline > s[i].capturedMono ? int64_t(s[i].safety.deadline - s[i].capturedMono) : 0;
+      if (remainingMs < 0 || left < remainingMs) remainingMs = left;
+    }
+  }
+  root[b + "powerDraw"] = draw; root[b + "connectionStatus"] = "Online";
+  root[b + "safetyTriggered"] = triggered; root[b + "lastSeen"][".sv"] = "timestamp";
+  if (remainingMs >= 0) root[b + "remainingLimit"] = double(remainingMs) / 1000.0;
+  else root[b + "remainingLimit"] = nullptr;  // null deletes the field
+}
+
+// ==========================================
+// WI-FI PROVISIONING
+// First setup: WiFiManager portal "WisePlug-AP". Later changes: the app writes
+// devices/gadget-1/wifiConfig; new credentials are tried for 20 s and rolled
+// back to the previous network if they fail.
+// ==========================================
+Preferences wifiPrefs;
+int64_t appliedConfig = 0;
+String previousSsid, previousPass;
+uint64_t trialStarted = 0;
+bool trialActive = false;
+void checkWifiConfig() {
+  String path = String("devices/") + DEVICE_ID + "/wifiConfig", body;
+  if (firebaseRequest("GET", path, "", &body) != HTTP_CODE_OK) return;
+  JsonDocument doc;
+  if (deserializeJson(doc, body) || !doc["ssid"].is<const char*>() || !doc["password"].is<const char*>()) return;
+  int64_t updatedAt = doc["updatedAt"].as<int64_t>();
+  String ssid = doc["ssid"].as<const char*>(), pass = doc["password"].as<const char*>();
+  if (!updatedAt || updatedAt == appliedConfig || !ssid.length() || ssid.length() > 32 || pass.length() > 63) return;
+  appliedConfig = updatedAt; wifiPrefs.putLong64("applied", updatedAt);
+  JsonDocument ack; ack["receivedAt"] = updatedAt; String ackBody; serializeJson(ack, ackBody);
+  firebaseRequest("PATCH", path, ackBody);
+  firebaseRequest("DELETE", path + "/password");  // keep the secret only on the device
+  previousSsid = WiFi.SSID(); previousPass = WiFi.psk();
+  Serial.printf("Switching Wi-Fi to %s\n", ssid.c_str());
+  WiFi.disconnect(); WiFi.begin(ssid.c_str(), pass.c_str());  // persisted for reboot
+  trialStarted = monotonicMs(); trialActive = true;
+}
+
+// ==========================================
+// NETWORK TASK (core 0): never blocks the safety loop
+// ==========================================
 void networkTask(void*) {
-  WiFi.setAutoReconnect(true); WiFi.begin(WIFI_SSID, WIFI_PASSWORD); configTime(0, 0, "pool.ntp.org");
-  config.host = FIREBASE_HOST; config.signer.tokens.legacy_token = FIREBASE_AUTH;
-  Firebase.begin(&config, &auth); Firebase.reconnectWiFi(true);
+  firebaseHost = FIREBASE_HOST;
+  firebaseHost.replace("https://", ""); firebaseHost.replace("http://", "");
+  while (firebaseHost.endsWith("/")) firebaseHost.remove(firebaseHost.length() - 1);
+  tls.setInsecure();  // TODO: pin Google's root CA before production use
+  wifiPrefs.begin("wifi", false); appliedConfig = wifiPrefs.getLong64("applied", 0);
+  WiFi.mode(WIFI_STA); WiFi.setAutoReconnect(true);
+  static WiFiManager wm;
+  wm.setConfigPortalBlocking(false);
+  wm.autoConnect("WisePlug-AP");
+  configTime(0, 0, "pool.ntp.org", "time.google.com");  // UTC; the app localizes
   static Snapshot latest[2]; bool available[2] = {false, false};
+  uint32_t publishedVersion[2] = {UINT32_MAX, UINT32_MAX};
+  uint64_t lastConnected = monotonicMs(), lastCommands = 0, lastPublish = 0, lastCatalog = 0, lastConfig = 0;
   for (;;) {
-    if (WiFi.status() == WL_CONNECTED && Firebase.ready()) {
-      for (int i = 0; i < 2; ++i) {
-        readCommand(i);
-        if (xQueueReceive(outlets[i].snapshots, &latest[i], 0) == pdTRUE) available[i] = true;
-        if (available[i]) publish(i, latest[i]);
+    wm.process();
+    uint64_t now = monotonicMs();
+    bool connected = WiFi.status() == WL_CONNECTED;
+    if (connected) lastConnected = now;
+    if (trialActive && (connected || now - trialStarted > 20000)) {
+      trialActive = false;
+      if (!connected && previousSsid.length()) {
+        Serial.println("New Wi-Fi failed, restoring previous network");
+        WiFi.disconnect(); WiFi.begin(previousSsid.c_str(), previousPass.c_str());
       }
     }
-    vTaskDelay(pdMS_TO_TICKS(500));
+    if (connected && wm.getConfigPortalActive()) wm.stopConfigPortal();
+    if (!connected && !trialActive && now - lastConnected > 60000 && !wm.getConfigPortalActive()) {
+      wm.startConfigPortal("WisePlug-AP");  // let the user re-provision locally
+    }
+    for (int i = 0; i < 2; ++i) {
+      if (xQueueReceive(outlets[i].snapshots, &latest[i], 0) == pdTRUE) available[i] = true;
+    }
+    if (connected) {
+      if (now - lastCommands >= 1000) { lastCommands = now; readCommands(); }
+      if (available[0] && available[1] && now - lastPublish >= 1000) {
+        lastPublish = now;
+        bool catalog = now - lastCatalog >= 60000 || latest[0].profilesVersion != publishedVersion[0] ||
+                       latest[1].profilesVersion != publishedVersion[1];
+        JsonDocument root;
+        for (int i = 0; i < 2; ++i) addOutlet(root, i, latest[i], catalog);
+        addStatus(root, latest);
+        String body; serializeJson(root, body);
+        if (firebaseRequest("PATCH", "", body) == HTTP_CODE_OK && catalog) {
+          lastCatalog = now;
+          for (int i = 0; i < 2; ++i) publishedVersion[i] = latest[i].profilesVersion;
+        }
+      }
+      if (now - lastConfig >= 10000) { lastConfig = now; checkWifiConfig(); }
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
 }
+
+// ==========================================
+// SETUP & CONTROL LOOP (core 1)
+// ==========================================
 void setup() {
-  Serial.begin(115200); Serial2.begin(9600, SERIAL_8N1, 32, 33); Serial1.begin(9600, SERIAL_8N1, 25, 26);
+  // Relays stay off until the persisted safety state is known.
+  for (int pin : {RELAY_A_PIN, RELAY_B_PIN}) { digitalWrite(pin, RELAY_OFF); pinMode(pin, OUTPUT); }
+  Serial.begin(115200);
   snprintf(sessionID, sizeof(sessionID), "%08lx%08lx", (unsigned long)esp_random(), (unsigned long)esp_random());
   for (int i = 0; i < 2; ++i) {
-    auto& ch = outlets[i]; ch.ns = i == 0 ? "apps_a" : "apps_b"; ch.outlet = i == 0 ? "outlet_A" : "outlet_B";
-    ch.catalog = i == 0 ? "OUTLET_A" : "OUTLET_B"; ch.button = i == 0 ? 4 : 5; pinMode(ch.button, INPUT_PULLUP);
+    auto& ch = outlets[i];
+    ch.ns = i == 0 ? "apps_a" : "apps_b"; ch.outlet = i == 0 ? "outlet_A" : "outlet_B";
+    ch.catalog = i == 0 ? "OUTLET_A" : "OUTLET_B"; ch.legacyCatalog = i == 0 ? "OUTLET A" : "OUTLET B";
+    ch.relay = i == 0 ? RELAY_A_PIN : RELAY_B_PIN; ch.button = i == 0 ? BUTTON_A_PIN : BUTTON_B_PIN;
+    pinMode(ch.button, INPUT_PULLUP);
     ch.rawButton = ch.stableButton = digitalRead(ch.button); ch.buttonChanged = monotonicMs();
-    ch.sensors = xQueueCreate(1, sizeof(SensorSample)); ch.commands = xQueueCreate(4, sizeof(Command)); ch.snapshots = xQueueCreate(1, sizeof(Snapshot));
+    ch.sensors = xQueueCreate(1, sizeof(SensorSample)); ch.commands = xQueueCreate(4, sizeof(Command));
+    ch.snapshots = xQueueCreate(1, sizeof(Snapshot));
     configASSERT(ch.sensors && ch.commands && ch.snapshots);
-    ch.storageOK = ch.prefs.begin(ch.ns, false); ch.data.count = ch.prefs.getUInt("count_v2", 0);
-    if (ch.data.count > MAX_APPLIANCES || (ch.data.count && ch.prefs.getBytes("profiles_v2", ch.data.profiles, sizeof(ch.data.profiles)) != sizeof(ch.data.profiles))) {
-      ch.data.count = 0; ch.storageOK = false;
-    }
-    for (uint32_t n = 0; n < ch.data.count; ++n) {
-      auto& p = ch.data.profiles[n];
-      if (!memchr(p.name, 0, sizeof(p.name)) || !memchr(p.profileID, 0, sizeof(p.profileID)) || !p.maxRunTime || p.safetyCeilingDuration < p.maxRunTime || p.safetyCeilingDuration > 604800) ch.storageOK = false;
-      p.name[63] = 0; p.profileID[63] = 0;
-    }
+    ch.storageOK = ch.prefs.begin(ch.ns, false);
+    if (ch.storageOK) loadProfiles(ch);
     ch.prefs.getBytes("alert", &ch.data.alert, sizeof(AlertRecord));
     ch.data.alert.id[79] = 0; ch.data.alert.type[39] = 0; ch.data.alert.resolution[15] = 0;
+    // A reboot during a running session (e.g. power cut) locks out: nothing restarts unattended.
     if (!ch.storageOK || ch.prefs.getBool("hazard", false)) lock(ch);
     else if (ch.prefs.getBool("disabled", false)) ch.data.safety.state = SocketState::Disabled;
+    applyRelay(ch);
   }
   configASSERT(xTaskCreatePinnedToCore(sensorTask, "meters", 4096, nullptr, 1, nullptr, 0) == pdPASS);
   configASSERT(xTaskCreatePinnedToCore(networkTask, "firebase", 16384, nullptr, 1, nullptr, 0) == pdPASS);
+  Serial.println("SYSTEM READY");
 }
+
 void loop() {
   uint64_t now = monotonicMs();
   for (auto& ch : outlets) {
-    auto& safety = ch.data.safety;
-    uint32_t maxRun = ch.data.activeID >= 0 ? ch.data.profiles[ch.data.activeID].maxRunTime : 3600;
+    auto& d = ch.data;
+    auto& safety = d.safety;
+    uint32_t maxRun = d.activeID >= 0 ? d.profiles[d.activeID].maxRunTime : DEFAULT_LIMIT_S;
     if (safety.tick(now, maxRun)) {
       if (safety.state == SocketState::Warning) beginAlert(ch, "SAFETY_CEILING_EXCEEDED", now); else lock(ch);
     }
@@ -309,19 +569,23 @@ void loop() {
       ch.stableButton = raw;
       if (!raw && ch.storageOK) {
         if (safety.state == SocketState::Warning) lock(ch);
-        else { safety.physicalPress(); ch.data.activeID = -1; ch.data.peak = 0; persistSafety(ch); }
+        else { safety.physicalPress(); endSession(ch); persistSafety(ch); }
       }
     }
-    SensorSample sample; if (xQueueReceive(ch.sensors, &sample, 0) == pdTRUE) handleSensor(ch, sample, now);
+    SensorSample sample;
+    if (xQueueReceive(ch.sensors, &sample, 0) == pdTRUE) handleSensor(ch, sample, now);
     if ((safety.state == SocketState::Active || safety.state == SocketState::Sampling) &&
-        (!ch.data.sensor.valid || now - ch.data.sensor.captured > 5000)) beginAlert(ch, "SENSOR_UNAVAILABLE", now);
-    Command cmd; if (xQueueReceive(ch.commands, &cmd, 0) == pdTRUE) handleCommand(ch, cmd, now);
+        (!d.sensor.valid || now - d.sensor.captured > SENSOR_TIMEOUT_MS)) beginAlert(ch, "SENSOR_UNAVAILABLE", now);
+    Command cmd;
+    if (xQueueReceive(ch.commands, &cmd, 0) == pdTRUE) handleCommand(ch, cmd, now);
+    applyRelay(ch);
     if (now - ch.lastSnapshot >= 250) {
-      ch.lastSnapshot = now; ch.data.capturedMono = now; ch.data.capturedEpoch = epochMs();
-      if (ch.data.alert.id[0] && !ch.data.alert.trigger && ch.data.capturedEpoch && safety.state == SocketState::Warning) {
-        ch.data.alert.trigger = ch.data.capturedEpoch - (now - safety.warningStarted); ch.data.alert.expiry = ch.data.alert.trigger + 60000; persistSafety(ch);
+      ch.lastSnapshot = now; d.capturedMono = now; d.capturedEpoch = epochMs();
+      if (d.alert.id[0] && !d.alert.trigger && d.capturedEpoch && safety.state == SocketState::Warning) {
+        d.alert.trigger = d.capturedEpoch - int64_t(now - safety.warningStarted);
+        d.alert.expiry = d.alert.trigger + 60000; persistSafety(ch);
       }
-      xQueueOverwrite(ch.snapshots, &ch.data);
+      xQueueOverwrite(ch.snapshots, &d);
     }
   }
   delay(10);

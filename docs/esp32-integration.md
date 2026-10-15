@@ -36,42 +36,61 @@ The old Firestore dashboard is available with
 `--dart-define=WISEPLUG_USE_FIRESTORE=true`. It is a separate data source;
 Firestore edits do not configure or control this ESP32 firmware.
 
-## Upload the compatible sketch
+## Upload the sketch
 
 1. Open `arduino/wiseplug_esp32/wiseplug_esp32.ino` in Arduino IDE.
-2. Copy `secrets.example.h` to `secrets.h` in that folder and enter your Wi-Fi
-   credentials and database secret locally. `secrets.h` is ignored by Git.
-   Credentials pasted into chat should be rotated; they are not copied into the repository.
-3. Use your ESP32 board and existing PZEM004Tv30 and Firebase ESP32 Client
-   libraries. The local Firebase library inspected during implementation is 4.4.17.
-4. Sensor A uses RX 32 / TX 33 (Serial2); sensor B uses RX 25 / TX 26 (Serial1).
-   Select the actual board and serial port before uploading.
-5. Open Serial Monitor at 115200 baud with newline. For a new appliance, enter
-   `A:Fan` or `B:Rice cooker`. A plain name also works when only one outlet is
-   awaiting registration. Learned profiles are uploaded automatically.
+2. Copy `secrets.example.h` to `secrets.h` in that folder and enter the database
+   host and secret. `secrets.h` is ignored by Git. A secret that has ever been
+   pasted into code, chat or a commit must be rotated in the Firebase console.
+3. Install the libraries: PZEM004Tv30, WiFiManager (tzapu), ArduinoJson 7.
+4. Wiring: PZEM A on RX 32 / TX 33 (Serial2), PZEM B on RX 25 / TX 26 (Serial1),
+   relays on GPIO 18 / 19 (`RELAY_ON` is HIGH; swap the defines for an active-low
+   board), optional reset buttons from GPIO 4 / 5 to GND.
+5. On first boot, join the `WisePlug-AP` Wi-Fi network from a phone and choose
+   the home network. Later changes can be sent from the app's Wi-Fi screen.
 
-The existing sketch already works with the new app. The supplied replacement
-retains the same NVS signature structure and paths, and improves delivery:
-
-- Updates all fields in one Firebase operation, every three seconds, including idle.
-- Adds `last_updated_ms` using Firebase server time and `sensor_valid`.
-- Keeps monitoring while waiting for a Serial Monitor name; fingerprint capture
-  still takes about two seconds and network operations are synchronous.
-- Bounds stored profiles to 20 and retries unsynced profiles after reconnection.
-- Emits UTC timestamps; the app also supports the original UTC+8 text timestamps.
-
-The app marks readings older than 30 seconds as stale. Total power is shown only
-when both outlets have recent valid power readings. The original sketch stops
-publishing while idle, so its idle readings eventually appear stale. Neither
-sketch stores a historical time series: each outlet path contains its latest sample.
+Appliances learned by the previous sketch (`app_N` records) are migrated on
+first boot; the app then asks once to register each one.
 
 ## Hardware behavior
 
-This integration monitors measurements. The supplied sketch has no relay pins,
-command listener, automatic safety cutoff or smart-override enforcement, so the
-ESP32 dashboard does not offer those controls. Activity is inferred from measured
-power, not relay feedback. Naming through Serial Monitor remains the source of
-learned profiles; mobile registration requires a separate firmware command protocol.
+Each outlet has a relay. The relay is on in IDLE, SAMPLING, ACTIVE and WARNING
+and off in DISABLED and LOCKED_OUT; that state is saved, so relays stay off
+across reboots. A reboot while an appliance was running locks the outlet, so
+nothing restarts unattended after a power cut. When a session reaches its safety
+ceiling (30 minutes for a new appliance) the outlet enters a 60-second WARNING;
+the app can turn it off, extend it, or let it lock out. A locked outlet is
+switched back on with its button or the app's **Reset Safety**.
+
+The control loop (sensors, safety, relays) never waits for the network; Firebase
+and Wi-Fi run in a separate task, publishing every second and polling commands
+every second.
+
+## Gadget node (`devices/gadget-1`)
+
+The app is bound to exactly one gadget, `gadget-1` (stored in
+SharedPreferences under `boundDeviceId`; the firmware's `DEVICE_ID` must
+match). Alongside `telemetry_logs`, the sketch publishes a device summary:
+
+| Path | Type | Meaning |
+| --- | --- | --- |
+| `status/outletA`, `status/outletB` | bool | Outlet switched on (not DISABLED / LOCKED_OUT) |
+| `status/powerDraw` | double | Sum of both outlets, watts |
+| `status/connectionStatus` | string | Always `"Online"` while publishing |
+| `status/lastSeen` | server timestamp | The app shows **Offline** if older than 30 s |
+| `status/remainingLimit` | double | Seconds to the earliest safety deadline; `0` when tripped; absent when nothing is running |
+| `status/safetyTriggered` | bool | Any outlet in WARNING or LOCKED_OUT |
+| `wifiConfig/ssid`, `wifiConfig/password` | string | Written by the app; the device saves them to flash, then deletes `password` |
+| `wifiConfig/updatedAt`, `wifiConfig/receivedAt` | number | `receivedAt == updatedAt` once the device has the new settings |
+
+The app-wide safety dialog and alarm open only when `safetyTriggered` is true
+or `remainingLimit <= 0` (and `lastSeen` is fresh). Outlet switches and
+**Reset Safety** go through the confirmed `commands/` queue; `RESET_SAFETY`
+is the one command the device accepts while LOCKED_OUT.
+
+Wi-Fi changes only reach a gadget that is online. If the new network fails
+for 20 s the sketch rolls back to the previous network; after 60 s offline it
+opens the `WisePlug-AP` setup portal.
 
 ## Verify the connection
 

@@ -4,14 +4,18 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../models/esp32_data.dart';
+import '../models/gadget_status.dart';
+import '../services/device_binding.dart';
 import '../services/esp32_service.dart';
 import 'esp32_dashboard.dart';
+import 'user_profile_screen.dart';
+import 'wifi_config_screen.dart';
 
 const _blue = Color(0xFF00A4EF);
 const _green = Color(0xFF00B744);
 const _amber = Color(0xFFF5B800);
 const _safetyNote =
-    'Software monitoring only. Disabled and locked states do not disconnect electrical power. Unplug an unsafe appliance; a locked outlet requires its physical button to reset.';
+    'Disabled and locked outlets are switched off by their relay. Inspect the appliance before resetting a locked outlet with its physical button or Reset Safety in the safety alert.';
 
 String _duration(int? seconds) {
   if (seconds == null) return 'Not available';
@@ -32,7 +36,9 @@ LearnedAppliance? connectedProfile(
         p.outlet == reading.outlet &&
         (reading.profileID.isNotEmpty
             ? p.profileID == reading.profileID
-            : p.name == reading.appliance),
+            : p.firmwareName == reading.appliance ||
+                  p.profileID == reading.appliance ||
+                  p.name == reading.appliance),
   );
   return matches.length == 1 ? matches.single : null;
 }
@@ -102,33 +108,23 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
       _profilesLoading = true;
   bool _preferencesReady = false, _saving = false;
   String? _settingsError;
+  String? _telemetryFailure, _catalogFailure;
   String _version = 'Loading…';
   int _tab = 0;
   String _filter = 'All';
   Timer? _clock;
   final _promptedUses = <String>{};
-  final _shownWarnings = <String>{};
-  bool _registrationOpen = false, _warningOpen = false;
+  bool _registrationOpen = false;
+  GadgetStatus? _gadget;
 
   String _useKey(OutletReading r) =>
       '${r.outlet}/${r.sessionID}/${r.profileID}/${r.startTime?.millisecondsSinceEpoch}';
 
+  // Safety warnings are raised app-wide by SafetyAlertListener.
   void _checkPopups() {
     if (!mounted || _loading || _readError) return;
     final now = DateTime.now();
-    for (final r in _readings.values) {
-      final key = '${r.outlet}/${r.alertID}';
-      if (!_warningOpen &&
-          r.isFresh(now) &&
-          r.isWarning &&
-          r.alertID.isNotEmpty &&
-          !_shownWarnings.contains(key)) {
-        _shownWarnings.add(key);
-        _showWarning(r);
-        return;
-      }
-    }
-    if (_warningOpen ||
+    if (_readings.values.any((r) => r.isWarning) ||
         _registrationOpen ||
         _profilesLoading ||
         _profileError) {
@@ -163,7 +159,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
               SizedBox(width: 10),
               Expanded(
                 child: Text(
-                  'New Appliance Pattern Detected',
+                  'New Appliance Detected',
                   style: TextStyle(color: Colors.redAccent, fontSize: 19),
                 ),
               ),
@@ -177,6 +173,13 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                 const Text('Do you want to register this appliance?'),
                 const SizedBox(height: 8),
                 Text('Detected on Outlet ${reading.outlet}'),
+                if (!profile.registrationMetadataAvailable)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 8),
+                    child: Text(
+                      'Saved registration could not be checked. If saving fails, check your connection and Firebase registration permissions.',
+                    ),
+                  ),
                 const SizedBox(height: 20),
                 _Panel(
                   child: Column(
@@ -206,7 +209,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
         ),
       );
       if (yes == true && mounted) {
-        await showDialog<bool>(
+        final saved = await showDialog<bool>(
           context: context,
           barrierDismissible: false,
           builder: (_) => Esp32ProfileEditor(
@@ -216,138 +219,12 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
             registration: true,
           ),
         );
+        if (saved == true && mounted) {
+          setState(() => _tab = 1);
+        }
       }
     } finally {
       _registrationOpen = false;
-    }
-  }
-
-  Future<void> _showWarning(OutletReading initial) async {
-    _warningOpen = true;
-    var busy = false;
-    String? error;
-    try {
-      await showDialog<void>(
-        context: context,
-        barrierDismissible: false,
-        builder: (dialogContext) => StatefulBuilder(
-          builder: (context, update) => AnimatedBuilder(
-            animation: _updates,
-            builder: (context, _) {
-              final r = _readings[initial.outlet];
-              final now = DateTime.now();
-              final current =
-                  !_readError &&
-                  r != null &&
-                  r.isFresh(now) &&
-                  r.alertID == initial.alertID;
-              final warning = current && r.isWarning;
-              return AlertDialog(
-                content: SizedBox(
-                  width: 340,
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.all(18),
-                        decoration: BoxDecoration(
-                          color: Colors.red,
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: const Column(
-                          children: [
-                            Icon(Icons.warning, color: Colors.white, size: 30),
-                            Text(
-                              'WARNING',
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 23,
-                              ),
-                            ),
-                            Text(
-                              'Safety Limit Exceeded!',
-                              style: TextStyle(color: Colors.white),
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      Text(
-                        'Outlet ${initial.outlet} · ${connectedProfile(initial, _profiles)?.name ?? initial.appliance}',
-                      ),
-                      Text(
-                        current
-                            ? '${warning ? r.secondsRemaining(now) : 0}'
-                            : '—',
-                        style: const TextStyle(fontSize: 58),
-                      ),
-                      const Text('Seconds Remaining'),
-                      const SizedBox(height: 16),
-                      Text(
-                        !current
-                            ? 'Live device state unavailable.'
-                            : warning
-                            ? 'Are you still using the Appliance?'
-                            : r.isLockedOut
-                            ? 'Outlet locked. Use its physical reset button.'
-                            : 'This warning has ended.',
-                      ),
-                      const SizedBox(height: 12),
-                      const Text(
-                        _safetyNote,
-                        style: TextStyle(fontSize: 11, color: Colors.grey),
-                      ),
-                      if (error != null)
-                        Text(error!, style: const TextStyle(color: Colors.red)),
-                    ],
-                  ),
-                ),
-                actions: [
-                  if (warning) ...[
-                    FilledButton(
-                      onPressed: busy || !r.canCommand(now)
-                          ? null
-                          : () async {
-                              update(() {
-                                busy = true;
-                                error = null;
-                              });
-                              try {
-                                await widget.service.command(r, 'TURN_OFF');
-                              } catch (e) {
-                                if (dialogContext.mounted) {
-                                  update(() => error = '$e');
-                                }
-                              } finally {
-                                if (dialogContext.mounted) {
-                                  update(() => busy = false);
-                                }
-                              }
-                            },
-                      child: Text(busy ? 'Waiting…' : 'Turn Off Now'),
-                    ),
-                    const Tooltip(
-                      message: 'Average-usage override is not implemented yet.',
-                      child: FilledButton(
-                        onPressed: null,
-                        child: Text('Yes, Override'),
-                      ),
-                    ),
-                  ],
-                  TextButton(
-                    onPressed: busy ? null : () => Navigator.pop(dialogContext),
-                    child: const Text('Close'),
-                  ),
-                ],
-              );
-            },
-          ),
-        ),
-      );
-    } finally {
-      _warningOpen = false;
     }
   }
 
@@ -366,6 +243,19 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
     _subscriptions.add(
       widget.service.streamOutlets().listen(
         (value) {
+          // Legacy firmware may reuse the same name and omit session/start time.
+          // A confirmed idle reading ends that use so reconnection can prompt.
+          for (final r in value.values) {
+            if (r.isFresh(DateTime.now()) &&
+                r.sensorValid != false &&
+                (r.currentState == 'IDLE' ||
+                    (r.currentState.isEmpty &&
+                        r.status.toLowerCase() == 'idle'))) {
+              _promptedUses.removeWhere(
+                (key) => key.startsWith('${r.outlet}/'),
+              );
+            }
+          }
           if (!_loading &&
               !_readError &&
               _preferencesReady &&
@@ -387,11 +277,13 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
           }
           _readings = value;
           _readError = false;
+          _telemetryFailure = null;
           _loading = false;
           _refresh();
         },
         onError: (Object error) {
           _readError = true;
+          _telemetryFailure = error.toString();
           _loading = false;
           _refresh();
         },
@@ -416,11 +308,13 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
           }
           _profiles = value;
           _profileError = false;
+          _catalogFailure = null;
           _profilesLoading = false;
           _refresh();
         },
         onError: (Object error) {
           _profileError = true;
+          _catalogFailure = error.toString();
           _profilesLoading = false;
           _refresh();
         },
@@ -437,6 +331,18 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
         onError: (Object error) {
           _preferencesReady = false;
           _settingsError = 'Cannot load alert settings. Check your connection and account permissions.';
+          _refresh();
+        },
+      ),
+    );
+    _subscriptions.add(
+      widget.service.streamGadgetStatus().listen(
+        (value) {
+          _gadget = value;
+          _refresh();
+        },
+        onError: (Object error) {
+          _gadget = null;
           _refresh();
         },
       ),
@@ -562,8 +468,25 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                   const SizedBox(height: 28),
                   if (_tab != 2 && (_loading || _profilesLoading))
                     const LinearProgressIndicator(),
-                  if (_tab != 2 && (_readError || _profileError))
-                    const DatabaseReadError(),
+                  if (_tab != 2 && _readError)
+                    _Panel(
+                      child: Text(
+                        'Cannot load ESP32 readings (telemetry_logs). $_telemetryFailure',
+                      ),
+                    ),
+                  if (_tab != 2 && _profileError)
+                    _Panel(
+                      child: Text(
+                        'Cannot load appliance profiles (appliance_profiles). $_catalogFailure',
+                      ),
+                    ),
+                  if (_tab != 2 &&
+                      _profiles.any((p) => !p.registrationMetadataAvailable))
+                    const _Panel(
+                      child: Text(
+                        'Registration data is unavailable. Showing the ESP32 catalog. Check the connection and deploy the updated Firebase rules to load saved names and register appliances.',
+                      ),
+                    ),
                   if (_tab == 0) ..._home(now),
                   if (_tab == 1) ..._profileList(now),
                   if (_tab == 2) ..._settings(now),
@@ -599,23 +522,23 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
   }
 
   List<Widget> _home(DateTime now) {
-    final complete =
-        !_readError &&
-        ['A', 'B'].every(
-          (key) =>
-              _readings[key]?.isFresh(now) == true &&
-              _readings[key]?.sensorValid != false &&
-              _readings[key]?.activePower != null,
-        );
-    final total = complete
-        ? _readings['A']!.activePower! + _readings['B']!.activePower!
-        : null;
+    // Device-level metrics come from devices/gadget-1/status.
+    final gadget = _gadget?.isOnline(now) == true ? _gadget : null;
     return [
+      if (!_loading && !_readError && _readings.isEmpty)
+        const _Panel(
+          child: Text(
+            'No outlet readings found. The ESP32 must publish telemetry_logs/outlet_A and outlet_B to this app’s database.',
+          ),
+        ),
       Text(
-        complete
-            ? 'CURRENTLY CONNECTED — DUAL OUTLET'
-            : 'WAITING FOR LIVE OUTLET READINGS',
-        style: const TextStyle(color: Colors.grey, fontWeight: FontWeight.w700),
+        gadget != null
+            ? '${DeviceBinding.gadgetId.toUpperCase()} ONLINE — DUAL OUTLET'
+            : '${DeviceBinding.gadgetId.toUpperCase()} OFFLINE — WAITING FOR DEVICE',
+        style: TextStyle(
+          color: gadget != null ? _green : Colors.grey,
+          fontWeight: FontWeight.w700,
+        ),
       ),
       const SizedBox(height: 20),
       LayoutBuilder(
@@ -640,13 +563,16 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
       const SizedBox(height: 24),
       Row(
         children: [
-          Expanded(child: _metric(measurement(total, 'W', 0), 'Total draw')),
+          Expanded(
+            child: _metric(
+              measurement(gadget?.powerDraw, 'W', 0),
+              'Total draw',
+            ),
+          ),
           const SizedBox(width: 16),
           Expanded(
             child: _metric(
-              complete
-                  ? '${_readings.values.where((r) => r.isActive).length} / 2'
-                  : '— / 2',
+              gadget != null ? '${gadget.activeOutlets} / 2' : '— / 2',
               'Outlets active',
             ),
           ),
@@ -670,6 +596,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                   reading: _readError ? null : _readings[key],
                   outlet: key,
                   now: now,
+                  on: gadget?.outlet(key),
                 ),
               ),
             const Text(
@@ -734,6 +661,23 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
             style: TextStyle(color: color),
           ),
           const SizedBox(height: 20),
+          _Pair(
+            'Power draw',
+            measurement(
+              fresh && reading?.sensorValid != false
+                  ? reading?.activePower
+                  : null,
+              'W',
+            ),
+          ),
+          Text(
+            reading == null
+                ? 'No reading received for this outlet.'
+                : reading.lastUpdated == null
+                ? 'Received a reading without a valid device timestamp.'
+                : 'Device updated: ${reading.lastUpdated!.toLocal()}${fresh ? '' : ' · stale or clock mismatch'}',
+            style: const TextStyle(fontSize: 11, color: Colors.grey),
+          ),
           _Pair(
             'Start',
             start == null
@@ -877,14 +821,16 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                       const Icon(Icons.chevron_right, color: Colors.grey),
                     ],
                   ),
-                  onTap: () {
-                    final reading = _readings[profile.outlet];
-                    if (profile.needsRegistration && reading != null) {
-                      _register(reading, profile);
-                    } else {
-                      _showProfile(profile);
-                    }
-                  },
+                  onTap: !profile.registrationMetadataAvailable
+                      ? null
+                      : () {
+                          final reading = _readings[profile.outlet];
+                          if (profile.needsRegistration && reading != null) {
+                            _register(reading, profile);
+                          } else {
+                            _showProfile(profile);
+                          }
+                        },
                 ),
               ],
             ],
@@ -1138,13 +1084,35 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
   }
 
   List<Widget> _settings(DateTime now) {
-    final connected =
-        !_readError &&
-        ['A', 'B'].every((key) => _readings[key]?.isFresh(now) == true);
+    final connected = _gadget?.isOnline(now) == true;
     return [
       Card(
         child: Column(
           children: [
+            ListTile(
+              leading: const Icon(Icons.account_circle_outlined),
+              title: const Text('User Profile'),
+              subtitle: const Text('Account, bound device, delete account'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => UserProfileScreen(service: widget.service),
+                ),
+              ),
+            ),
+            const Divider(height: 1),
+            ListTile(
+              leading: const Icon(Icons.router_outlined),
+              title: const Text('Wi-Fi Configuration'),
+              subtitle: const Text('Send home Wi-Fi details to the WisePlug'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => WifiConfigScreen(service: widget.service),
+                ),
+              ),
+            ),
+            const Divider(height: 1),
             SwitchListTile(
               title: const Text('Dark Mode'),
               subtitle: const Text('Reduce eye strain during night use'),
@@ -1180,8 +1148,8 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
               title: const Text('Connected Device'),
               subtitle: Text(
                 connected
-                    ? 'WisePlug Dual Outlet'
-                    : 'Waiting for ESP32 connection',
+                    ? 'WisePlug Dual Outlet · ${DeviceBinding.gadgetId} · Online'
+                    : '${DeviceBinding.gadgetId} · Offline',
               ),
               trailing: Icon(
                 connected ? Icons.check_circle : Icons.wifi_off,
@@ -1413,11 +1381,15 @@ class _PowerControl extends StatefulWidget {
   final OutletReading? reading;
   final String outlet;
   final DateTime now;
+
+  /// Live switch state from devices/gadget-1/status; falls back to telemetry.
+  final bool? on;
   const _PowerControl({
     required this.service,
     required this.reading,
     required this.outlet,
     required this.now,
+    this.on,
   });
   @override
   State<_PowerControl> createState() => _PowerControlState();
@@ -1478,7 +1450,9 @@ class _PowerControlState extends State<_PowerControl> {
           'WARNING',
         ].contains(r?.currentState);
     final on =
-        r != null && !['DISABLED', 'LOCKED_OUT', ''].contains(r.currentState);
+        widget.on ??
+        (r != null &&
+            !['DISABLED', 'LOCKED_OUT', ''].contains(r.currentState));
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
@@ -1507,7 +1481,7 @@ class _PowerControlState extends State<_PowerControl> {
                           : r == null || !r.isFresh(widget.now)
                           ? 'Unavailable'
                           : r.isLockedOut
-                          ? 'Locked · physical reset required'
+                          ? 'Locked · reset with button or safety alert'
                           : on
                           ? 'On · monitoring enabled'
                           : 'Off · monitoring disabled',

@@ -39,6 +39,12 @@ struct SafetyState {
     if (!on && state != SocketState::Disabled) { state = SocketState::Disabled; ++revision; }
     return true;
   }
+  // App-requested reset: clears a safety trip back to normal monitoring.
+  bool remoteReset() {
+    if (state != SocketState::Warning && state != SocketState::LockedOut) return false;
+    state = SocketState::Idle; runtimeWarning = false; ++revision;
+    return true;
+  }
   void physicalPress() {
     state = (state == SocketState::LockedOut || state == SocketState::Disabled)
         ? SocketState::Idle : SocketState::Disabled;

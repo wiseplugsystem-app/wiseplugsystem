@@ -39,6 +39,8 @@ dependencies:
   firebase_database: ^12.5.0
   firebase_auth: ^6.6.1
   firebase_messaging: ^16.6.0
+  audioplayers: ^6.8.1
+  shared_preferences: ^2.5.6
 
 dev_dependencies:
   flutter_test:
@@ -63,6 +65,7 @@ flutter:
   uses-material-design: true
   assets:
     - pubspec.yaml
+    - assets/sounds/
 
   # To add assets to your application, add an assets section, like this:
   # assets:

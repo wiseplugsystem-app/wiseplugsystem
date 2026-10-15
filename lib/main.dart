@@ -10,11 +10,13 @@ import 'screens/auth_gate.dart';
 import 'screens/profiles_tab.dart';
 import 'screens/settings_tab.dart';
 import 'screens/appliance_registration_screen.dart';
+import 'services/device_binding.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  await DeviceBinding.ensureBound();
 
   runApp(const WisePlugApp());
 }

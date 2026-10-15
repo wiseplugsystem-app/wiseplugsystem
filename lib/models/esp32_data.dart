@@ -81,9 +81,10 @@ class OutletReading {
 }
 
 class LearnedAppliance {
+  final bool registrationMetadataAvailable;
   bool get needsRegistration =>
-      applianceType == null &&
-      (name.startsWith('UNNAMED_DEVICE_') || name == profileID);
+      applianceType == null || applianceType!.trim().isEmpty;
+  final String firmwareName;
   final String outlet, profileID, name;
   final double? baselineWattage, peakPower, current, voltage, powerFactor;
   final DateTime? registeredAt;
@@ -96,7 +97,13 @@ class LearnedAppliance {
     this.outlet,
     this.profileID,
     Map<String, dynamic> map,
-  ) : applianceType = map['applianceType']?.toString(),
+  ) : registrationMetadataAvailable =
+          map['registrationMetadataAvailable'] != false,
+      firmwareName =
+          map['firmwareName']?.toString() ??
+          map['name']?.toString() ??
+          profileID,
+      applianceType = map['applianceType']?.toString(),
       totalSessions = sensorNumber(map['totalSessions'])?.toInt(),
       hasSafetyLimit = (sensorNumber(map['safetyCeilingDuration']) ?? 0) > 0,
       hasRuntimeLimit = (sensorNumber(map['maxRunTime']) ?? 0) > 0,

@@ -6,6 +6,84 @@ import 'dart:async';
 import 'dart:convert';
 
 import '../models/esp32_data.dart';
+import '../models/gadget_status.dart';
+import 'device_binding.dart';
+
+/// Registration metadata is optional for displaying the firmware catalog.
+Stream<List<LearnedAppliance>> combineProfileStreams(
+  Stream<Object?> catalogs,
+  Stream<Object?> metadata,
+) {
+  late StreamController<List<LearnedAppliance>> controller;
+  final subscriptions = <StreamSubscription<Object?>>[];
+  Object? catalog;
+  Map<String, dynamic> registrations = {};
+  var catalogReady = false, metadataReady = false, metadataAvailable = false;
+  void emit() {
+    if (!catalogReady || !metadataReady) return;
+    final root = databaseMap(catalog);
+    controller.add(
+      parseLearnedAppliances({
+        for (final outlet in ['A', 'B'])
+          'OUTLET_$outlet': {
+            for (final entry in databaseMap(
+              root['OUTLET_$outlet'] ?? root['OUTLET $outlet'],
+            ).entries)
+              if (entry.value is Map)
+                entry.key: {
+                  ...databaseMap(entry.value),
+                  ...databaseMap(
+                    databaseMap(registrations['OUTLET_$outlet'])[entry.key],
+                  ),
+                  'firmwareName': databaseMap(entry.value)['name'] ?? entry.key,
+                  'registrationMetadataAvailable': metadataAvailable,
+                },
+          },
+      }),
+    );
+  }
+
+  controller = StreamController<List<LearnedAppliance>>(
+    onListen: () {
+      subscriptions.add(
+        catalogs.listen(
+          (value) {
+            catalog = value;
+            catalogReady = true;
+            emit();
+          },
+          onError: (Object error, StackTrace stack) {
+            catalogReady = false;
+            controller.addError(error, stack);
+          },
+        ),
+      );
+      subscriptions.add(
+        metadata.listen(
+          (value) {
+            registrations = databaseMap(value);
+            metadataReady = metadataAvailable = true;
+            emit();
+          },
+          onError: (Object error) {
+            // Old deployed rules may not allow this newly introduced path.
+            // Preserve learned profiles, but don't mistake missing metadata for
+            // proof that an appliance has never been registered.
+            metadataReady = true;
+            metadataAvailable = false;
+            emit();
+          },
+        ),
+      );
+    },
+    onCancel: () async {
+      for (final subscription in subscriptions) {
+        await subscription.cancel();
+      }
+    },
+  );
+  return controller.stream;
+}
 
 class Esp32Service {
   static const databaseUrl = String.fromEnvironment(
@@ -28,57 +106,51 @@ class Esp32Service {
       .onValue
       .map((event) => parseOutlets(event.snapshot.value));
 
-  Stream<List<LearnedAppliance>> streamProfiles() {
-    late StreamController<List<LearnedAppliance>> controller;
-    final subscriptions = <StreamSubscription<DatabaseEvent>>[];
-    Object? catalog;
-    Map<String, dynamic> registrations = {};
-    var catalogReady = false, registrationsReady = false;
-    void emit() {
-      if (!catalogReady || !registrationsReady) return;
-      final root = databaseMap(catalog);
-      final merged = <String, dynamic>{};
-      for (final outlet in ['A', 'B']) {
-        final metadata = databaseMap(registrations['OUTLET_$outlet']);
-        merged['OUTLET_$outlet'] = {
-          for (final entry in databaseMap(
-            root['OUTLET_$outlet'] ?? root['OUTLET $outlet'],
-          ).entries)
-            entry.key: {
-              ...databaseMap(entry.value),
-              ...databaseMap(metadata[entry.key]),
-            },
-        };
-      }
-      controller.add(parseLearnedAppliances(merged));
-    }
+  Stream<GadgetStatus> streamGadgetStatus() => database
+      .ref(DeviceBinding.statusPath)
+      .onValue
+      .map((event) => GadgetStatus.fromMap(databaseMap(event.snapshot.value)));
 
-    controller = StreamController<List<LearnedAppliance>>(
-      onListen: () {
-        subscriptions.add(
-          database.ref('appliance_profiles').onValue.listen((event) {
-            catalog = event.snapshot.value;
-            catalogReady = true;
-            emit();
-          }, onError: controller.addError),
-        );
-        subscriptions.add(
-          database.ref('appliance_registrations').onValue.listen((event) {
-            registrations = databaseMap(event.snapshot.value);
-            registrationsReady = true;
-            emit();
-          }, onError: controller.addError),
-        );
-      },
-      onCancel: () async {
-        for (final subscription in subscriptions) {
-          await subscription.cancel();
-        }
-      },
-    );
-    return controller.stream;
+  Stream<Map<String, dynamic>> streamWifiConfig() => database
+      .ref(DeviceBinding.wifiConfigPath)
+      .onValue
+      .map((event) => databaseMap(event.snapshot.value));
+
+  /// The ESP32 stores these in flash, switches networks, then deletes the
+  /// password from the database.
+  Future<void> saveWifiConfig(String ssid, String password) {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) throw StateError('Sign in to configure Wi-Fi.');
+    if (ssid.trim().isEmpty || utf8.encode(ssid).length > 32) {
+      throw ArgumentError('Enter a network name up to 32 bytes.');
+    }
+    if (password.isNotEmpty && (password.length < 8 || password.length > 63)) {
+      throw ArgumentError(
+        'Wi-Fi passwords are 8 to 63 characters (leave empty for open networks).',
+      );
+    }
+    return database.ref(DeviceBinding.wifiConfigPath).set({
+      'ssid': ssid,
+      'password': password,
+      'updatedAt': ServerValue.timestamp,
+      'updatedBy': uid,
+    });
   }
 
+  /// Remotely clears a WARNING or LOCKED_OUT outlet back to IDLE.
+  Future<void> resetSafety(OutletReading reading) =>
+      command(reading, 'RESET_SAFETY');
+
+  Stream<List<LearnedAppliance>> streamProfiles() => combineProfileStreams(
+    database
+        .ref('appliance_profiles')
+        .onValue
+        .map((event) => event.snapshot.value),
+    database
+        .ref('appliance_registrations')
+        .onValue
+        .map((event) => event.snapshot.value),
+  );
   Future<void> registerProfile(
     LearnedAppliance profile,
     String name,
@@ -128,7 +200,10 @@ class Esp32Service {
     final now = DateTime.now().toUtc().add(
       Duration(milliseconds: (offset as num?)?.toInt() ?? 0),
     );
-    if (!reading.canCommand(now)) {
+    final allowed = type == 'RESET_SAFETY'
+        ? reading.isFresh(now) && reading.sessionID.isNotEmpty
+        : reading.canCommand(now);
+    if (!allowed) {
       throw StateError('Fresh, unlocked device state is required.');
     }
     if (type == 'SMART_OVERRIDE' &&
