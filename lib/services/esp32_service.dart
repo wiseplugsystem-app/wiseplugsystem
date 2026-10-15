@@ -137,6 +137,39 @@ class Esp32Service {
     });
   }
 
+  static const _ownedOutlets = ['outlet_A', 'outlet_B'];
+
+  static bool _isPermissionDenied(FirebaseException e) =>
+      e.code.toLowerCase().replaceAll('_', '-').contains('permission-denied');
+
+  /// Links this gadget to the signed-in account if it has no owner yet
+  /// (1 device = 1 owner). Returns false when another account owns it.
+  Future<bool> claimDevice() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) throw StateError('Sign in to link the WisePlug.');
+    try {
+      await database.ref().update({
+        for (final outlet in _ownedOutlets) 'device_owners/$outlet': uid,
+      });
+      return true;
+    } on FirebaseException catch (e) {
+      if (_isPermissionDenied(e)) return false;
+      rethrow;
+    }
+  }
+
+  /// Unlinks the gadget so the next account to sign in can claim it.
+  /// Does nothing when the signed-in account is not the owner.
+  Future<void> releaseDevice() async {
+    try {
+      await database.ref().update({
+        for (final outlet in _ownedOutlets) 'device_owners/$outlet': null,
+      });
+    } on FirebaseException catch (e) {
+      if (!_isPermissionDenied(e)) rethrow;
+    }
+  }
+
   /// Remotely clears a WARNING or LOCKED_OUT outlet back to IDLE.
   Future<void> resetSafety(OutletReading reading) =>
       command(reading, 'RESET_SAFETY');

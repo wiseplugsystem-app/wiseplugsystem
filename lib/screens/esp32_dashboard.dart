@@ -1,8 +1,10 @@
 import 'esp32_live_view.dart';
 
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
 import '../models/esp32_data.dart';
+import '../services/device_binding.dart';
 import '../services/esp32_service.dart';
 import '../widgets/safety_alert_listener.dart';
 
@@ -27,13 +29,76 @@ class Esp32Dashboard extends StatefulWidget {
 
 class _Esp32DashboardState extends State<Esp32Dashboard> {
   late final Esp32Service _service = widget.service ?? Esp32Service();
+  // Claim before any listener starts: the database rules only let the
+  // owner read the device, and a denied listener does not retry.
+  late Future<bool> _claim = _service.claimDevice();
+
   @override
-  Widget build(BuildContext context) => SafetyAlertListener(
-    service: _service,
-    child: Esp32LiveView(
-      service: _service,
-      darkMode: widget.darkMode,
-      onDarkModeChanged: widget.onDarkModeChanged,
+  Widget build(BuildContext context) => FutureBuilder<bool>(
+    future: _claim,
+    builder: (context, snapshot) {
+      if (snapshot.connectionState != ConnectionState.done) {
+        return const Scaffold(body: Center(child: CircularProgressIndicator()));
+      }
+      if (snapshot.data == true) {
+        return SafetyAlertListener(
+          service: _service,
+          child: Esp32LiveView(
+            service: _service,
+            darkMode: widget.darkMode,
+            onDarkModeChanged: widget.onDarkModeChanged,
+          ),
+        );
+      }
+      return _ClaimProblem(
+        ownedByOther: snapshot.data == false,
+        onRetry: () => setState(() => _claim = _service.claimDevice()),
+      );
+    },
+  );
+}
+
+class _ClaimProblem extends StatelessWidget {
+  final bool ownedByOther;
+  final VoidCallback onRetry;
+  const _ClaimProblem({required this.ownedByOther, required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    body: Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 420),
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                ownedByOther ? Icons.lock_outline : Icons.wifi_off,
+                size: 48,
+                color: Colors.grey,
+              ),
+              const SizedBox(height: 16),
+              Text(
+                ownedByOther
+                    ? 'This WisePlug (${DeviceBinding.gadgetId}) is already linked to another account. Sign in with that account, or delete it from its User Profile to release the device.'
+                    : 'Could not link this WisePlug to your account. Check your internet connection and try again.',
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 20),
+              if (!ownedByOther)
+                FilledButton(
+                  onPressed: onRetry,
+                  child: const Text('Try again'),
+                ),
+              TextButton(
+                onPressed: () => FirebaseAuth.instance.signOut(),
+                child: const Text('Sign out'),
+              ),
+            ],
+          ),
+        ),
+      ),
     ),
   );
 }
@@ -222,9 +287,18 @@ class Esp32ProfileEditor extends StatefulWidget {
 }
 
 class Esp32ProfileEditorState extends State<Esp32ProfileEditor> {
-  late final _name = TextEditingController(text: widget.registration ? '' : widget.profile.name);
-  static const types = ['Rice cooker', 'Flat iron / hair straightener', 'Electric fan', 'Other'];
-  late String _type = types.contains(widget.profile.applianceType) ? widget.profile.applianceType! : 'Other';
+  late final _name = TextEditingController(
+    text: widget.registration ? '' : widget.profile.name,
+  );
+  static const types = [
+    'Rice cooker',
+    'Flat iron / hair straightener',
+    'Electric fan',
+    'Other',
+  ];
+  late String _type = types.contains(widget.profile.applianceType)
+      ? widget.profile.applianceType!
+      : 'Other';
   late final _runtime = TextEditingController(
     text: widget.profile.hasRuntimeLimit ? '${widget.profile.maxRunTime}' : '',
   );
@@ -281,25 +355,39 @@ class Esp32ProfileEditorState extends State<Esp32ProfileEditor> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-    title: Text(widget.registration ? 'Appliance Registration' : 'Edit Appliance Profile'),
+    title: Text(
+      widget.registration ? 'Appliance Registration' : 'Edit Appliance Profile',
+    ),
     content: SingleChildScrollView(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           Text('Outlet ${widget.profile.outlet} · detected signature'),
-          SelectableText(widget.profile.profileID, style: const TextStyle(color: Colors.blue)),
+          SelectableText(
+            widget.profile.profileID,
+            style: const TextStyle(color: Colors.blue),
+          ),
           const SizedBox(height: 20),
           TextField(
             controller: _name,
             enabled: !_busy,
-            decoration: const InputDecoration(labelText: 'Appliance Name', border: OutlineInputBorder()),
+            decoration: const InputDecoration(
+              labelText: 'Appliance Name',
+              border: OutlineInputBorder(),
+            ),
           ),
           const SizedBox(height: 20),
           DropdownButtonFormField<String>(
             initialValue: _type,
             isExpanded: true,
-            decoration: const InputDecoration(labelText: 'Type of Appliance', border: OutlineInputBorder()),
-            items: [for (final type in types) DropdownMenuItem(value: type, child: Text(type))],
+            decoration: const InputDecoration(
+              labelText: 'Type of Appliance',
+              border: OutlineInputBorder(),
+            ),
+            items: [
+              for (final type in types)
+                DropdownMenuItem(value: type, child: Text(type)),
+            ],
             onChanged: _busy ? null : (value) => setState(() => _type = value!),
           ),
           if (!widget.registration) ...[

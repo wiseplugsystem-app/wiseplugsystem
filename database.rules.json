@@ -3,7 +3,10 @@
     ".read": false,
     ".write": false,
     "device_owners": {
-      ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid"
+      ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid",
+      "$outlet": {
+        ".write": "auth != null && ($outlet === 'outlet_A' || $outlet === 'outlet_B') && (!data.exists() || data.val() === auth.uid) && (!newData.exists() || newData.val() === auth.uid)"
+      }
     },
     "telemetry_logs": {
       ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid"

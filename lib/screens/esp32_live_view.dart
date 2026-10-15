@@ -572,7 +572,10 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
           const SizedBox(width: 16),
           Expanded(
             child: _metric(
-              gadget != null ? '${gadget.activeOutlets} / 2' : '— / 2',
+              // Outlets running an appliance, not outlets whose relay is on.
+              gadget != null && !_readError
+                  ? '${_readings.values.where((r) => r.hasConnectedAppliance(now)).length} / 2'
+                  : '— / 2',
               'Outlets active',
             ),
           ),
@@ -650,6 +653,8 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
           Text(
             connected
                 ? profile?.name ?? reading!.appliance
+                : fresh && reading?.sensorValid == false
+                ? 'Meter not responding'
                 : fresh
                 ? 'No appliance detected'
                 : 'Waiting for device',
@@ -1451,8 +1456,7 @@ class _PowerControlState extends State<_PowerControl> {
         ].contains(r?.currentState);
     final on =
         widget.on ??
-        (r != null &&
-            !['DISABLED', 'LOCKED_OUT', ''].contains(r.currentState));
+        (r != null && !['DISABLED', 'LOCKED_OUT', ''].contains(r.currentState));
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(

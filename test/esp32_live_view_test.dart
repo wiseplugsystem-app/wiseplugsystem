@@ -19,6 +19,9 @@ class TestDevice extends Fake implements Esp32Service {
   @override
   Stream<GadgetStatus> streamGadgetStatus() => gadget.stream;
   Map<String, bool>? saved;
+  bool owner = true;
+  @override
+  Future<bool> claimDevice() async => owner;
   final commands = <String>[];
   @override
   Future<void> command(
@@ -105,6 +108,7 @@ void main() {
           ),
         ),
       );
+      await tester.pump(); // let the ownership claim finish
       final now = DateTime.now();
       final profiles = [
         LearnedAppliance.fromMap('A', 'p1', {
@@ -217,6 +221,7 @@ void main() {
           ),
         ),
       );
+      await tester.pump(); // let the ownership claim finish
       device.readings.add({
         'A': OutletReading.fromMap('A', {
           'appliance': 'Old fan',
@@ -277,4 +282,75 @@ void main() {
       await device.close();
     },
   );
+
+  testWidgets('a device owned by another account is not opened', (
+    tester,
+  ) async {
+    final device = TestDevice()..owner = false;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Esp32Dashboard(
+          service: device,
+          darkMode: false,
+          onDarkModeChanged: (_) {},
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.textContaining('already linked to another account'),
+      findsOneWidget,
+    );
+    expect(find.byType(Esp32LiveView), findsNothing);
+    await device.close();
+  });
+
+  testWidgets('outlets active counts running appliances, not relays', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(420, 920));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final device = TestDevice();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Esp32Dashboard(
+          service: device,
+          darkMode: false,
+          onDarkModeChanged: (_) {},
+        ),
+      ),
+    );
+    await tester.pump();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    // Both relays on, meter A dead, outlet B idle: nothing is running.
+    device.profiles.add([]);
+    device.readings.add({
+      'A': OutletReading.fromMap('A', {
+        'currentState': 'IDLE',
+        'status': 'Idle',
+        'sensor_valid': false,
+        'last_updated_ms': now,
+      }),
+      'B': OutletReading.fromMap('B', {
+        'currentState': 'IDLE',
+        'status': 'Idle',
+        'sensor_valid': true,
+        'power_W': 0,
+        'last_updated_ms': now,
+      }),
+    });
+    device.gadget.add(
+      GadgetStatus(
+        outletA: true,
+        outletB: true,
+        connectionStatus: 'Online',
+        lastSeen: DateTime.now(),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('0 / 2'), findsOneWidget);
+    expect(find.text('2 / 2'), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+    await device.close();
+  });
 }

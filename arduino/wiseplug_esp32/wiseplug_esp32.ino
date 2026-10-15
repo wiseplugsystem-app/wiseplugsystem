@@ -306,6 +306,7 @@ void handleCommand(SocketChannel& ch, const Command& cmd, uint64_t now) {
 // ==========================================
 void sensorTask(void*) {
   PZEM004Tv30* meters[] = {&pzemA, &pzemB};
+  uint64_t lastWarning[2] = {0, 0};
   for (;;) {
     for (int i = 0; i < 2; ++i) {
       SensorSample s;
@@ -314,6 +315,12 @@ void sensorTask(void*) {
       s.valid = isfinite(s.power) && s.power >= 0 && isfinite(s.current) && s.current >= 0 &&
                 isfinite(s.voltage) && s.voltage > 0 && isfinite(s.pf) && s.pf >= 0 && s.pf <= 1;
       s.captured = monotonicMs(); xQueueOverwrite(outlets[i].sensors, &s);
+      // Without valid readings an outlet can never detect or learn an appliance.
+      if (!s.valid && s.captured - lastWarning[i] >= 5000) {
+        lastWarning[i] = s.captured;
+        Serial.printf("[%s] PZEM not responding (V=%.1f): check its RX/TX wiring, 5V/GND and mains supply\n",
+                      outlets[i].outlet, s.voltage);
+      }
     }
     vTaskDelay(pdMS_TO_TICKS(200));
   }
@@ -529,6 +536,10 @@ void setup() {
   // Relays stay off until the persisted safety state is known.
   for (int pin : {RELAY_A_PIN, RELAY_B_PIN}) { digitalWrite(pin, RELAY_OFF); pinMode(pin, OUTPUT); }
   Serial.begin(115200);
+  // The PZEM constructors open these ports before the core is fully started,
+  // which is unreliable; open them again here so both meters respond.
+  Serial2.begin(9600, SERIAL_8N1, PZEM_A_RX, PZEM_A_TX);
+  Serial1.begin(9600, SERIAL_8N1, PZEM_B_RX, PZEM_B_TX);
   snprintf(sessionID, sizeof(sessionID), "%08lx%08lx", (unsigned long)esp_random(), (unsigned long)esp_random());
   for (int i = 0; i < 2; ++i) {
     auto& ch = outlets[i];

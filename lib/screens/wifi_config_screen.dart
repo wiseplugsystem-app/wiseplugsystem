@@ -68,7 +68,9 @@ class _WifiConfigScreenState extends State<WifiConfigScreen> {
       }
     } catch (error) {
       if (mounted) {
-        setState(() => _error = error is ArgumentError ? '${error.message}' : '$error');
+        setState(
+          () => _error = error is ArgumentError ? '${error.message}' : '$error',
+        );
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -96,7 +98,9 @@ class _WifiConfigScreenState extends State<WifiConfigScreen> {
                 child: Text(
                   'Last sent network: ${_saved['ssid']} · '
                   '${received ? 'received by WisePlug' : 'waiting for WisePlug'}',
-                  style: TextStyle(color: received ? Colors.green : Colors.grey),
+                  style: TextStyle(
+                    color: received ? Colors.green : Colors.grey,
+                  ),
                 ),
               ),
             const SizedBox(height: 20),
@@ -124,7 +128,9 @@ class _WifiConfigScreenState extends State<WifiConfigScreen> {
                 border: const OutlineInputBorder(),
                 suffixIcon: IconButton(
                   tooltip: _obscure ? 'Show password' : 'Hide password',
-                  icon: Icon(_obscure ? Icons.visibility : Icons.visibility_off),
+                  icon: Icon(
+                    _obscure ? Icons.visibility : Icons.visibility_off,
+                  ),
                   onPressed: () => setState(() => _obscure = !_obscure),
                 ),
               ),

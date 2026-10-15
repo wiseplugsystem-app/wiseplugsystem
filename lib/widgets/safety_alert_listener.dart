@@ -229,8 +229,7 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
                   '${r.isWarning ? '${r.secondsRemaining(now)} s until lockout' : 'Locked out'}',
                   textAlign: TextAlign.center,
                 ),
-              if (triggered.isEmpty)
-                const Text('Waiting for outlet details…'),
+              if (triggered.isEmpty) const Text('Waiting for outlet details…'),
               const SizedBox(height: 8),
               Text(
                 'Power draw: ${status?.powerDraw.toStringAsFixed(1) ?? '—'} W',

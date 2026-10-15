@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 
 import '../models/models.dart';
+import 'safety_alarm_manager.dart'; // Import your alarm manager
 
 class FirebaseBackendService {
   final FirebaseFirestore _db = FirebaseFirestore.instance;
@@ -107,19 +108,28 @@ class FirebaseBackendService {
         });
   }
 
-  // --- Anomaly Alert & Smart Override Methods ---
+  // --- Anomaly Alert, Sound Alarm & Smart Override Methods ---
 
   Stream<List<AnomalyAlert>> streamActiveAlerts(String deviceID) {
     return _db
         .collection('anomalyAlerts')
         .where('deviceID', isEqualTo: deviceID)
-        .where('resolution', isEqualTo: 'PENDING')
+        .where('resolution', isEqualTo: 'Pending')
         .snapshots()
-        .map(
-          (snapshot) => snapshot.docs
+        .map((snapshot) {
+          final alerts = snapshot.docs
               .map((doc) => AnomalyAlert.fromMap(doc.data(), doc.id))
-              .toList(),
-        );
+              .toList();
+
+          // Automatically trigger or stop sound alarm based on active safety alerts
+          if (alerts.isNotEmpty) {
+            SafetyAlarmManager().playSafetyAlarm();
+          } else {
+            SafetyAlarmManager().stopAlarm();
+          }
+
+          return alerts;
+        });
   }
 
   Future<void> requestSmartOverride(SmartOverride override) async {
@@ -133,6 +143,10 @@ class FirebaseBackendService {
       await _db.collection('anomalyAlerts').doc(override.alertID).update({
         'resolution': 'Extended by User (${override.extensionDuration} mins)',
       });
+      
+      // Stop the alarm when override is requested
+      await SafetyAlarmManager().stopAlarm();
+
       debugPrint(
         "🛡️ [Firestore] Override registered for alert: ${override.alertID}",
       );
@@ -147,13 +161,17 @@ class FirebaseBackendService {
       await _db.collection('anomalyAlerts').doc(alertID).update({
         'resolution': 'Acknowledged Shutdown',
       });
+      
+      // Stop the alarm when shutdown is acknowledged
+      await SafetyAlarmManager().stopAlarm();
+
       debugPrint("✅ [Firestore] Acknowledged shutdown for alert: $alertID");
     } catch (e) {
       debugPrint("❌ [Firestore Error] Failed to acknowledge shutdown: $e");
     }
   }
 
-  // --- Pattern Detection Stream & Dismissal ---
+  // --- Pattern Detection Stream, Dismissal & Command Dispatch ---
 
   Stream<List<DetectedAppliance>> streamDetectedAppliances(String deviceID) {
     return _db
@@ -173,6 +191,22 @@ class FirebaseBackendService {
       debugPrint("🗑️ [Firestore] Dismissed pattern: $signature");
     } catch (e) {
       debugPrint("❌ [Firestore Error] Failed to dismiss pattern: $e");
+    }
+  }
+
+  Future<void> sendRegisterCommand({
+    required String nodeName,
+    required String applianceName,
+  }) async {
+    try {
+      await _db.collection('commands').doc(nodeName).set({
+        'register_name': applianceName,
+        'timestamp': FieldValue.serverTimestamp(),
+      });
+      debugPrint("✅ [Firestore] Sent register command to $nodeName: $applianceName");
+    } catch (e) {
+      debugPrint("❌ [Firestore Error] Failed to send register command: $e");
+      rethrow;
     }
   }
 }

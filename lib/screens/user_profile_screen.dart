@@ -31,7 +31,10 @@ class UserProfileScreen extends StatelessWidget {
       barrierDismissible: false,
       builder: (_) => DeleteAccountDialog(
         auth: _auth,
-        removeUserData: (uid) => service.database.ref('users/$uid').remove(),
+        removeUserData: (uid) async {
+          await service.releaseDevice();
+          await service.database.ref('users/$uid').remove();
+        },
       ),
     );
     if (deleted == true && context.mounted) {
@@ -120,7 +123,9 @@ class _DeleteAccountDialogState extends State<DeleteAccountDialog> {
     final user = widget.auth.currentUser;
     final email = user?.email;
     if (user == null || email == null) {
-      setState(() => _error = 'Only email/password accounts can be deleted here.');
+      setState(
+        () => _error = 'Only email/password accounts can be deleted here.',
+      );
       return;
     }
     if (_password.text.isEmpty) {
@@ -141,8 +146,8 @@ class _DeleteAccountDialogState extends State<DeleteAccountDialog> {
     } on FirebaseAuthException catch (e) {
       if (mounted) {
         setState(
-          () => _error =
-              ['wrong-password', 'invalid-credential'].contains(e.code)
+          () =>
+              _error = ['wrong-password', 'invalid-credential'].contains(e.code)
               ? 'Incorrect password. Your account was not deleted.'
               : authErrorMessage(e),
         );
@@ -150,8 +155,7 @@ class _DeleteAccountDialogState extends State<DeleteAccountDialog> {
     } catch (_) {
       if (mounted) {
         setState(
-          () => _error =
-              'Could not delete your account data. Check your connection and try again.',
+          () => _error = 'Could not delete your account data. Check your connection and try again.',
         );
       }
     } finally {
