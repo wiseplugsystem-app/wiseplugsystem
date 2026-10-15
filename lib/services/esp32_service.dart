@@ -211,6 +211,23 @@ class Esp32Service {
     );
   }
 
+  /// Makes the ESP32 forget a learned appliance, then removes its saved name.
+  Future<void> deleteProfile(
+    OutletReading reading,
+    LearnedAppliance profile,
+  ) async {
+    await command(
+      reading,
+      'REMOVE_PROFILE',
+      fields: {'profileID': profile.profileID},
+    );
+    await database
+        .ref(
+          'appliance_registrations/OUTLET_${profile.outlet}/${profile.profileID}',
+        )
+        .remove();
+  }
+
   /// Remotely clears a WARNING or LOCKED_OUT outlet back to IDLE.
   Future<void> resetSafety(OutletReading reading) =>
       command(reading, 'RESET_SAFETY');

@@ -20,6 +20,12 @@ class TestDevice extends Fake implements Esp32Service {
   Stream<GadgetStatus> streamGadgetStatus() => gadget.stream;
   Map<String, bool>? saved;
   bool owner = true;
+  final deleted = <String>[];
+  @override
+  Future<void> deleteProfile(
+    OutletReading reading,
+    LearnedAppliance profile,
+  ) async => deleted.add(profile.profileID);
   @override
   Future<bool> claimDevice() async => owner;
   final commands = <String>[];
@@ -250,14 +256,20 @@ void main() {
       expect(find.byType(Switch), findsNWidgets(2));
       expect(find.text('Measurements'), findsNothing);
       await tester.pumpAndSettle();
-      await tester.tap(find.byType(Switch).first);
-      await tester.pumpAndSettle();
-      expect(find.textContaining('Connect the ESP32'), findsOneWidget);
+      bool switchEnabled() =>
+          tester.widget<Switch>(find.byType(Switch).first).onChanged != null;
+      // Stale data: no appliance is known to be running, so nothing to switch.
+      expect(switchEnabled(), isFalse);
       expect(device.commands, isEmpty);
-      for (final state in ['IDLE', 'DISABLED']) {
+      for (final (state, enabled) in [
+        ('IDLE', false), // on, nothing plugged in
+        ('ACTIVE', true), // appliance running: can be switched off
+        ('DISABLED', true), // off: must stay switchable to turn back on
+      ]) {
         device.readings.add({
           'A': OutletReading.fromMap('A', {
             'currentState': state,
+            'status': state == 'ACTIVE' ? 'Active' : 'Idle',
             'sessionID': 'boot',
             'last_updated_ms': DateTime.now().millisecondsSinceEpoch,
           }),
@@ -265,6 +277,7 @@ void main() {
         await tester.pumpAndSettle();
         await tester.ensureVisible(find.byType(Switch).first);
         await tester.pumpAndSettle();
+        expect(switchEnabled(), enabled, reason: state);
         await tester.tap(find.byType(Switch).first);
         await tester.pumpAndSettle();
       }
@@ -397,6 +410,52 @@ void main() {
     // Summary card and Power Control row both use the registered name.
     expect(find.text('Desk fan'), findsNWidgets(2));
     expect(find.text('UNNAMED_DEVICE_1'), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+    await device.close();
+  });
+
+  testWidgets('idle appliances show no fixed outlet and can be deleted', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(420, 920));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final device = TestDevice();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Esp32Dashboard(
+          service: device,
+          darkMode: false,
+          onDarkModeChanged: (_) {},
+        ),
+      ),
+    );
+    await tester.pump();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    device.profiles.add([
+      LearnedAppliance.fromMap('A', 'kettle', {
+        'name': 'Old kettle',
+        'registered': true,
+      }),
+    ]);
+    device.readings.add({
+      'A': OutletReading.fromMap('A', {
+        'currentState': 'IDLE',
+        'status': 'Idle',
+        'sessionID': 'boot',
+        'last_updated_ms': now,
+      }),
+    });
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Profiles'));
+    await tester.pumpAndSettle();
+    expect(find.text('Old kettle'), findsOneWidget);
+    expect(find.textContaining('Outlet A'), findsNothing);
+    await tester.tap(find.byTooltip('Delete appliance'));
+    await tester.pumpAndSettle();
+    expect(find.text('Delete appliance?'), findsOneWidget);
+    await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+    await tester.pumpAndSettle();
+    expect(device.deleted, ['kettle']);
     await tester.pumpWidget(const SizedBox());
     await device.close();
   });

@@ -373,4 +373,38 @@ void main() {
     await tester.pumpWidget(const SizedBox());
     await device.close();
   });
+
+  testWidgets('a name already used by another appliance is refused', (
+    tester,
+  ) async {
+    final device = PopupDevice();
+    await mount(tester, device);
+    device.readings.add({'A': reading()});
+    device.profiles.add([
+      LearnedAppliance.fromMap('A', 'signature', {'name': 'UNNAMED_DEVICE_1'}),
+      LearnedAppliance.fromMap('B', 'fan', {
+        'name': 'Bedroom Fan',
+        'registered': true,
+      }),
+    ]);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Yes, Register'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).first, ' bedroom fan ');
+    await tester.tap(find.text('Save Profile'));
+    await tester.pumpAndSettle();
+    expect(
+      find.text(
+        'An appliance with this name already exists. Please choose a unique name.',
+      ),
+      findsOneWidget,
+    );
+    expect(device.savedName, isNull);
+    await tester.enterText(find.byType(TextField).first, 'Desk lamp');
+    await tester.tap(find.text('Save Profile'));
+    await tester.pumpAndSettle();
+    expect(device.savedName, 'Desk lamp');
+    await tester.pumpWidget(const SizedBox());
+    await device.close();
+  });
 }

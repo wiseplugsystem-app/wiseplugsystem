@@ -86,11 +86,13 @@ class Esp32LiveView extends StatefulWidget {
   final Esp32Service service;
   final bool darkMode;
   final ValueChanged<bool> onDarkModeChanged;
+  final VoidCallback? onSignOut;
   const Esp32LiveView({
     super.key,
     required this.service,
     required this.darkMode,
     required this.onDarkModeChanged,
+    this.onSignOut,
   });
   @override
   State<Esp32LiveView> createState() => _Esp32LiveViewState();
@@ -217,6 +219,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
             reading: reading,
             profile: profile,
             registration: true,
+            takenNames: _takenNames(except: profile),
           ),
         );
         if (saved == true && mounted) {
@@ -816,12 +819,25 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                         : profile.name,
                     style: const TextStyle(fontWeight: FontWeight.w700),
                   ),
+                  // Appliances are portable: show an outlet only while running.
                   subtitle: Text(
-                    '${profile.applianceType ?? 'Appliance'} · Outlet ${profile.outlet}',
+                    _runningOn(profile, now) == null
+                        ? profile.applianceType ?? 'Appliance'
+                        : 'Running on Outlet ${profile.outlet}',
                   ),
                   trailing: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
+                      if (_deletableReading(profile, now) case final reading?)
+                        IconButton(
+                          tooltip: 'Delete appliance',
+                          icon: const Icon(
+                            Icons.delete_outline,
+                            color: Colors.red,
+                          ),
+                          onPressed: () =>
+                              _deleteProfile(context, profile, reading),
+                        ),
                       _Badge(
                         profile.needsRegistration
                             ? 'Register'
@@ -886,14 +902,15 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
               !_readError &&
               reading?.hasConnectedAppliance(now) == true &&
               connectedProfile(reading, _profiles)?.profileID == p.profileID;
-          final canDelete =
-              enabled && ['IDLE', 'DISABLED'].contains(reading!.currentState);
+          // Any appliance that is not running right now can be deleted.
+          final canDelete = enabled && !connected;
           void edit() => showDialog<void>(
             context: context,
             builder: (_) => Esp32ProfileEditor(
               service: widget.service,
               reading: reading!,
               profile: p,
+              takenNames: _takenNames(except: p),
             ),
           );
           return Dialog(
@@ -924,12 +941,9 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                             ),
                           ),
                         ),
-                        TextButton(
-                          onPressed: enabled && !reading!.isWarning
-                              ? edit
-                              : null,
-                          child: const Text('Edit'),
-                        ),
+                        // Balances the back button so the title stays centred;
+                        // Edit lives next to Delete at the bottom.
+                        const SizedBox(width: 48),
                       ],
                     ),
                     const SizedBox(height: 20),
@@ -966,7 +980,10 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                       child: Column(
                         children: [
                           _Pair('Signature ID', p.profileID, color: _blue),
-                          _Pair('Outlet', p.outlet),
+                          _Pair(
+                            'Plugged into',
+                            connected ? 'Outlet ${p.outlet}' : 'Not running',
+                          ),
                           _Pair(
                             'Safety limit',
                             p.hasSafetyLimit
@@ -1028,7 +1045,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                         Expanded(
                           child: OutlinedButton(
                             onPressed: canDelete
-                                ? () => _deleteProfile(context, p, reading)
+                                ? () => _deleteProfile(context, p, reading!)
                                 : null,
                             style: OutlinedButton.styleFrom(
                               foregroundColor: Colors.red,
@@ -1048,11 +1065,16 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                       ],
                     ),
                     if (!canDelete)
-                      const Padding(
-                        padding: EdgeInsets.only(top: 8),
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
                         child: Text(
-                          'Deletion requires an idle or disabled outlet.',
-                          style: TextStyle(fontSize: 12, color: Colors.grey),
+                          connected
+                              ? 'Switch off or unplug this appliance to delete it.'
+                              : 'The WisePlug must be online to delete appliances.',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey,
+                          ),
                         ),
                       ),
                   ],
@@ -1070,12 +1092,16 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
     LearnedAppliance profile,
     OutletReading reading,
   ) async {
+    final name = profile.needsRegistration
+        ? 'this unregistered appliance'
+        : profile.name;
     final confirmed = await showDialog<bool>(
       context: dialogContext,
       builder: (context) => AlertDialog(
-        title: const Text('Delete appliance profile?'),
+        title: const Text('Delete appliance?'),
         content: Text(
-          'Remove ${profile.name} from the ESP32 learned profiles?',
+          'Remove $name from your account? The WisePlug forgets its power '
+          'signature and will treat it as a new appliance if it is plugged in again.',
         ),
         actions: [
           TextButton(
@@ -1083,6 +1109,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
             child: const Text('Cancel'),
           ),
           FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
             onPressed: () => Navigator.pop(context, true),
             child: const Text('Delete'),
           ),
@@ -1091,17 +1118,44 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
     );
     if (confirmed != true || !mounted) return;
     try {
-      await widget.service.command(
-        reading,
-        'REMOVE_PROFILE',
-        fields: {'profileID': profile.profileID},
-      );
-      if (dialogContext.mounted) Navigator.pop(dialogContext);
-      _notify('ESP32 confirmed profile deletion.');
+      await widget.service.deleteProfile(reading, profile);
+      if (dialogContext != context && dialogContext.mounted) {
+        Navigator.pop(dialogContext);
+      }
+      _notify('Appliance deleted.');
     } catch (error) {
       _notify('$error');
     }
   }
+
+  /// The outlet reading when [profile] is the appliance running on it.
+  OutletReading? _runningOn(LearnedAppliance profile, DateTime now) {
+    final reading = _readings[profile.outlet];
+    return !_readError &&
+            reading?.hasConnectedAppliance(now) == true &&
+            connectedProfile(reading, _profiles)?.profileID ==
+                profile.profileID
+        ? reading
+        : null;
+  }
+
+  /// The reading to send REMOVE_PROFILE through, when [profile] is idle and
+  /// the WisePlug can take commands; null when it cannot be deleted now.
+  OutletReading? _deletableReading(LearnedAppliance profile, DateTime now) {
+    final reading = _readings[profile.outlet];
+    if (_readError || _profileError || _runningOn(profile, now) != null) {
+      return null;
+    }
+    return reading?.canCommand(now) == true ? reading : null;
+  }
+
+  /// Lower-cased names of registered appliances, for duplicate checks.
+  Set<String> _takenNames({LearnedAppliance? except}) => {
+    for (final p in _profiles)
+      if (!p.needsRegistration &&
+          !(p.outlet == except?.outlet && p.profileID == except?.profileID))
+        p.name.trim().toLowerCase(),
+  };
 
   List<Widget> _settings(DateTime now) {
     final connected = _gadget?.isOnline(now) == true;
@@ -1200,6 +1254,17 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
           'Device changes and newly learned appliances appear while the app is open. Safety push notifications require mobile notification permission.',
           style: TextStyle(color: Colors.grey, fontSize: 12),
         ),
+      ),
+      const SizedBox(height: 24),
+      OutlinedButton.icon(
+        style: OutlinedButton.styleFrom(
+          foregroundColor: Colors.red,
+          side: const BorderSide(color: Colors.red),
+          padding: const EdgeInsets.symmetric(vertical: 14),
+        ),
+        onPressed: widget.onSignOut,
+        icon: const Icon(Icons.logout),
+        label: const Text('Sign out'),
       ),
     ];
   }
@@ -1476,6 +1541,7 @@ class _PowerControlState extends State<_PowerControl> {
     final on =
         widget.on ??
         (r != null && !['DISABLED', 'LOCKED_OUT', ''].contains(r.currentState));
+    final appliance = r?.hasConnectedAppliance(widget.now) == true;
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
@@ -1508,6 +1574,8 @@ class _PowerControlState extends State<_PowerControl> {
                           ? 'Unavailable'
                           : r.isLockedOut
                           ? 'Locked · reset with button or safety alert'
+                          : on && !appliance
+                          ? 'On · no appliance detected'
                           : on
                           ? 'On · monitoring enabled'
                           : 'Off · monitoring disabled'),
@@ -1518,8 +1586,14 @@ class _PowerControlState extends State<_PowerControl> {
               ),
               Switch(
                 value: on,
+                // With nothing plugged in there is nothing to switch off. An
+                // outlet that is off stays switchable: with its relay open no
+                // appliance can ever be detected on it.
                 onChanged:
-                    !_busy && r?.isLockedOut != true && r?.isWarning != true
+                    !_busy &&
+                        r?.isLockedOut != true &&
+                        r?.isWarning != true &&
+                        (!on || appliance)
                     ? (value) => _send(value ? 'TURN_ON' : 'TURN_OFF')
                     : null,
               ),

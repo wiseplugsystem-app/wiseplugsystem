@@ -28,8 +28,11 @@ class AuthGate extends StatelessWidget {
   );
 }
 
+final _emailPattern = RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$');
+
 class SignInScreen extends StatefulWidget {
-  const SignInScreen({super.key});
+  final FirebaseAuth? auth;
+  const SignInScreen({super.key, this.auth});
   @override
   State<SignInScreen> createState() => _SignInState();
 }
@@ -39,8 +42,63 @@ class _SignInState extends State<SignInScreen> {
   final _confirmation = TextEditingController();
   final _form = GlobalKey<FormState>();
   bool _creatingAccount = false;
-  bool _busy = false;
+  bool _busy = false, _obscure = true;
   String? _error;
+
+  FirebaseAuth get _auth => widget.auth ?? FirebaseAuth.instance;
+
+  Widget get _visibilityToggle => IconButton(
+    tooltip: _obscure ? 'Show password' : 'Hide password',
+    icon: Icon(_obscure ? Icons.visibility : Icons.visibility_off),
+    onPressed: () => setState(() => _obscure = !_obscure),
+  );
+
+  /// Firebase emails a reset link (free on the Spark plan). The message does
+  /// not reveal whether the address has an account.
+  Future<void> _forgotPassword() async {
+    final email = _email.text.trim();
+    if (!_emailPattern.hasMatch(email)) {
+      setState(
+        () => _error =
+            'Enter your account email above, then tap Forgot Password? again.',
+      );
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await _auth.sendPasswordResetEmail(email: email);
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          icon: const Icon(Icons.mark_email_read_outlined),
+          title: const Text('Check your email'),
+          content: Text(
+            'If an account exists for $email, we sent it a link to reset your '
+            'password. Open the link (check your spam folder too), choose a new '
+            'password, then sign in here.',
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
+    } on FirebaseAuthException catch (e) {
+      if (mounted) setState(() => _error = authErrorMessage(e));
+    } catch (_) {
+      if (mounted) {
+        setState(() => _error = 'Unable to connect. Please try again.');
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
   @override
   void dispose() {
     _email.dispose();
@@ -57,12 +115,12 @@ class _SignInState extends State<SignInScreen> {
     });
     try {
       if (_creatingAccount) {
-        await FirebaseAuth.instance.createUserWithEmailAndPassword(
+        await _auth.createUserWithEmailAndPassword(
           email: _email.text.trim(),
           password: _password.text,
         );
       } else {
-        await FirebaseAuth.instance.signInWithEmailAndPassword(
+        await _auth.signInWithEmailAndPassword(
           email: _email.text.trim(),
           password: _password.text,
         );
@@ -104,9 +162,7 @@ class _SignInState extends State<SignInScreen> {
               TextFormField(
                 controller: _email,
                 enabled: !_busy,
-                validator: (value) =>
-                    RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$')
-                        .hasMatch(value?.trim() ?? '')
+                validator: (value) => _emailPattern.hasMatch(value?.trim() ?? '')
                     ? null
                     : 'Enter a valid email address.',
                 keyboardType: TextInputType.emailAddress,
@@ -124,21 +180,30 @@ class _SignInState extends State<SignInScreen> {
                   }
                   return null;
                 },
-                obscureText: true,
+                obscureText: _obscure,
                 decoration: InputDecoration(
                   labelText: _creatingAccount
                       ? 'Choose a password'
                       : 'Password',
+                  suffixIcon: _visibilityToggle,
                 ),
                 onFieldSubmitted: (_) {
                   if (!_busy) _login();
                 },
               ),
+              if (!_creatingAccount)
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton(
+                    onPressed: _busy ? null : _forgotPassword,
+                    child: const Text('Forgot Password?'),
+                  ),
+                ),
               if (_creatingAccount) ...[
                 TextFormField(
                   controller: _confirmation,
                   enabled: !_busy,
-                  obscureText: true,
+                  obscureText: _obscure,
                   decoration: const InputDecoration(
                     labelText: 'Confirm password',
                   ),
@@ -150,7 +215,7 @@ class _SignInState extends State<SignInScreen> {
                 const Padding(
                   padding: EdgeInsets.only(top: 16),
                   child: Text(
-                    'After creating your account, ask your WisePlug administrator to link your account to your device.',
+                    'The first account to sign in is linked to the WisePlug automatically.',
                   ),
                 ),
               ],

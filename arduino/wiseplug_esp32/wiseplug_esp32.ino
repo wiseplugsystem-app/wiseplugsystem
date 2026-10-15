@@ -318,12 +318,14 @@ void handleCommand(SocketChannel& ch, const Command& cmd, uint64_t now) {
         if (d.safety.state == SocketState::Disabled) endSession(ch);
         result = "ACCEPTED";
       }
-    } else if (strcmp(cmd.type, "REMOVE_PROFILE") == 0 &&
-        (d.safety.state == SocketState::Idle || d.safety.state == SocketState::Disabled)) {
+    } else if (strcmp(cmd.type, "REMOVE_PROFILE") == 0) {
+      // Any appliance except the one running now can be forgotten.
       for (uint32_t i = 0; i < d.count; ++i) {
         if (strcmp(cmd.profileID, d.profiles[i].profileID) != 0) continue;
+        if (int(i) == d.activeID) break;
         for (uint32_t j = i + 1; j < d.count; ++j) d.profiles[j - 1] = d.profiles[j];
-        --d.count; d.activeID = -1;
+        --d.count;
+        if (d.activeID > int(i)) --d.activeID;  // keep pointing at the running appliance
         if (saveProfiles(ch)) { ++d.safety.revision; result = "ACCEPTED"; }
         break;
       }

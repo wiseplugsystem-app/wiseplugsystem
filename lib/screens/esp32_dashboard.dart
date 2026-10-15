@@ -47,6 +47,7 @@ class _Esp32DashboardState extends State<Esp32Dashboard> {
             service: _service,
             darkMode: widget.darkMode,
             onDarkModeChanged: widget.onDarkModeChanged,
+            onSignOut: () => FirebaseAuth.instance.signOut(),
           ),
         );
       }
@@ -275,12 +276,16 @@ class Esp32ProfileEditor extends StatefulWidget {
   final Esp32Service service;
   final OutletReading reading;
   final LearnedAppliance profile;
+
+  /// Lower-cased names of the user's other appliances; reused names are refused.
+  final Set<String> takenNames;
   const Esp32ProfileEditor({
     super.key,
     required this.service,
     required this.reading,
     required this.profile,
     this.registration = false,
+    this.takenNames = const {},
   });
   @override
   State<Esp32ProfileEditor> createState() => Esp32ProfileEditorState();
@@ -321,6 +326,13 @@ class Esp32ProfileEditorState extends State<Esp32ProfileEditor> {
   }
 
   Future<void> _save() async {
+    if (widget.takenNames.contains(_name.text.trim().toLowerCase())) {
+      setState(
+        () => _error =
+            'An appliance with this name already exists. Please choose a unique name.',
+      );
+      return;
+    }
     setState(() {
       _busy = true;
       _error = null;
