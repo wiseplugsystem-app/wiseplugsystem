@@ -26,9 +26,10 @@
 // ==========================================
 constexpr const char* DEVICE_ID = "gadget-1";  // must match the app's DeviceBinding
 
-// Relay polarity (swap if your relay board is active-low).
-#define RELAY_ON  HIGH
-#define RELAY_OFF LOW
+// Relay polarity. This board is active-low: a LOW pin closes the relay
+// (confirmed: "relay off" passed 68 W, "relay on" passed 0 W).
+#define RELAY_ON  LOW
+#define RELAY_OFF HIGH
 
 constexpr int PZEM_A_RX = 32, PZEM_A_TX = 33, PZEM_B_RX = 25, PZEM_B_TX = 26;
 constexpr int RELAY_A_PIN = 18, RELAY_B_PIN = 19;

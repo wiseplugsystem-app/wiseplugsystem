@@ -229,7 +229,14 @@ class Esp32Service {
   }) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) throw StateError('Sign in before controlling an outlet.');
-    final offset = (await database.ref('.info/serverTimeOffset').get()).value;
+    // `.info` paths are client-local: get() sends them to the server on web,
+    // which rejects them ("Invalid token in path"). A listener reads locally.
+    final offset = await database
+        .ref('.info/serverTimeOffset')
+        .onValue
+        .first
+        .then((event) => event.snapshot.value)
+        .timeout(const Duration(seconds: 5), onTimeout: () => 0);
     final now = DateTime.now().toUtc().add(
       Duration(milliseconds: (offset as num?)?.toInt() ?? 0),
     );
