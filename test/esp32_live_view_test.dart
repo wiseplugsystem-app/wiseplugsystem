@@ -465,4 +465,70 @@ void main() {
     await tester.pumpWidget(const SizedBox());
     await device.close();
   });
+
+  testWidgets('only the power switch turns green when on, live', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(420, 1400));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final device = TestDevice();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Esp32Dashboard(
+          service: device,
+          darkMode: false,
+          onDarkModeChanged: (_) {},
+        ),
+      ),
+    );
+    await tester.pump();
+    device.profiles.add([]);
+    Switch firstSwitch() => tester.widget<Switch>(find.byType(Switch).first);
+    Map<String, OutletReading> outletA(String state) => {
+      'A': OutletReading.fromMap('A', {
+        'currentState': state,
+        'status': state == 'ACTIVE' ? 'Active' : 'Idle',
+        'sessionID': 'boot',
+        'last_updated_ms': DateTime.now().millisecondsSinceEpoch,
+      }),
+    };
+    device.readings.add(outletA('ACTIVE'));
+    await tester.pumpAndSettle();
+    expect(firstSwitch().value, isTrue);
+    Color? track(Set<WidgetState> states) =>
+        firstSwitch().trackColor!.resolve(states);
+    expect(track({WidgetState.selected}), const Color(0xFF00B744)); // green
+    expect(find.text('Plug in an appliance to use this switch.'), findsNothing);
+    expect(
+      find.ancestor(
+        of: find.byType(Switch).first,
+        matching: find.byType(AnimatedContainer),
+      ),
+      findsNothing,
+      reason: 'the card itself stays neutral',
+    );
+    device.readings.add(outletA('DISABLED'));
+    await tester.pumpAndSettle();
+    expect(firstSwitch().value, isFalse); // grey track
+    expect(
+      firstSwitch().onChanged,
+      isNotNull,
+      reason: 'off: can be switched on',
+    );
+    // On but empty: disabled, dimmed, and explained.
+    device.readings.add(outletA('IDLE'));
+    await tester.pumpAndSettle();
+    expect(firstSwitch().onChanged, isNull);
+    expect(
+      find.text('Plug in an appliance to use this switch.'),
+      findsOneWidget,
+    );
+    expect(
+      track({WidgetState.selected, WidgetState.disabled})!.a,
+      lessThan(1),
+      reason: 'disabled switch is dimmed',
+    );
+    await tester.pumpWidget(const SizedBox());
+    await device.close();
+  });
 }

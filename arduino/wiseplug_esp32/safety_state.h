@@ -7,7 +7,7 @@ struct SafetyState {
   SocketState state = SocketState::Idle;
   uint32_t revision = 0;
   uint64_t started = 0, deadline = 0, warningStarted = 0;
-  bool runtimeWarning = false;
+  bool runtimeWarning = false; c
   void begin(uint64_t now, uint32_t ceilingSeconds) {
     state = SocketState::Sampling; started = now;
     deadline = now + uint64_t(ceilingSeconds) * 1000;

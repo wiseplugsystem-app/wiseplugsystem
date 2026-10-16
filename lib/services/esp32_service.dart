@@ -106,6 +106,7 @@ class DeviceRejection implements Exception {
       'The outlet changed state before the command arrived. Try again.',
     'REJECTED_PHYSICAL_RESET_REQUIRED' => 'This outlet is locked. Use Reset Safety in the alert or the outlet\'s button.',
     'REJECTED_INVALID' => 'The outlet cannot do that in its current state.',
+    'REJECTED_NO_APPLIANCE' => 'No appliance is plugged into this outlet, so there is nothing to switch.',
     _ => 'The WisePlug refused the command ($code).',
   };
 }
@@ -304,6 +305,13 @@ class Esp32Service {
         : reading.canCommand(now);
     if (!allowed) {
       throw StateError('Fresh, unlocked device state is required.');
+    }
+    // Interlock (also enforced by the ESP32): an empty outlet is not switched
+    // off. "Turn Off Now" during a warning always applies.
+    if (type == 'TURN_OFF' &&
+        !reading.isWarning &&
+        !reading.hasConnectedAppliance(now)) {
+      throw const DeviceRejection('REJECTED_NO_APPLIANCE');
     }
     if (type == 'SMART_OVERRIDE' &&
         (!reading.isWarning || reading.secondsRemaining(now) == 0)) {

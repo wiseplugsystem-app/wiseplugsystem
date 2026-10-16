@@ -464,7 +464,9 @@ void handleCommand(SocketChannel& ch, const Command& cmd, uint64_t now) {
       bool on = strcmp(cmd.type, "TURN_ON") == 0;
       String running = activeProfileID(ch);
       bool wasActive = d.safety.state == SocketState::Active;
-      if (d.safety.remotePower(on)) {
+      if (!on && d.safety.state == SocketState::Idle) {
+        result = "REJECTED_NO_APPLIANCE";  // interlock: nothing plugged in to switch off
+      } else if (d.safety.remotePower(on)) {
         if (d.safety.state == SocketState::Disabled) {
           if (wasActive) recordSession(ch, now);  // switched off after a normal use
           endSession(ch);

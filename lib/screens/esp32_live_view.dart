@@ -1627,6 +1627,18 @@ class _PowerControlState extends State<_PowerControl> {
       );
       return;
     }
+    // Interlock: never send a switch command for an empty outlet.
+    final empty = !reading.hasConnectedAppliance(widget.now);
+    if (type == 'TURN_OFF' && empty && !reading.isWarning) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'No appliance is plugged into Outlet ${widget.outlet}.',
+          ),
+        ),
+      );
+      return;
+    }
     setState(() => _busy = true);
     try {
       await widget.service.command(
@@ -1668,6 +1680,13 @@ class _PowerControlState extends State<_PowerControl> {
         widget.on ??
         (r != null && !['DISABLED', 'LOCKED_OUT', ''].contains(r.currentState));
     final appliance = r?.hasConnectedAppliance(widget.now) == true;
+    // Only the switch shows the state: green = power on (live relay state).
+    final lit = r != null && r.isFresh(widget.now) && !r.isLockedOut && on;
+    final canToggle =
+        !_busy &&
+        r?.isLockedOut != true &&
+        r?.isWarning != true &&
+        (!on || appliance);
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
@@ -1679,7 +1698,7 @@ class _PowerControlState extends State<_PowerControl> {
         children: [
           Row(
             children: [
-              const _ApplianceIcon(),
+              _ApplianceIcon(type: widget.applianceName),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
@@ -1712,19 +1731,55 @@ class _PowerControlState extends State<_PowerControl> {
               ),
               Switch(
                 value: on,
+                // Green when on; dimmed whenever the switch is disabled.
+                trackColor: WidgetStateProperty.resolveWith((states) {
+                  final disabled = states.contains(WidgetState.disabled);
+                  if (states.contains(WidgetState.selected) && lit) {
+                    return _green.withValues(alpha: disabled ? .3 : 1);
+                  }
+                  return Colors.grey.withValues(alpha: disabled ? .12 : .25);
+                }),
+                thumbColor: WidgetStateProperty.resolveWith(
+                  (states) => states.contains(WidgetState.disabled)
+                      ? Colors.grey.shade300
+                      : Colors.white,
+                ),
+                trackOutlineColor: WidgetStateProperty.resolveWith(
+                  (states) =>
+                      states.contains(WidgetState.selected) &&
+                          lit &&
+                          !states.contains(WidgetState.disabled)
+                      ? _green
+                      : Colors.grey.withValues(alpha: .35),
+                ),
                 // With nothing plugged in there is nothing to switch off. An
                 // outlet that is off stays switchable: with its relay open no
                 // appliance can ever be detected on it.
-                onChanged:
-                    !_busy &&
-                        r?.isLockedOut != true &&
-                        r?.isWarning != true &&
-                        (!on || appliance)
-                    ? (value) => _send(value ? 'TURN_ON' : 'TURN_OFF')
+                onChanged: canToggle
+                    ? (value) {
+                        HapticFeedback.selectionClick();
+                        _send(value ? 'TURN_ON' : 'TURN_OFF');
+                      }
                     : null,
               ),
             ],
           ),
+          if (lit && !appliance && !_busy)
+            const Padding(
+              padding: EdgeInsets.only(top: 8, left: 4),
+              child: Row(
+                children: [
+                  Icon(Icons.power_off_outlined, size: 16, color: Colors.grey),
+                  SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      'Plug in an appliance to use this switch.',
+                      style: TextStyle(fontSize: 12, color: Colors.grey),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           if (r?.isWarning == true)
             Wrap(
               spacing: 8,
