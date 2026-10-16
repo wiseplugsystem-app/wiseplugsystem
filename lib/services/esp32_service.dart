@@ -104,7 +104,7 @@ class DeviceRejection implements Exception {
           '"Erase All Flash Before Sketch Upload" enabled.',
     'REJECTED_STALE' =>
       'The outlet changed state before the command arrived. Try again.',
-    'REJECTED_PHYSICAL_RESET_REQUIRED' => 'This outlet is locked. Use Reset Safety in the alert or the outlet\'s button.',
+    'REJECTED_PHYSICAL_RESET_REQUIRED' => 'This outlet is locked. Use Reset Safety in Power Control or the outlet\'s button.',
     'REJECTED_INVALID' => 'The outlet cannot do that in its current state.',
     'REJECTED_NO_APPLIANCE' => 'No appliance is plugged into this outlet, so there is nothing to switch.',
     _ => 'The WisePlug refused the command ($code).',

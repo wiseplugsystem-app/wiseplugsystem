@@ -17,7 +17,7 @@ const _blue = Color(0xFF00A4EF);
 const _green = Color(0xFF00B744);
 const _amber = Color(0xFFF5B800);
 const _safetyNote =
-    'Disabled and locked outlets are switched off by their relay. Inspect the appliance before resetting a locked outlet with its physical button or Reset Safety in the safety alert.';
+    'Disabled and locked outlets are switched off by their relay. Inspect the appliance before resetting a locked outlet with Reset Safety in Power Control or its physical button.';
 
 String _duration(int? seconds) {
   if (seconds == null) return 'Not available';
@@ -1694,6 +1694,51 @@ class _PowerControlState extends State<_PowerControl> {
     }
   }
 
+  /// Unlocks a locked outlet after the user confirms the appliance is safe.
+  Future<void> _reset() async {
+    final reading = widget.reading;
+    if (_busy || reading == null) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Reset safety?'),
+        content: Text(
+          'Outlet ${widget.outlet} was switched off for safety. Check the '
+          'appliance first: unplug it if it is hot, smells of burning or '
+          'looks damaged. Resetting switches the outlet back on.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Reset Safety'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    setState(() => _busy = true);
+    try {
+      await widget.service.resetSafety(reading);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Outlet ${widget.outlet} is back on.')),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('$error')));
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final r = widget.reading;
@@ -1749,7 +1794,7 @@ class _PowerControlState extends State<_PowerControl> {
                               : r == null || !r.isFresh(widget.now)
                               ? 'Unavailable'
                               : r.isLockedOut
-                              ? 'Locked · reset with button or safety alert'
+                              ? 'Locked · switched off for safety'
                               : on && !appliance
                               ? 'On · no appliance detected'
                               : on
@@ -1807,6 +1852,43 @@ class _PowerControlState extends State<_PowerControl> {
                       'Plug in an appliance to use this switch.',
                       style: TextStyle(fontSize: 12, color: Colors.grey),
                     ),
+                  ),
+                ],
+              ),
+            ),
+          if (r != null && r.isLockedOut)
+            Container(
+              margin: const EdgeInsets.only(top: 10),
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: Colors.red.withValues(alpha: .08),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.lock_outline, size: 18, color: Colors.red),
+                  const SizedBox(width: 8),
+                  const Expanded(
+                    child: Text(
+                      'Inspect the appliance, then reset to switch it back on.',
+                      style: TextStyle(fontSize: 12, height: 1.35),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: Colors.red,
+                      foregroundColor: Colors.white,
+                    ),
+                    // Needs live data from the plug: it checks the reset
+                    // against its current session.
+                    onPressed:
+                        !_busy &&
+                            r.isFresh(widget.now) &&
+                            r.sessionID.isNotEmpty
+                        ? _reset
+                        : null,
+                    child: const Text('Reset Safety'),
                   ),
                 ],
               ),

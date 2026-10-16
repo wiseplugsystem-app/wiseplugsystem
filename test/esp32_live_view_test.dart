@@ -39,6 +39,10 @@ class TestDevice extends Fake implements Esp32Service {
   }
 
   @override
+  Future<void> resetSafety(OutletReading reading) async =>
+      commands.add('${reading.outlet}:RESET_SAFETY');
+
+  @override
   Stream<Map<String, OutletReading>> streamOutlets() => readings.stream;
   @override
   Stream<List<LearnedAppliance>> streamProfiles() => profiles.stream;
@@ -416,6 +420,58 @@ void main() {
     // Summary card and Power Control row both use the registered name.
     expect(find.text('Desk fan'), findsNWidgets(2));
     expect(find.text('UNNAMED_DEVICE_1'), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+    await device.close();
+  });
+
+  testWidgets('a locked outlet can be reset from power control', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(420, 920));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final device = TestDevice();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Esp32Dashboard(
+          service: device,
+          darkMode: false,
+          onDarkModeChanged: (_) {},
+        ),
+      ),
+    );
+    await tester.pump();
+    device.profiles.add([]);
+    device.readings.add({
+      'B': OutletReading.fromMap('B', {
+        'currentState': 'LOCKED_OUT',
+        'status': 'LOCKED_OUT',
+        'sessionID': 'boot',
+        'last_updated_ms': DateTime.now().millisecondsSinceEpoch,
+      }),
+    });
+    await tester.pumpAndSettle();
+    final reset = find.widgetWithText(FilledButton, 'Reset Safety');
+    await tester.scrollUntilVisible(
+      reset,
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.ensureVisible(reset);
+    await tester.pumpAndSettle();
+    await tester.tap(reset);
+    await tester.pumpAndSettle();
+    // Confirms first: the user should inspect the appliance.
+    expect(find.text('Reset safety?'), findsOneWidget);
+    expect(device.commands, isEmpty);
+    await tester.tap(
+      find.descendant(
+        of: find.byType(AlertDialog),
+        matching: find.widgetWithText(FilledButton, 'Reset Safety'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(device.commands, ['B:RESET_SAFETY']);
+    expect(find.text('Outlet B is back on.'), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
     await device.close();
   });
