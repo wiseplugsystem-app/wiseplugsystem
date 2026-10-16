@@ -7,6 +7,7 @@ import '../models/esp32_data.dart';
 import '../models/gadget_status.dart';
 import '../services/device_binding.dart';
 import '../services/esp32_service.dart';
+import '../widgets/wiseplug_logo.dart';
 import 'activity_screen.dart';
 import 'esp32_dashboard.dart';
 import 'user_profile_screen.dart';
@@ -447,20 +448,9 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                     children: [
                       Expanded(
                         child: _tab == 0
-                            ? const Text.rich(
-                                TextSpan(
-                                  children: [
-                                    TextSpan(text: 'Wise'),
-                                    TextSpan(
-                                      text: 'Plug',
-                                      style: TextStyle(color: _blue),
-                                    ),
-                                  ],
-                                ),
-                                style: TextStyle(
-                                  fontSize: 34,
-                                  fontWeight: FontWeight.w900,
-                                ),
+                            ? const Align(
+                                alignment: Alignment.centerLeft,
+                                child: WisePlugLogo(fontSize: 34),
                               )
                             : Text(
                                 _tab == 1 ? 'Appliance Profiles' : 'Settings',

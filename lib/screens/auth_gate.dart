@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 
 import '../services/esp32_service.dart';
 import '../services/auth_error.dart';
+import '../widgets/wiseplug_logo.dart';
 
 class AuthGate extends StatelessWidget {
   final Widget child;
@@ -155,6 +156,8 @@ class _SignInState extends State<SignInScreen> {
             shrinkWrap: true,
             padding: const EdgeInsets.all(24),
             children: [
+              const Center(child: WisePlugLogo(fontSize: 30, showTagline: true)),
+              const SizedBox(height: 28),
               Text(
                 _creatingAccount
                     ? 'First time here? Enter your email and choose a new password.'
