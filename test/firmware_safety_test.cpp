@@ -14,8 +14,10 @@ int main() {
   s.begin(100000, 1); s.state = SocketState::Active;
   assert(s.remotePower(true)); assert(s.deadline == 101000);
   s.tick(101000, 1); assert(!s.overrideRuntime(101001, 0));
-  assert(!s.overrideRuntime(101001, 3601));
+  assert(!s.overrideRuntime(101001, 86401));
+  assert(!s.overridden);
   assert(s.overrideRuntime(160999, 900)); assert(s.deadline == 1060999);
+  assert(s.overridden && s.state == SocketState::Active);
   assert(!s.overrideRuntime(161000, 900)); // replay cannot extend again
   s.tick(1060999, 1); assert(s.state == SocketState::Warning);
   s.tick(1120999, 1); assert(s.state == SocketState::LockedOut);
@@ -23,8 +25,12 @@ int main() {
   s.physicalPress(); s.begin(0xffffffffULL - 500, 1); s.state = SocketState::Active;
   s.tick(0xffffffffULL + 500, 1); assert(s.state == SocketState::Warning);
   // Remote reset clears warning and lockout, and nothing else.
-  assert(s.remoteReset()); assert(s.state == SocketState::Idle);
+  assert(s.remoteReset()); assert(s.state == SocketState::Idle && !s.overridden);
   assert(!s.remoteReset());
+  // A long learned use can be granted in one override; a new session clears it.
+  s.begin(0, 1); s.state = SocketState::Active; s.tick(1000, 1);
+  assert(s.overrideRuntime(1000, 3 * 3600) && s.overridden);
+  s.begin(20000000, 1); assert(!s.overridden);
   s.begin(0, 1); s.state = SocketState::Active; assert(!s.remoteReset());
   s.tick(1000, 1); s.tick(61000, 1); assert(s.state == SocketState::LockedOut);
   assert(s.remoteReset()); assert(s.state == SocketState::Idle && !s.runtimeWarning);

@@ -184,6 +184,7 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
       _busy = true;
       _error = null;
     });
+    final messenger = ScaffoldMessenger.maybeOf(context);
     try {
       for (final reading in targets) {
         if (type == 'RESET_SAFETY') {
@@ -197,6 +198,20 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
         }
       }
       await widget.onSilence();
+      if (type == 'SMART_OVERRIDE') {
+        // Accepted: close the 60-second window now instead of waiting for
+        // the next status update.
+        widget.onDismiss();
+        messenger?.showSnackBar(
+          const SnackBar(
+            duration: Duration(seconds: 8),
+            content: Text(
+              'Override accepted. The appliance keeps running on a 20% safety '
+              'buffer, but it is near its limit.',
+            ),
+          ),
+        );
+      }
     } catch (error) {
       if (mounted) setState(() => _error = '$error');
     } finally {
@@ -204,10 +219,11 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
     }
   }
 
-  /// Keeps the appliance running: the ESP32 extends the session by 15 min.
+  /// Keeps the appliance running on a 20% safety buffer. Sent for firmware
+  /// that reads it; newer firmware computes the same value itself.
   static Map<String, Object?> _override(OutletReading r) => {
     'alertID': r.alertID,
-    'extensionDuration': 900,
+    'extensionDuration': r.overrideSeconds(DateTime.now()),
   };
 
   @override

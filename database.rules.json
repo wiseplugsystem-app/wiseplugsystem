@@ -33,7 +33,7 @@
       "$outlet": {
         ".read": "auth != null && root.child('device_owners').child($outlet).val() === auth.uid",
         ".write": "auth != null && root.child('device_owners').child($outlet).val() === auth.uid && ($outlet === 'outlet_A' || $outlet === 'outlet_B') && newData.exists() && (root.child('telemetry_logs').child($outlet).child('currentState').val() !== 'LOCKED_OUT' || newData.child('type').val() === 'RESET_SAFETY')",
-        ".validate": "newData.hasChildren(['commandID','userID','type','sessionID','revision','expiresAt']) && newData.child('userID').val() === auth.uid && newData.child('sessionID').val() === root.child('telemetry_logs').child($outlet).child('sessionID').val() && newData.child('revision').val() === root.child('telemetry_logs').child($outlet).child('revision').val() && newData.child('expiresAt').isNumber() && newData.child('expiresAt').val() > now && newData.child('expiresAt').val() <= now + 30000 && (newData.child('type').val() === 'TURN_ON' || newData.child('type').val() === 'TURN_OFF' || newData.child('type').val() === 'RESET_SAFETY' || (newData.child('type').val() === 'REMOVE_PROFILE' && newData.child('profileID').isString()) || (newData.child('type').val() === 'SMART_OVERRIDE' && newData.child('alertID').val() === root.child('telemetry_logs').child($outlet).child('alertID').val() && root.child('telemetry_logs').child($outlet).child('currentState').val() === 'WARNING' && newData.child('extensionDuration').isNumber() && newData.child('extensionDuration').val() > 0 && newData.child('extensionDuration').val() <= 3600) || (newData.child('type').val() === 'EDIT_PROFILE' && newData.child('name').isString() && newData.child('name').val().length > 0 && newData.child('name').val().length <= 63 && newData.child('maxRunTime').isNumber() && newData.child('maxRunTime').val() >= 1 && newData.child('safetyCeilingDuration').isNumber() && newData.child('safetyCeilingDuration').val() >= newData.child('maxRunTime').val() && newData.child('safetyCeilingDuration').val() <= 604800))",
+        ".validate": "newData.hasChildren(['commandID','userID','type','sessionID','revision','expiresAt']) && newData.child('userID').val() === auth.uid && newData.child('sessionID').val() === root.child('telemetry_logs').child($outlet).child('sessionID').val() && newData.child('revision').val() === root.child('telemetry_logs').child($outlet).child('revision').val() && newData.child('expiresAt').isNumber() && newData.child('expiresAt').val() > now && newData.child('expiresAt').val() <= now + 30000 && (newData.child('type').val() === 'TURN_ON' || newData.child('type').val() === 'TURN_OFF' || newData.child('type').val() === 'RESET_SAFETY' || (newData.child('type').val() === 'REMOVE_PROFILE' && newData.child('profileID').isString()) || (newData.child('type').val() === 'SMART_OVERRIDE' && newData.child('alertID').val() === root.child('telemetry_logs').child($outlet).child('alertID').val() && root.child('telemetry_logs').child($outlet).child('currentState').val() === 'WARNING' && (!newData.child('extensionDuration').exists() || (newData.child('extensionDuration').isNumber() && newData.child('extensionDuration').val() > 0 && newData.child('extensionDuration').val() <= 3600))) || (newData.child('type').val() === 'EDIT_PROFILE' && newData.child('name').isString() && newData.child('name').val().length > 0 && newData.child('name').val().length <= 63 && newData.child('maxRunTime').isNumber() && newData.child('maxRunTime').val() >= 1 && newData.child('safetyCeilingDuration').isNumber() && newData.child('safetyCeilingDuration').val() >= newData.child('maxRunTime').val() && newData.child('safetyCeilingDuration').val() <= 604800))",
         "commandID": {
           ".validate": "newData.isString() && newData.val().matches(/^[A-Za-z0-9_-]{1,63}$/)"
         },
@@ -83,6 +83,17 @@
     "devices": {
       "gadget-1": {
         "status": {
+          ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid"
+        },
+        "outlets": {
+          ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid",
+          "$outlet": {
+            "isLockedDown": {
+              ".write": "auth != null && root.child('device_owners').child($outlet).val() === auth.uid && data.val() === true && newData.val() === false"
+            }
+          }
+        },
+        "notifications": {
           ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid"
         },
         "wifiConfig": {

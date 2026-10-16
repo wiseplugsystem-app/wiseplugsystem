@@ -147,4 +147,21 @@ void main() {
     expect(find.textContaining('stale'), findsOneWidget);
     expect(find.byType(Switch), findsNothing);
   });
+
+  test('override grants a 20% safety buffer, 1 min to 1 h', () {
+    // 4 h learning backstop: 20% is 48 min.
+    expect(overrideBufferSeconds(4 * 3600), 48 * 60);
+    expect(overrideBufferSeconds(10 * 60), 120);
+    expect(overrideBufferSeconds(30), 60); // minimum
+    expect(overrideBufferSeconds(7 * 3600), 3600); // maximum
+    final now = DateTime.now();
+    final reading = OutletReading.fromMap('A', {
+      'overridden': true,
+      'start_time': now
+          .subtract(const Duration(minutes: 50))
+          .millisecondsSinceEpoch,
+    });
+    expect(reading.overridden, isTrue);
+    expect(reading.overrideSeconds(now), 600);
+  });
 }

@@ -420,29 +420,37 @@ void main() {
     await device.close();
   });
 
-  testWidgets('the countdown is the focus and override extends 15 minutes', (
-    tester,
-  ) async {
-    final device = PopupDevice();
-    await mount(tester, device);
-    device.profiles.add([]);
-    device.readings.add({'A': reading(state: 'WARNING')});
-    device.gadget.add(status(triggered: true));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 500));
-    // The reading's countdown expires ~45 s from now.
-    final number = tester.widget<Text>(
-      inDialog(find.textContaining(RegExp(r'^\d{1,2}$'))),
-    );
-    expect(int.parse(number.data!), inInclusiveRange(43, 45));
-    expect(number.style!.fontSize, greaterThanOrEqualTo(80));
-    await tester.tap(find.text('Yes, Override'));
-    await tester.pump();
-    expect(device.commands, ['SMART_OVERRIDE']);
-    expect(device.lastFields, {'alertID': 'alert-1', 'extensionDuration': 900});
-    await tester.tap(find.text('Dismiss'));
-    await tester.pump(const Duration(milliseconds: 500));
-    await tester.pumpWidget(const SizedBox());
-    await device.close();
-  });
+  testWidgets(
+    'the countdown is the focus and override closes it with a 20% buffer',
+    (tester) async {
+      final device = PopupDevice();
+      await mount(tester, device);
+      device.profiles.add([]);
+      device.readings.add({'A': reading(state: 'WARNING')});
+      device.gadget.add(status(triggered: true));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      // The reading's countdown expires ~45 s from now.
+      final number = tester.widget<Text>(
+        inDialog(find.textContaining(RegExp(r'^\d{1,2}$'))),
+      );
+      expect(int.parse(number.data!), inInclusiveRange(43, 45));
+      expect(number.style!.fontSize, greaterThanOrEqualTo(80));
+      await tester.tap(find.text('Yes, Override'));
+      await tester.pump();
+      expect(device.commands, ['SMART_OVERRIDE']);
+      // Ran 1 min: 20% is 12 s, so the 1 min minimum applies.
+      expect(device.lastFields, {
+        'alertID': 'alert-1',
+        'extensionDuration': 60,
+      });
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      // Accepted: the 60-second window closes and a notice says why.
+      expect(find.text('Yes, Override'), findsNothing);
+      expect(find.textContaining('near its limit'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+      await device.close();
+    },
+  );
 }

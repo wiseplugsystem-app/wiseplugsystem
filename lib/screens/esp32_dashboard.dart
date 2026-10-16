@@ -212,7 +212,10 @@ class _OutletControlsState extends State<_OutletControls> {
         widget.reading,
         type,
         fields: type == 'SMART_OVERRIDE'
-            ? {'alertID': widget.reading.alertID, 'extensionDuration': 900}
+            ? {
+                'alertID': widget.reading.alertID,
+                'extensionDuration': widget.reading.overrideSeconds(widget.now),
+              }
             : {},
       );
       if (mounted) {

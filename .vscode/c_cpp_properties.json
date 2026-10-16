@@ -1,0 +1,33 @@
+{
+  "configurations": [
+    {
+      "name": "ESP32 (Arduino)",
+      "compilerPath": "",
+      "intelliSenseMode": "gcc-x86",
+      "cStandard": "gnu17",
+      "cppStandard": "gnu++20",
+      "includePath": [
+        "${workspaceFolder}/arduino/**",
+        "C:/Users/Administrator/AppData/Local/Arduino15/packages/esp32/tools/esp-x32/2601/xtensa-esp-elf/include/c++/14.2.0",
+        "C:/Users/Administrator/AppData/Local/Arduino15/packages/esp32/tools/esp-x32/2601/xtensa-esp-elf/include/c++/14.2.0/xtensa-esp-elf",
+        "C:/Users/Administrator/AppData/Local/Arduino15/packages/esp32/tools/esp-x32/2601/xtensa-esp-elf/include",
+        "C:/Users/Administrator/AppData/Local/Arduino15/packages/esp32/tools/esp-x32/2601/xtensa-esp-elf/sys-include",
+        "C:/Users/Administrator/AppData/Local/Arduino15/packages/esp32/tools/esp-x32/2601/lib/gcc/xtensa-esp-elf/14.2.0/include",
+        "C:/Users/Administrator/AppData/Local/Arduino15/packages/esp32/hardware/esp32/3.3.12/cores/esp32",
+        "C:/Users/Administrator/AppData/Local/Arduino15/packages/esp32/hardware/esp32/3.3.12/variants/esp32",
+        "C:/Users/Administrator/AppData/Local/Arduino15/packages/esp32/hardware/esp32/3.3.12/libraries/**",
+        "C:/Users/Administrator/AppData/Local/Arduino15/packages/esp32/tools/esp32-libs/3.3.12/dio_qspi/include",
+        "C:/Users/Administrator/AppData/Local/Arduino15/packages/esp32/tools/esp32-libs/3.3.12/include/**",
+        "C:/Users/Administrator/Documents/Arduino/libraries/**"
+      ],
+      "defines": [
+        "ARDUINO=10607",
+        "ARDUINO_ARCH_ESP32",
+        "ARDUINO_ESP32_DEV",
+        "ESP32",
+        "CONFIG_IDF_TARGET_ESP32=1"
+      ]
+    }
+  ],
+  "version": 4
+}

@@ -85,9 +85,17 @@ String _status(OutletReading? reading, DateTime now) {
   if (reading.sensorValid == false) return 'Unavailable';
   if (reading.currentState == 'DISABLED') return 'Disabled';
   if (reading.currentState == 'SAMPLING') return 'Recognizing';
-  if (reading.runtimeWarning) return 'Near limit';
+  if (reading.runtimeWarning || (reading.isActive && reading.overridden)) {
+    return 'Near limit';
+  }
   return reading.isActive ? 'Active' : 'Idle';
 }
+
+/// Shown on the outlet card after "Yes, Override": the appliance keeps
+/// running on a 20% safety buffer past its limit.
+const _overrideNote =
+    'Override active: past its safety limit, now running on a 20% safety '
+    'buffer. You will be asked again when Remaining reaches 0.';
 
 Color _statusColor(String status) => switch (status) {
   'Active' => _green,
@@ -651,8 +659,12 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
     final seconds = fresh && reading!.isActive && reading.safetyDeadline != null
         ? reading.safetyDeadline!.difference(now).inSeconds.clamp(0, 604800)
         : null;
-    // The limit the plug enforces: learning backstop, then the learned one.
-    final limit = profile?.effectiveLimit;
+    final overridden = fresh && reading!.isActive && reading.overridden;
+    // The limit the plug enforces: learning backstop, then the learned one;
+    // after an override, the 20% buffer it granted.
+    final limit = overridden && profile != null
+        ? overrideBufferSeconds(profile.effectiveLimit)
+        : profile?.effectiveLimit;
     final start = connected ? reading?.startTime?.toLocal() : null;
     return _Panel(
       border: color,
@@ -728,6 +740,32 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
             color: color,
             backgroundColor: Colors.grey.withValues(alpha: .15),
           ),
+          if (overridden)
+            Container(
+              margin: const EdgeInsets.only(top: 10),
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: _amber.withValues(alpha: .14),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Icon(
+                    Icons.warning_amber_rounded,
+                    size: 18,
+                    color: _amber,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _overrideNote,
+                      style: const TextStyle(fontSize: 12, height: 1.35),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           if (!fresh)
             const Padding(
               padding: EdgeInsets.only(top: 8),
@@ -1635,7 +1673,10 @@ class _PowerControlState extends State<_PowerControl> {
         reading,
         type,
         fields: type == 'SMART_OVERRIDE'
-            ? {'alertID': reading.alertID, 'extensionDuration': 900}
+            ? {
+                'alertID': reading.alertID,
+                'extensionDuration': reading.overrideSeconds(widget.now),
+              }
             : {},
       );
       if (mounted) {

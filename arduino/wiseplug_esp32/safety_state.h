@@ -7,11 +7,12 @@ struct SafetyState {
   SocketState state = SocketState::Idle;
   uint32_t revision = 0;
   uint64_t started = 0, deadline = 0, warningStarted = 0;
-  bool runtimeWarning = false; c
+  bool runtimeWarning = false;
+  bool overridden = false;  // running on time the user granted past the limit
   void begin(uint64_t now, uint32_t ceilingSeconds) {
     state = SocketState::Sampling; started = now;
     deadline = now + uint64_t(ceilingSeconds) * 1000;
-    runtimeWarning = false; ++revision;
+    runtimeWarning = overridden = false; ++revision;
   }
   bool tick(uint64_t now, uint32_t maxRunTime) {
     if (state == SocketState::Sampling || state == SocketState::Active) {
@@ -28,9 +29,9 @@ struct SafetyState {
   }
   bool overrideRuntime(uint64_t now, uint32_t seconds) {
     if (state != SocketState::Warning || now - warningStarted >= 60000 ||
-        seconds == 0 || seconds > 3600) return false;
+        seconds == 0 || seconds > 86400) return false;
     deadline = now + uint64_t(seconds) * 1000;
-    state = SocketState::Active; ++revision; return true;
+    state = SocketState::Active; overridden = true; ++revision; return true;
   }
   bool remotePower(bool on) {
     if (state == SocketState::LockedOut || state == SocketState::Warning) return false;
@@ -42,7 +43,7 @@ struct SafetyState {
   // App-requested reset: clears a safety trip back to normal monitoring.
   bool remoteReset() {
     if (state != SocketState::Warning && state != SocketState::LockedOut) return false;
-    state = SocketState::Idle; runtimeWarning = false; ++revision;
+    state = SocketState::Idle; runtimeWarning = overridden = false; ++revision;
     return true;
   }
   void physicalPress() {

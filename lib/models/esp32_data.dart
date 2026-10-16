@@ -33,6 +33,9 @@ class OutletReading {
   final DateTime? countdownExpiry, safetyDeadline;
   final bool runtimeWarning;
 
+  /// Running on extra time granted by "Yes, Override", past its limit.
+  final bool overridden;
+
   OutletReading.fromMap(this.outlet, Map<String, dynamic> map)
     : currentState = map['currentState']?.toString() ?? '',
       sessionID = map['sessionID']?.toString() ?? '',
@@ -42,6 +45,7 @@ class OutletReading {
       countdownExpiry = deviceTime(map['countdownExpiry']),
       safetyDeadline = deviceTime(map['safetyDeadline']),
       runtimeWarning = map['runtime_warning'] == true,
+      overridden = map['overridden'] == true,
       appliance = map['appliance']?.toString() ?? 'Unknown',
       status = map['status']?.toString() ?? 'Unknown',
       voltage = sensorNumber(map['voltage_V']),
@@ -78,7 +82,17 @@ class OutletReading {
         );
   bool canCommand(DateTime now) =>
       isFresh(now) && sessionID.isNotEmpty && !isLockedOut;
+
+  /// Extra time "Yes, Override" grants now: a 20% safety buffer on how long
+  /// this session has run. Matches the firmware's overrideSeconds().
+  int overrideSeconds(DateTime now) => overrideBufferSeconds(
+    startTime == null ? 0 : now.difference(startTime!).inSeconds,
+  );
 }
+
+/// 20% of [ranSeconds], kept within 1 min..1 h (the most the rules accept).
+int overrideBufferSeconds(int ranSeconds) =>
+    (ranSeconds * 0.2).floor().clamp(60, 3600);
 
 class LearnedAppliance {
   final bool registrationMetadataAvailable;
@@ -108,6 +122,7 @@ class LearnedAppliance {
 
   /// The limit the plug enforces now: the learned one, else the backstop.
   int get effectiveLimit => learnedLimit ?? safetyCeilingDuration;
+
   int get learningUsesLeft =>
       isLearningComplete ? 0 : (learningSessions - sessionCount).clamp(0, 7);
   final bool hasSafetyLimit, hasRuntimeLimit;
