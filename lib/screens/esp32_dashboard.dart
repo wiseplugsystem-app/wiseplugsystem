@@ -328,8 +328,7 @@ class Esp32ProfileEditorState extends State<Esp32ProfileEditor> {
   Future<void> _save() async {
     if (widget.takenNames.contains(_name.text.trim().toLowerCase())) {
       setState(
-        () => _error =
-            'An appliance with this name already exists. Please choose a unique name.',
+        () => _error = 'An appliance with this name already exists. Please choose a unique name.',
       );
       return;
     }
@@ -394,18 +393,30 @@ class Esp32ProfileEditorState extends State<Esp32ProfileEditor> {
             ),
           ),
           if (!widget.registration) ...[
+            const SizedBox(height: 16),
+            Text(
+              widget.profile.isLearningComplete
+                  ? 'WisePlug learned how long this appliance is usually used and '
+                        'warns at 1.5x that. The limits below are the most it will '
+                        'ever allow.'
+                  : 'WisePlug is learning how long this appliance is usually used '
+                        '(${widget.profile.sessionCount} of '
+                        '${LearnedAppliance.learningSessions} uses). Until then only '
+                        'the hard limit below applies.',
+              style: const TextStyle(color: Colors.grey, fontSize: 12),
+            ),
             TextField(
               controller: _runtime,
               keyboardType: TextInputType.number,
               decoration: const InputDecoration(
-                labelText: 'Runtime warning (seconds)',
+                labelText: 'Near-limit notice after (seconds)',
               ),
             ),
             TextField(
               controller: _ceiling,
               keyboardType: TextInputType.number,
               decoration: const InputDecoration(
-                labelText: 'Safety ceiling (seconds)',
+                labelText: 'Hard limit (seconds)',
               ),
             ),
           ],

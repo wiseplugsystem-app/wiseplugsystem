@@ -44,8 +44,17 @@ constexpr float POWER_TOLERANCE = 0.15f, CURRENT_TOLERANCE = 0.20f, PF_TOLERANCE
 // Recognition ignores the first SETTLE_MS (motor start-up, inrush), then
 // averages SAMPLE_TIME_MS of steady load, so one appliance yields one signature.
 constexpr uint32_t SETTLE_MS = 3000, SAMPLE_TIME_MS = 2000, MAX_APPLIANCES = 20;
-constexpr uint32_t DEFAULT_LIMIT_S = 30 * 60;  // runtime warning and safety ceiling for new appliances
+constexpr uint32_t DEFAULT_LIMIT_S = 30 * 60;  // unrecognized appliances (catalog full)
 constexpr uint64_t SENSOR_TIMEOUT_MS = 5000;
+
+// Learning phase: each appliance's first LEARNING_SESSIONS completed uses are
+// recorded without any warning. Their average duration then becomes its
+// baseline, and later sessions are limited to baseline x LEARNED_MARGIN.
+// HARD_CAP_S is the per-appliance backstop ("safety ceiling", editable): the
+// only limit while learning, so a forgotten appliance is still switched off.
+constexpr uint32_t LEARNING_SESSIONS = 7, HARD_CAP_S = 4 * 3600;
+constexpr uint32_t MIN_SESSION_S = 10, MIN_LEARNED_LIMIT_S = 5 * 60;
+constexpr float LEARNED_MARGIN = 1.5f;
 
 // ==========================================
 // DATA STRUCTURES
@@ -53,8 +62,20 @@ constexpr uint64_t SENSOR_TIMEOUT_MS = 5000;
 struct ApplianceSignature {
   char name[64] = {}, profileID[64] = {};
   float steadyPower = 0, peakPower = 0, current = 0, voltage = 0, pf = 0;
-  uint32_t maxRunTime = DEFAULT_LIMIT_S, safetyCeilingDuration = DEFAULT_LIMIT_S, totalSessions = 0;
+  uint32_t maxRunTime = HARD_CAP_S, safetyCeilingDuration = HARD_CAP_S, totalSessions = 0;
   int64_t registeredAt = 0;
+  // Learning: durations (s) of the last completed uses, oldest first.
+  uint32_t history[LEARNING_SESSIONS] = {};
+  uint32_t sessions = 0, baselineSec = 0;  // completed uses; learned average
+  uint8_t historyCount = 0;
+  bool learned = false;
+};
+// Previous stored layout ("profiles_v3"), migrated once into learning mode.
+struct ApplianceSignatureV3 {
+  char name[64], profileID[64];
+  float steadyPower, peakPower, current, voltage, pf;
+  uint32_t maxRunTime, safetyCeilingDuration, totalSessions;
+  int64_t registeredAt;
 };
 // Record layout written by the previous sketch ("app_N" keys), migrated once.
 struct LegacySignature {
@@ -166,7 +187,7 @@ void lock(SocketChannel& ch) {
 // Keys left by earlier sketches. NVS is only ~16 KB (shared with Wi-Fi), so
 // stale blobs make later saves fail.
 void removeStaleKeys(SocketChannel& ch) {
-  for (const char* key : {"profiles_v2", "count_v2", "count"}) {
+  for (const char* key : {"profiles_v2", "count_v2", "count", "profiles_v3", "count_v3"}) {
     if (ch.prefs.isKey(key)) ch.prefs.remove(key);
   }
   for (uint32_t n = 0; n < MAX_APPLIANCES; ++n) {
@@ -176,15 +197,9 @@ void removeStaleKeys(SocketChannel& ch) {
 }
 // Stores only the learned entries; the blob length gives the count.
 bool writeProfiles(SocketChannel& ch) {
-  bool ok;
-  if (!ch.data.count) {
-    ok = !ch.prefs.isKey("profiles_v3") || ch.prefs.remove("profiles_v3");
-  } else {
-    size_t bytes = ch.data.count * sizeof(ApplianceSignature);
-    ok = ch.prefs.putBytes("profiles_v3", ch.data.profiles, bytes) == bytes;
-  }
-  if (ok && ch.prefs.isKey("count_v3")) ch.prefs.remove("count_v3");  // older fixed-size format
-  return ok;
+  if (!ch.data.count) return !ch.prefs.isKey("profiles_v4") || ch.prefs.remove("profiles_v4");
+  size_t bytes = ch.data.count * sizeof(ApplianceSignature);
+  return ch.prefs.putBytes("profiles_v4", ch.data.profiles, bytes) == bytes;
 }
 bool saveProfiles(SocketChannel& ch) {
   if (!writeProfiles(ch)) {
@@ -217,21 +232,43 @@ void beginAlert(SocketChannel& ch, const char* type, uint64_t now) {
 }
 void loadProfiles(SocketChannel& ch) {
   auto& d = ch.data;
-  size_t len = ch.prefs.isKey("profiles_v3") ? ch.prefs.getBytesLength("profiles_v3") : 0;
-  uint32_t stored = len / sizeof(ApplianceSignature);
-  bool rewrite = ch.prefs.isKey("count_v3");  // older fixed-size format: count stored separately
-  if (rewrite) stored = min(stored, ch.prefs.getUInt("count_v3", 0));
-  if (len % sizeof(ApplianceSignature) || stored > MAX_APPLIANCES ||
-      (stored && ch.prefs.getBytes("profiles_v3", d.profiles, sizeof(d.profiles)) != len)) {
-    // A corrupt catalog is not a hazard: drop it instead of locking the outlet.
-    Serial.printf("[%s] Stored appliances unreadable, starting a new list\n", ch.outlet);
-    stored = 0; rewrite = true;
+  uint32_t stored = 0;
+  bool rewrite = false;
+  if (ch.prefs.isKey("profiles_v4")) {
+    size_t len = ch.prefs.getBytesLength("profiles_v4");
+    stored = len / sizeof(ApplianceSignature);
+    if (len % sizeof(ApplianceSignature) || stored > MAX_APPLIANCES ||
+        ch.prefs.getBytes("profiles_v4", d.profiles, sizeof(d.profiles)) != len) {
+      // A corrupt catalog is not a hazard: drop it instead of locking the outlet.
+      Serial.printf("[%s] Stored appliances unreadable, starting a new list\n", ch.outlet);
+      stored = 0; rewrite = true;
+    }
+  } else if (ch.prefs.isKey("profiles_v3")) {
+    // Previous format: keep each appliance and start its learning phase.
+    static ApplianceSignatureV3 old[MAX_APPLIANCES];
+    size_t len = ch.prefs.getBytesLength("profiles_v3");
+    uint32_t n = len / sizeof(ApplianceSignatureV3);
+    if (ch.prefs.isKey("count_v3")) n = min(n, ch.prefs.getUInt("count_v3", 0));  // fixed-size variant
+    if (len % sizeof(ApplianceSignatureV3) || n > MAX_APPLIANCES ||
+        ch.prefs.getBytes("profiles_v3", old, sizeof(old)) != len) n = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+      auto& p = d.profiles[i]; p = ApplianceSignature{};
+      memcpy(p.name, old[i].name, sizeof(p.name)); memcpy(p.profileID, old[i].profileID, sizeof(p.profileID));
+      p.steadyPower = old[i].steadyPower; p.peakPower = old[i].peakPower; p.current = old[i].current;
+      p.voltage = old[i].voltage; p.pf = old[i].pf; p.totalSessions = old[i].totalSessions;
+      p.registeredAt = old[i].registeredAt;
+      // Untouched old defaults (30 min) become the learning backstop.
+      p.safetyCeilingDuration = old[i].safetyCeilingDuration == DEFAULT_LIMIT_S ? HARD_CAP_S : old[i].safetyCeilingDuration;
+      p.maxRunTime = old[i].maxRunTime == DEFAULT_LIMIT_S ? p.safetyCeilingDuration : old[i].maxRunTime;
+    }
+    stored = n; rewrite = true;
   }
   d.count = 0;
   for (uint32_t n = 0; n < stored; ++n) {
     auto p = d.profiles[n];
     if (!memchr(p.name, 0, sizeof(p.name)) || !memchr(p.profileID, 0, sizeof(p.profileID)) || !p.maxRunTime ||
         p.safetyCeilingDuration < p.maxRunTime || p.safetyCeilingDuration > 604800) { rewrite = true; continue; }
+    if (p.historyCount > LEARNING_SESSIONS) { p.historyCount = LEARNING_SESSIONS; rewrite = true; }
     d.profiles[d.count++] = p;
   }
   // One-time migration of appliances learned by the previous sketch.
@@ -283,6 +320,45 @@ bool isRunning(int owner, int index) {
   for (auto& c : outlets) if (c.data.activeOwner == owner && c.data.activeID == index) return true;
   return false;
 }
+// The session limit for an appliance: only its backstop while learning; then
+// baseline x LEARNED_MARGIN (at least MIN_LEARNED_LIMIT_S, never above it).
+uint32_t sessionLimit(const ApplianceSignature* p) {
+  if (!p) return DEFAULT_LIMIT_S;
+  if (!p->learned) return p->safetyCeilingDuration;
+  uint32_t learned = max(uint32_t(p->baselineSec * LEARNED_MARGIN), MIN_LEARNED_LIMIT_S);
+  return min(learned, p->safetyCeilingDuration);
+}
+// "Near limit" once a session runs longer than the learned typical use.
+uint32_t warnAfter(const ApplianceSignature* p) {
+  if (!p) return DEFAULT_LIMIT_S;
+  return p->learned ? min(max(p->baselineSec, MIN_SESSION_S), p->maxRunTime) : p->maxRunTime;
+}
+// Called when a recognized appliance finishes normally (switched off or
+// unplugged). Lock-outs are not recorded: they are not typical use.
+void recordSession(SocketChannel& ch, uint64_t now) {
+  auto* p = activeProfile(ch);
+  if (!p) return;
+  uint32_t seconds = uint32_t((now - ch.data.safety.started) / 1000);
+  if (seconds < MIN_SESSION_S) return;  // a blip teaches nothing
+  if (p->historyCount < LEARNING_SESSIONS) {
+    p->history[p->historyCount++] = seconds;
+  } else {  // keep the latest uses for display
+    memmove(p->history, p->history + 1, sizeof(p->history) - sizeof(p->history[0]));
+    p->history[LEARNING_SESSIONS - 1] = seconds;
+  }
+  ++p->sessions;
+  if (!p->learned && p->historyCount >= LEARNING_SESSIONS) {
+    uint64_t sum = 0;
+    for (uint32_t i = 0; i < LEARNING_SESSIONS; ++i) sum += p->history[i];
+    p->baselineSec = uint32_t(sum / LEARNING_SESSIONS);
+    p->learned = true;
+    logEvent(ch, "LEARNING_COMPLETE", p->profileID);
+    Serial.printf("[%s] %s learned: typical use %lu s, limit %lu s\n", ch.outlet, p->name,
+                  (unsigned long)p->baselineSec, (unsigned long)sessionLimit(p));
+  }
+  auto& owner = outlets[ch.data.activeOwner];
+  if (writeProfiles(owner)) ++owner.data.profilesVersion;  // best effort: not a hazard
+}
 void finishSampling(SocketChannel& ch) {
   auto& d = ch.data; auto& sig = ch.pending;
   if (!ch.samples) return;
@@ -314,7 +390,7 @@ void finishSampling(SocketChannel& ch) {
     auto& owner = outlets[d.activeOwner];
     if (writeProfiles(owner)) ++owner.data.profilesVersion;  // a lost count is not a hazard
   }
-  uint32_t ceiling = p ? p->safetyCeilingDuration : DEFAULT_LIMIT_S;
+  uint32_t ceiling = sessionLimit(p);  // backstop while learning, then learned
   d.safety.state = SocketState::Active; ++d.safety.revision;
   d.safety.deadline = d.safety.started + uint64_t(ceiling) * 1000;
   logEvent(ch, learned ? "NEW_APPLIANCE" : "APPLIANCE_ON", p ? p->profileID : "", p ? "" : "unrecognized");
@@ -333,7 +409,10 @@ void handleSensor(SocketChannel& ch, const SensorSample& sample, uint64_t now) {
     ch.samples = 0; d.startEpoch = epochMs(); d.peak = 0;
     if (!persistSafety(ch)) return;
   } else if (sample.power < IDLE_W_THRESHOLD) {
-    if (state == SocketState::Active) logEvent(ch, "APPLIANCE_OFF", activeProfileID(ch));
+    if (state == SocketState::Active) {
+      logEvent(ch, "APPLIANCE_OFF", activeProfileID(ch));
+      recordSession(ch, now);
+    }
     d.safety.state = SocketState::Idle; ++d.safety.revision;  // appliance switched off
     endSession(ch); persistSafety(ch);
     return;
@@ -384,8 +463,12 @@ void handleCommand(SocketChannel& ch, const Command& cmd, uint64_t now) {
     } else if (strcmp(cmd.type, "TURN_ON") == 0 || strcmp(cmd.type, "TURN_OFF") == 0) {
       bool on = strcmp(cmd.type, "TURN_ON") == 0;
       String running = activeProfileID(ch);
+      bool wasActive = d.safety.state == SocketState::Active;
       if (d.safety.remotePower(on)) {
-        if (d.safety.state == SocketState::Disabled) endSession(ch);
+        if (d.safety.state == SocketState::Disabled) {
+          if (wasActive) recordSession(ch, now);  // switched off after a normal use
+          endSession(ch);
+        }
         logEvent(ch, on ? "OUTLET_ON" : "OUTLET_OFF", running.c_str(), "app");
         result = "ACCEPTED";
       }
@@ -413,7 +496,7 @@ void handleCommand(SocketChannel& ch, const Command& cmd, uint64_t now) {
         if (saveProfiles(outlets[o])) {
           for (auto& c : outlets) {  // apply the new limit wherever it is running
             if (c.data.activeOwner != o || c.data.activeID != i) continue;
-            c.data.safety.deadline = c.data.safety.started + uint64_t(cmd.ceiling) * 1000;
+            c.data.safety.deadline = c.data.safety.started + uint64_t(sessionLimit(&p)) * 1000;
             if (&c != &ch) ++c.data.safety.revision;
           }
           ++d.safety.revision; result = "ACCEPTED";
@@ -544,6 +627,12 @@ void addOutlet(JsonDocument& root, int i, const Snapshot& s, bool includeCatalog
       profile["current_A"] = p.current; profile["voltage_V"] = p.voltage; profile["powerFactor"] = p.pf;
       profile["maxRunTime"] = p.maxRunTime; profile["safetyCeilingDuration"] = p.safetyCeilingDuration;
       profile["totalSessions"] = p.totalSessions; profile["registered_at"] = timestamp(p.registeredAt);
+      // Learning phase: uses recorded, their durations (s), learned average and limit.
+      profile["sessionCount"] = p.sessions;
+      JsonArray history = profile["sessionHistory"].to<JsonArray>();
+      for (uint32_t h = 0; h < p.historyCount; ++h) history.add(p.history[h]);
+      profile["baselineAverage"] = p.baselineSec; profile["isLearningComplete"] = p.learned;
+      profile["learnedLimit"] = sessionLimit(&p);
       // The recognition window: a steady load inside every range matches.
       JsonObject range = profile["range"].to<JsonObject>();
       float dp = band(p.steadyPower, POWER_TOLERANCE), dc = band(p.current, CURRENT_TOLERANCE);
@@ -888,7 +977,7 @@ void loop() {
     auto& d = ch.data;
     auto& safety = d.safety;
     auto* running = activeProfile(ch);
-    uint32_t maxRun = running ? running->maxRunTime : DEFAULT_LIMIT_S;
+    uint32_t maxRun = warnAfter(running);
     if (safety.tick(now, maxRun)) {
       if (safety.state == SocketState::Warning) beginAlert(ch, "SAFETY_CEILING_EXCEEDED", now); else lock(ch);
     }
@@ -899,7 +988,10 @@ void loop() {
       if (!raw && ch.storageOK) {
         if (safety.state == SocketState::Warning) lock(ch);
         else {
-          safety.physicalPress(); endSession(ch); persistSafety(ch);
+          bool wasActive = safety.state == SocketState::Active;
+          safety.physicalPress();
+          if (wasActive && safety.state == SocketState::Disabled) recordSession(ch, now);
+          endSession(ch); persistSafety(ch);
           logEvent(ch, safety.state == SocketState::Disabled ? "OUTLET_OFF" : "OUTLET_ON", "", "button");
         }
       }

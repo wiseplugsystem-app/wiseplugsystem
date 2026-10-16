@@ -99,6 +99,7 @@ class _SignInState extends State<SignInScreen> {
       if (mounted) setState(() => _busy = false);
     }
   }
+
   @override
   void dispose() {
     _email.dispose();
@@ -162,7 +163,8 @@ class _SignInState extends State<SignInScreen> {
               TextFormField(
                 controller: _email,
                 enabled: !_busy,
-                validator: (value) => _emailPattern.hasMatch(value?.trim() ?? '')
+                validator: (value) =>
+                    _emailPattern.hasMatch(value?.trim() ?? '')
                     ? null
                     : 'Enter a valid email address.',
                 keyboardType: TextInputType.emailAddress,

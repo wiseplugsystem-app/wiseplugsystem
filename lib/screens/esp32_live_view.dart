@@ -65,6 +65,17 @@ String profileStatus(
   return _status(reading, now);
 }
 
+/// While learning there is no warning, only the backstop; afterwards the
+/// learned limit (typical use x 1.5) applies.
+String _limitText(LearnedAppliance p) => p.isLearningComplete
+    ? _duration(p.effectiveLimit)
+    : 'Learning · ${p.sessionCount} of ${LearnedAppliance.learningSessions} uses';
+
+String _usageText(LearnedAppliance p) => p.isLearningComplete
+    ? 'Typical use ${_duration(p.baselineAverage?.round())}'
+    : 'Learning · ${p.learningUsesLeft} more '
+          '${p.learningUsesLeft == 1 ? 'use' : 'uses'} to learn';
+
 String _status(OutletReading? reading, DateTime now) {
   if (reading == null) return 'Waiting';
   if (!reading.isFresh(now)) return 'Offline';
@@ -650,9 +661,8 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
     final seconds = fresh && reading!.isActive && reading.safetyDeadline != null
         ? reading.safetyDeadline!.difference(now).inSeconds.clamp(0, 604800)
         : null;
-    final limit = profile?.hasSafetyLimit == true
-        ? profile!.safetyCeilingDuration
-        : null;
+    // The limit the plug enforces: learning backstop, then the learned one.
+    final limit = profile?.effectiveLimit;
     final start = connected ? reading?.startTime?.toLocal() : null;
     return _Panel(
       border: color,
@@ -714,7 +724,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                 ? '—'
                 : '${start.hour.toString().padLeft(2, '0')}:${start.minute.toString().padLeft(2, '0')}',
           ),
-          _Pair('Safety limit', limit == null ? '—' : _duration(limit)),
+          _Pair('Safety limit', profile == null ? '—' : _limitText(profile)),
           _Pair(
             'Remaining',
             seconds == null ? '—' : _duration(seconds),
@@ -833,7 +843,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                   // Appliances are portable: show an outlet only while running.
                   subtitle: Text(
                     _runningOn(profile, now) == null
-                        ? profile.applianceType ?? 'Appliance'
+                        ? _usageText(profile)
                         : 'Running on Outlet ${_runningOn(profile, now)!.outlet}',
                   ),
                   trailing: Row(
@@ -1006,13 +1016,13 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                                   ? 'Outlet ${reading!.outlet}'
                                   : 'Not running',
                             ),
-                            _Pair(
-                              'Safety limit',
-                              p.hasSafetyLimit
-                                  ? _duration(p.safetyCeilingDuration)
-                                  : 'Not available',
-                              color: _green,
-                            ),
+                            _Pair('Safety limit', _limitText(p), color: _green),
+                            if (p.isLearningComplete &&
+                                p.baselineAverage != null)
+                              _Pair(
+                                'Typical use',
+                                _duration(p.baselineAverage!.round()),
+                              ),
                             _Pair(
                               'Status',
                               _readError

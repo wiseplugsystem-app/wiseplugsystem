@@ -58,13 +58,25 @@ Each outlet has a relay. The relay is on in IDLE, SAMPLING, ACTIVE and WARNING
 and off in DISABLED and LOCKED_OUT; that state is saved, so relays stay off
 across reboots. A reboot while an appliance was running locks the outlet, so
 nothing restarts unattended after a power cut. When a session reaches its safety
-ceiling (30 minutes for a new appliance) the outlet enters a 60-second WARNING;
+limit (see Learning phase below) the outlet enters a 60-second WARNING;
 the app can turn it off, extend it, or let it lock out. A locked outlet is
 switched back on with its button or the app's **Reset Safety**.
 
 The control loop (sensors, safety, relays) never waits for the network; Firebase
 and Wi-Fi run in a separate task, publishing every second and polling commands
 every second.
+
+## Learning phase
+
+Each appliance's first 7 completed uses are recorded (`sessionCount`,
+`sessionHistory` in seconds) with no warning. At the 7th, their average
+becomes `baselineAverage` and `isLearningComplete` turns true; from then on a
+session longer than baseline × 1.5 (at least 5 minutes) starts the 60-second
+warning. `learnedLimit` is the limit in force. While learning, only the
+appliance's hard limit applies (`safetyCeilingDuration`, 4 hours by default,
+editable), so a forgotten appliance is still switched off. Uses shorter than
+10 s and sessions ended by a lock-out are not recorded. All of this runs on the
+ESP32, so it keeps working while the app is closed.
 
 ## Gadget node (`devices/gadget-1`)
 

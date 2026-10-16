@@ -53,4 +53,46 @@ void main() {
     expect(formatEventTime(events[1].time), 'Oct 16, 2:30 PM');
     expect(formatEventTime(DateTime(2026, 1, 2, 0, 5)), 'Jan 2, 12:05 AM');
   });
+
+  test('learning fields: backstop while learning, learned limit after', () {
+    final learning = LearnedAppliance.fromMap('A', 'fan', {
+      'name': 'Fan',
+      'registered': true,
+      'safetyCeilingDuration': 14400,
+      'sessionCount': 3,
+      'sessionHistory': [1200, 1500, 1350],
+      'isLearningComplete': false,
+      'learnedLimit': 14400,
+    });
+    expect(learning.isLearningComplete, isFalse);
+    expect(learning.sessionHistory, [1200, 1500, 1350]);
+    expect(learning.learningUsesLeft, 4);
+    expect(learning.effectiveLimit, 14400); // only the backstop applies
+
+    final learned = LearnedAppliance.fromMap('A', 'fan', {
+      'name': 'Fan',
+      'registered': true,
+      'safetyCeilingDuration': 14400,
+      'sessionCount': 9,
+      'baselineAverage': 1800,
+      'isLearningComplete': true,
+      'learnedLimit': 2700, // 1800 s x 1.5
+    });
+    expect(learned.learningUsesLeft, 0);
+    expect(learned.effectiveLimit, 2700);
+    expect(learned.baselineAverage, 1800);
+  });
+
+  test('learning completion appears in the activity history', () {
+    final event = ActivityEvent.fromMap('x', {
+      'type': 'LEARNING_COMPLETE',
+      'outlet': 'A',
+      'profileID': 'fan',
+    });
+    expect(event.category, ActivityCategory.appliance);
+    expect(
+      event.title('Fan'),
+      contains('Learned how long Fan is usually used'),
+    );
+  });
 }

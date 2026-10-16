@@ -202,12 +202,17 @@ void main() {
       device.profiles.add([
         LearnedAppliance.fromMap('A', 'p1', {
           'name': 'Renamed by device',
-          'safetyCeilingDuration': 1800,
+          'safetyCeilingDuration': 14400,
+          // Learned: typical use 20 min, so the limit is 30 min (x1.5).
+          'isLearningComplete': true,
+          'baselineAverage': 1200,
+          'learnedLimit': 1800,
         }),
       ]);
       await tester.pumpAndSettle();
       expect(find.text('Renamed by device'), findsWidgets);
       expect(find.text('30 min'), findsOneWidget);
+      expect(find.text('20 min'), findsOneWidget); // typical use
       expect(find.text('Not available'), findsWidgets);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());

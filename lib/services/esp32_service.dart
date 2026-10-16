@@ -40,9 +40,8 @@ Stream<List<LearnedAppliance>> combineProfileStreams(
                     databaseMap(registrations['OUTLET_$outlet'])[entry.key],
                   ),
                   'firmwareName': databaseMap(entry.value)['name'] ?? entry.key,
-                  'registered': databaseMap(
-                    registrations['OUTLET_$outlet'],
-                  ).containsKey(entry.key),
+                  'registered': databaseMap(registrations['OUTLET_$outlet'])
+                      .containsKey(entry.key),
                   'registrationMetadataAvailable': metadataAvailable,
                 },
           },
@@ -105,8 +104,7 @@ class DeviceRejection implements Exception {
           '"Erase All Flash Before Sketch Upload" enabled.',
     'REJECTED_STALE' =>
       'The outlet changed state before the command arrived. Try again.',
-    'REJECTED_PHYSICAL_RESET_REQUIRED' =>
-      'This outlet is locked. Use Reset Safety in the alert or the outlet\'s button.',
+    'REJECTED_PHYSICAL_RESET_REQUIRED' => 'This outlet is locked. Use Reset Safety in the alert or the outlet\'s button.',
     'REJECTED_INVALID' => 'The outlet cannot do that in its current state.',
     _ => 'The WisePlug refused the command ($code).',
   };
@@ -253,6 +251,7 @@ class Esp32Service {
         .onValue
         .map((event) => event.snapshot.value),
   );
+
   /// Saves the user's name for a learned signature. update() keeps any
   /// appliance type saved by older versions of the app.
   Future<void> registerProfile(LearnedAppliance profile, String name) async {

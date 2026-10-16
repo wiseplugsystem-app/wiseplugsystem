@@ -96,6 +96,20 @@ class LearnedAppliance {
   final int maxRunTime, safetyCeilingDuration;
   final String? applianceType;
   final int? totalSessions;
+
+  /// Learning phase (written by the firmware): completed uses recorded, their
+  /// durations in seconds, the learned average, and the limit now in force.
+  static const learningSessions = 7;
+  final int sessionCount;
+  final List<int> sessionHistory;
+  final double? baselineAverage;
+  final bool isLearningComplete;
+  final int? learnedLimit;
+
+  /// The limit the plug enforces now: the learned one, else the backstop.
+  int get effectiveLimit => learnedLimit ?? safetyCeilingDuration;
+  int get learningUsesLeft =>
+      isLearningComplete ? 0 : (learningSessions - sessionCount).clamp(0, 7);
   final bool hasSafetyLimit, hasRuntimeLimit;
 
   LearnedAppliance.fromMap(
@@ -113,6 +127,17 @@ class LearnedAppliance {
           (map['applianceType']?.toString().trim().isNotEmpty ?? false),
       applianceType = map['applianceType']?.toString(),
       totalSessions = sensorNumber(map['totalSessions'])?.toInt(),
+      sessionCount = sensorNumber(map['sessionCount'])?.toInt() ?? 0,
+      sessionHistory = [
+        for (final v
+            in map['sessionHistory'] is List
+                ? map['sessionHistory'] as List
+                : const [])
+          ?sensorNumber(v)?.toInt(),
+      ],
+      baselineAverage = sensorNumber(map['baselineAverage']),
+      isLearningComplete = map['isLearningComplete'] == true,
+      learnedLimit = sensorNumber(map['learnedLimit'])?.toInt(),
       hasSafetyLimit = (sensorNumber(map['safetyCeilingDuration']) ?? 0) > 0,
       hasRuntimeLimit = (sensorNumber(map['maxRunTime']) ?? 0) > 0,
       maxRunTime = (map['maxRunTime'] as num?)?.toInt() ?? 3600,

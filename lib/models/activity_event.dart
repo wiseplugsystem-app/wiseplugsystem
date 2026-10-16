@@ -22,7 +22,8 @@ class ActivityEvent {
     'NEW_APPLIANCE' => ActivityCategory.newAppliance,
     'APPLIANCE_ON' ||
     'APPLIANCE_OFF' ||
-    'APPLIANCE_DELETED' => ActivityCategory.appliance,
+    'APPLIANCE_DELETED' ||
+    'LEARNING_COMPLETE' => ActivityCategory.appliance,
     _ => ActivityCategory.power,
   };
 
@@ -48,6 +49,8 @@ class ActivityEvent {
       'OUTLET_ON' => 'Outlet $outlet switched on$how',
       'OUTLET_OFF' => 'Outlet $outlet switched off$how',
       'APPLIANCE_DELETED' => 'Appliance deleted',
+      'LEARNING_COMPLETE' =>
+        'Learned how long ${name ?? 'an appliance'} is usually used; its safety limit is now on',
       _ => type,
     };
   }
