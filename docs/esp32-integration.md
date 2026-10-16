@@ -46,7 +46,7 @@ Firestore edits do not configure or control this ESP32 firmware.
 4. Wiring: PZEM A on RX 32 / TX 33 (Serial2), PZEM B on RX 25 / TX 26 (Serial1),
    relays on GPIO 18 / 19 (`RELAY_ON` is HIGH; swap the defines for an active-low
    board), optional reset buttons from GPIO 4 / 5 to GND.
-5. On first boot, join the `WisePlug-AP` Wi-Fi network from a phone and choose
+5. On first boot (or whenever it cannot reach a router for 20 s), the plug opens its own Wi-Fi `wisewp` (open, no password). Join it with a phone: a setup page opens by itself listing the 2.4 GHz networks the plug can see; tap yours and enter its password. The app does the same under Settings → Wi-Fi Configuration → **Nearby setup** (it detects the join automatically). Manual fallback: open `http://192.168.4.1` and choose
    the home network. Later changes can be sent from the app's Wi-Fi screen.
 
 Appliances learned by the previous sketch (`app_N` records) are migrated on
@@ -90,7 +90,7 @@ is the one command the device accepts while LOCKED_OUT.
 
 Wi-Fi changes only reach a gadget that is online. If the new network fails
 for 20 s the sketch rolls back to the previous network; after 60 s offline it
-opens the `WisePlug-AP` setup portal.
+switches to its `wisewp` setup network (retrying the saved router every 2 minutes while nobody is joined).
 
 ## Verify the connection
 

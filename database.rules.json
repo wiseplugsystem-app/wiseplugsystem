@@ -116,6 +116,11 @@
         }
       }
     },
+    "activity_log": {
+      ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid",
+      ".write": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid && !newData.exists()",
+      ".indexOn": ".key"
+    },
     "acknowledgments": {
       "$alert": {
         "$uid": {

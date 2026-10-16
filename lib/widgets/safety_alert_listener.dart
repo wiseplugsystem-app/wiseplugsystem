@@ -151,6 +151,23 @@ class _SafetyAlertDialog extends StatefulWidget {
 class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
   bool _busy = false;
   String? _error;
+  // Repaints the countdown every second between device updates.
+  late final Timer _tick = Timer.periodic(
+    const Duration(seconds: 1),
+    (_) => setState(() {}),
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    _tick;
+  }
+
+  @override
+  void dispose() {
+    _tick.cancel();
+    super.dispose();
+  }
 
   /// Sends [type] to every outlet matching [test] and waits for the ESP32.
   Future<void> _send(String type, bool Function(OutletReading) test) async {
@@ -192,6 +209,7 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
           .toList();
       final warning = triggered.any((r) => r.isWarning);
       return AlertDialog(
+        scrollable: true, // short screens: content scrolls, buttons stay visible
         content: SizedBox(
           width: 360,
           child: Column(
@@ -221,6 +239,16 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
                     ),
                   ],
                 ),
+              ),
+              const SizedBox(height: 20),
+              _Countdown(
+                seconds: warning
+                    ? triggered
+                          .where((r) => r.isWarning)
+                          .map((r) => r.secondsRemaining(now))
+                          .reduce((a, b) => a < b ? a : b)
+                    : null,
+                locked: triggered.isNotEmpty && !warning,
               ),
               const SizedBox(height: 16),
               for (final r in triggered)
@@ -273,4 +301,67 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
       );
     },
   );
+}
+
+/// Large 60-second ring before the outlet is switched off automatically.
+class _Countdown extends StatelessWidget {
+  final int? seconds;
+  final bool locked;
+  const _Countdown({required this.seconds, required this.locked});
+
+  @override
+  Widget build(BuildContext context) {
+    final s = seconds;
+    return SizedBox.square(
+      dimension: 132,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          SizedBox.expand(
+            child: TweenAnimationBuilder<double>(
+              tween: Tween(end: s == null ? 0 : s / 60),
+              duration: const Duration(milliseconds: 900),
+              builder: (context, value, _) => CircularProgressIndicator(
+                value: value,
+                strokeWidth: 10,
+                color: Colors.red,
+                backgroundColor: Colors.red.withValues(alpha: .12),
+              ),
+            ),
+          ),
+          if (s != null)
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '$s',
+                  style: const TextStyle(
+                    fontSize: 48,
+                    fontWeight: FontWeight.w900,
+                    color: Colors.red,
+                    height: 1,
+                  ),
+                ),
+                const Text('seconds', style: TextStyle(color: Colors.grey)),
+              ],
+            )
+          else
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  locked ? Icons.power_off : Icons.hourglass_empty,
+                  size: 40,
+                  color: Colors.red,
+                ),
+                Text(
+                  locked ? 'Power cut' : '—',
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+              ],
+            ),
+        ],
+      ),
+    );
+  }
 }

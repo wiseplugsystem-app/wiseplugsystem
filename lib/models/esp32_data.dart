@@ -89,6 +89,9 @@ class LearnedAppliance {
   final String firmwareName;
   final String outlet, profileID, name;
   final double? baselineWattage, peakPower, current, voltage, powerFactor;
+
+  /// Recognition window published by the firmware (steady power, watts).
+  final double? powerMin, powerMax;
   final DateTime? registeredAt;
   final int maxRunTime, safetyCeilingDuration;
   final String? applianceType;
@@ -116,6 +119,8 @@ class LearnedAppliance {
       safetyCeilingDuration =
           (map['safetyCeilingDuration'] as num?)?.toInt() ?? 3600,
       name = map['name']?.toString() ?? profileID,
+      powerMin = sensorNumber(databaseMap(map['range'])['powerMin_W']),
+      powerMax = sensorNumber(databaseMap(map['range'])['powerMax_W']),
       baselineWattage = sensorNumber(map['steadyPower_W']),
       peakPower = sensorNumber(map['peakPower_W']),
       current = sensorNumber(map['current_A']),

@@ -5,6 +5,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'dart:async';
 import 'dart:convert';
 
+import '../models/activity_event.dart';
 import '../models/esp32_data.dart';
 import '../models/gadget_status.dart';
 import 'device_binding.dart';
@@ -210,6 +211,16 @@ class Esp32Service {
       ssid: ssid,
     );
   }
+
+  /// The newest [limit] history events written by the ESP32, newest first.
+  Stream<List<ActivityEvent>> streamActivity({int limit = 100}) => database
+      .ref('activity_log')
+      .orderByKey()
+      .limitToLast(limit)
+      .onValue
+      .map((event) => parseActivity(event.snapshot.value));
+
+  Future<void> clearActivity() => database.ref('activity_log').remove();
 
   /// Makes the ESP32 forget a learned appliance, then removes its saved name.
   Future<void> deleteProfile(

@@ -7,6 +7,7 @@ import '../models/esp32_data.dart';
 import '../models/gadget_status.dart';
 import '../services/device_binding.dart';
 import '../services/esp32_service.dart';
+import 'activity_screen.dart';
 import 'esp32_dashboard.dart';
 import 'user_profile_screen.dart';
 import 'wifi_config_screen.dart';
@@ -25,18 +26,19 @@ String _duration(int? seconds) {
   return '${(seconds / 60).ceil()} min';
 }
 
-/// Prefer firmware identity. Legacy names are usable only when unambiguous.
+/// Prefer firmware identity. Appliances are portable: the firmware recognizes
+/// them on either outlet, so a profile ID matches whichever outlet learned it.
+/// Legacy names are usable only when unambiguous on the same outlet.
 LearnedAppliance? connectedProfile(
   OutletReading? reading,
   List<LearnedAppliance> profiles,
 ) {
   if (reading == null) return null;
   final matches = profiles.where(
-    (p) =>
-        p.outlet == reading.outlet &&
-        (reading.profileID.isNotEmpty
-            ? p.profileID == reading.profileID
-            : p.firmwareName == reading.appliance ||
+    (p) => reading.profileID.isNotEmpty
+        ? p.profileID == reading.profileID
+        : p.outlet == reading.outlet &&
+              (p.firmwareName == reading.appliance ||
                   p.profileID == reading.appliance ||
                   p.name == reading.appliance),
   );
@@ -456,14 +458,9 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                       ),
                       if (_tab == 0) ...[
                         IconButton(
-                          tooltip: 'Device alerts',
+                          tooltip: 'Activity',
                           icon: const Icon(Icons.notifications_none),
-                          onPressed: _showAlerts,
-                        ),
-                        IconButton(
-                          tooltip: 'Settings',
-                          icon: const Icon(Icons.settings_outlined),
-                          onPressed: () => setState(() => _tab = 2),
+                          onPressed: _openActivity,
                         ),
                       ],
                     ],
@@ -534,15 +531,26 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
             'No outlet readings found. The ESP32 must publish telemetry_logs/outlet_A and outlet_B to this app’s database.',
           ),
         ),
-      Text(
-        gadget != null
-            ? '${DeviceBinding.gadgetId.toUpperCase()} ONLINE — DUAL OUTLET'
-            : '${DeviceBinding.gadgetId.toUpperCase()} OFFLINE — WAITING FOR DEVICE',
-        style: TextStyle(
-          color: gadget != null ? _green : Colors.grey,
-          fontWeight: FontWeight.w700,
-        ),
+      Wrap(
+        spacing: 10,
+        runSpacing: 8,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          _StatusChip(online: gadget != null),
+          Text(
+            '${DeviceBinding.gadgetId} · Dual outlet',
+            style: const TextStyle(
+              color: Colors.grey,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
       ),
+      // Only once a status has arrived, so the banner never flashes at start.
+      if (_gadget != null && gadget == null) ...[
+        const SizedBox(height: 16),
+        _WifiHelpBanner(onOpenSetup: _openWifiSetup),
+      ],
       const SizedBox(height: 20),
       LayoutBuilder(
         builder: (context, constraints) {
@@ -749,7 +757,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
     final profiles = _profiles.where((p) {
       final status = _readError
           ? 'Offline'
-          : profileStatus(p, _readings[p.outlet], _profiles, now);
+          : profileStatus(p, _readingFor(p, now), _profiles, now);
       return _filter == 'All' ||
           (_filter == 'Active'
               ? ['Active', 'Near limit', 'Safety warning'].contains(status)
@@ -801,13 +809,13 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                     horizontal: 16,
                     vertical: 8,
                   ),
-                  leading: Icon(
-                    Icons.circle,
-                    size: 9,
+                  leading: _ApplianceIcon(
+                    type: profile.applianceType ?? profile.name,
+                    compact: true,
                     color: _statusColor(
                       profileStatus(
                         profile,
-                        _readings[profile.outlet],
+                        _readingFor(profile, now),
                         _profiles,
                         now,
                       ),
@@ -823,7 +831,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                   subtitle: Text(
                     _runningOn(profile, now) == null
                         ? profile.applianceType ?? 'Appliance'
-                        : 'Running on Outlet ${profile.outlet}',
+                        : 'Running on Outlet ${_runningOn(profile, now)!.outlet}',
                   ),
                   trailing: Row(
                     mainAxisSize: MainAxisSize.min,
@@ -845,7 +853,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                             ? 'Offline'
                             : profileStatus(
                                 profile,
-                                _readings[profile.outlet],
+                                _readingFor(profile, now),
                                 _profiles,
                                 now,
                               ),
@@ -856,7 +864,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                   onTap: !profile.registrationMetadataAvailable
                       ? null
                       : () {
-                          final reading = _readings[profile.outlet];
+                          final reading = _readingFor(profile, now);
                           if (profile.needsRegistration && reading != null) {
                             _register(reading, profile);
                           } else {
@@ -894,8 +902,8 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
             );
           }
           final p = candidates.single;
-          final reading = _readings[p.outlet];
           final now = DateTime.now();
+          final reading = _readingFor(p, now);
           final enabled =
               !_readError && !_profileError && reading?.canCommand(now) == true;
           final connected =
@@ -950,7 +958,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                     _Panel(
                       child: Row(
                         children: [
-                          _ApplianceIcon(type: p.applianceType),
+                          _ApplianceIcon(type: p.applianceType ?? p.name),
                           const SizedBox(width: 14),
                           Expanded(
                             child: Column(
@@ -982,7 +990,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                           _Pair('Signature ID', p.profileID, color: _blue),
                           _Pair(
                             'Plugged into',
-                            connected ? 'Outlet ${p.outlet}' : 'Not running',
+                            connected ? 'Outlet ${reading!.outlet}' : 'Not running',
                           ),
                           _Pair(
                             'Safety limit',
@@ -1001,13 +1009,20 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                             'Total sessions',
                             p.totalSessions?.toString() ?? 'Not available',
                           ),
+                          // The steady-power window the WisePlug matches on.
+                          _Pair(
+                            'Recognition range',
+                            p.powerMin == null || p.powerMax == null
+                                ? 'Not available'
+                                : '${p.powerMin!.clamp(0, double.infinity).toStringAsFixed(1)}–${p.powerMax!.toStringAsFixed(1)} W',
+                          ),
                         ],
                       ),
                     ),
                     const SizedBox(height: 20),
                     _PowerControl(
                       service: widget.service,
-                      outlet: p.outlet,
+                      outlet: reading?.outlet ?? p.outlet,
                       reading: connected && enabled ? reading : null,
                       now: now,
                       applianceName: p.needsRegistration
@@ -1128,25 +1143,33 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
     }
   }
 
-  /// The outlet reading when [profile] is the appliance running on it.
+  /// The reading of whichever outlet [profile] is running on right now.
   OutletReading? _runningOn(LearnedAppliance profile, DateTime now) {
-    final reading = _readings[profile.outlet];
-    return !_readError &&
-            reading?.hasConnectedAppliance(now) == true &&
-            connectedProfile(reading, _profiles)?.profileID ==
-                profile.profileID
-        ? reading
-        : null;
+    if (_readError) return null;
+    for (final reading in _readings.values) {
+      if (reading.hasConnectedAppliance(now) &&
+          connectedProfile(reading, _profiles)?.profileID ==
+              profile.profileID) {
+        return reading;
+      }
+    }
+    return null;
   }
 
-  /// The reading to send REMOVE_PROFILE through, when [profile] is idle and
-  /// the WisePlug can take commands; null when it cannot be deleted now.
+  /// Where [profile] runs, or else the outlet that learned it.
+  OutletReading? _readingFor(LearnedAppliance profile, DateTime now) =>
+      _runningOn(profile, now) ?? _readings[profile.outlet];
+
+  /// A reading to send REMOVE_PROFILE through (the firmware searches both
+  /// outlets), when [profile] is idle; null when it cannot be deleted now.
   OutletReading? _deletableReading(LearnedAppliance profile, DateTime now) {
-    final reading = _readings[profile.outlet];
     if (_readError || _profileError || _runningOn(profile, now) != null) {
       return null;
     }
-    return reading?.canCommand(now) == true ? reading : null;
+    for (final reading in [?_readings[profile.outlet], ..._readings.values]) {
+      if (reading.canCommand(now)) return reading;
+    }
+    return null;
   }
 
   /// Lower-cased names of registered appliances, for duplicate checks.
@@ -1329,50 +1352,99 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
     if (result != null && mounted) await _save(result);
   }
 
-  void _showAlerts() => showDialog<void>(
-    context: context,
-    builder: (_) => AnimatedBuilder(
-      animation: _updates,
-      builder: (context, _) {
-        final warnings = _readings.values
-            .where((r) => r.isWarning || r.isLockedOut || r.runtimeWarning)
-            .toList();
-        return AlertDialog(
-          title: const Text('Device alerts'),
-          content: SizedBox(
-            width: 420,
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (_readError) const DatabaseReadError(),
-                  if (warnings.isEmpty)
-                    Text(
-                      _loading
-                          ? 'Waiting for device data.'
-                          : 'No safety alerts in the latest received readings.',
-                    ),
-                  for (final reading in warnings)
-                    ListTile(
-                      title: Text(
-                        'Outlet ${reading.outlet} · ${reading.appliance}',
-                      ),
-                      subtitle: Text(
-                        '${_status(reading, DateTime.now())}${reading.isWarning ? ' · ${reading.secondsRemaining(DateTime.now())} s until lockout' : ''}',
-                      ),
-                    ),
-                ],
+  // Live alerts are raised app-wide by SafetyAlertListener; the bell opens
+  // the persistent history.
+  void _openActivity() => Navigator.of(context).push(
+    MaterialPageRoute<void>(
+      builder: (_) => ActivityScreen(
+        service: widget.service,
+        nameFor: (id) {
+          for (final p in _profiles) {
+            if (p.profileID == id) {
+              return p.needsRegistration ? 'Unregistered appliance' : p.name;
+            }
+          }
+          return null;
+        },
+      ),
+    ),
+  );
+
+  void _openWifiSetup() => Navigator.of(context).push(
+    MaterialPageRoute<void>(
+      builder: (_) => WifiConfigScreen(service: widget.service),
+    ),
+  );
+}
+
+class _StatusChip extends StatelessWidget {
+  final bool online;
+  const _StatusChip({required this.online});
+  @override
+  Widget build(BuildContext context) {
+    final color = online ? _green : Colors.red;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: .12),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: color.withValues(alpha: .5)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.circle, size: 10, color: color),
+          const SizedBox(width: 6),
+          Text(
+            online ? 'Online' : 'Offline',
+            style: TextStyle(color: color, fontWeight: FontWeight.w800),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Shown while the WisePlug is offline: a powered-on plug that is offline
+/// almost always has no working Wi-Fi.
+class _WifiHelpBanner extends StatelessWidget {
+  final VoidCallback onOpenSetup;
+  const _WifiHelpBanner({required this.onOpenSetup});
+  @override
+  Widget build(BuildContext context) => _Panel(
+    border: _amber,
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Row(
+          children: [
+            Icon(Icons.wifi_off, color: _amber),
+            SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'Your WisePlug is offline',
+                style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800),
               ),
             ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Close'),
-            ),
           ],
-        );
-      },
+        ),
+        const SizedBox(height: 10),
+        const Text(
+          'If it is plugged in, connect it to Wi-Fi in two steps:\n'
+          '1. On your phone, join the Wi-Fi "wisewp" (no password).\n'
+          '2. Tap your home network on the page that opens, or tap "Wi-Fi setup" below.',
+          style: TextStyle(height: 1.5),
+        ),
+        const SizedBox(height: 12),
+        Align(
+          alignment: Alignment.centerRight,
+          child: OutlinedButton.icon(
+            onPressed: onOpenSetup,
+            icon: const Icon(Icons.router_outlined),
+            label: const Text('Wi-Fi setup'),
+          ),
+        ),
+      ],
     ),
   );
 }
@@ -1438,8 +1510,11 @@ class _Badge extends StatelessWidget {
 }
 
 class _ApplianceIcon extends StatelessWidget {
+  /// Type or name; the icon is guessed from keywords in it.
   final String? type;
-  const _ApplianceIcon({this.type});
+  final Color color;
+  final bool compact;
+  const _ApplianceIcon({this.type, this.color = _blue, this.compact = false});
   @override
   Widget build(BuildContext context) {
     final normalized = type?.toLowerCase() ?? '';
@@ -1447,16 +1522,20 @@ class _ApplianceIcon extends StatelessWidget {
         ? Icons.air
         : normalized.contains('iron')
         ? Icons.iron
-        : normalized.contains('cooker')
+        : normalized.contains('cooker') || normalized.contains('rice')
         ? Icons.rice_bowl
+        : normalized.contains('kettle')
+        ? Icons.coffee_maker_outlined
+        : normalized.contains('lamp') || normalized.contains('light')
+        ? Icons.lightbulb_outline
         : Icons.power;
     return Container(
-      padding: const EdgeInsets.all(13),
+      padding: EdgeInsets.all(compact ? 9 : 13),
       decoration: BoxDecoration(
-        color: _blue.withValues(alpha: .12),
-        borderRadius: BorderRadius.circular(18),
+        color: color.withValues(alpha: .12),
+        borderRadius: BorderRadius.circular(compact ? 14 : 18),
       ),
-      child: Icon(icon, color: _blue, size: 27),
+      child: Icon(icon, color: color, size: compact ? 22 : 27),
     );
   }
 }

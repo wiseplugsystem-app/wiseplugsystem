@@ -6,11 +6,15 @@
 //   alerts/<alertID>                       push-notification records
 //   devices/gadget-1/status, /wifiConfig   gadget summary, Wi-Fi provisioning
 //
-// Libraries: PZEM004Tv30, WiFiManager (tzapu), ArduinoJson 7.
+// Libraries: PZEM004Tv30, ArduinoJson 7 (WebServer and DNSServer ship with the ESP32 core).
 #include <PZEM004Tv30.h>
 #include <Preferences.h>
 #include <WiFi.h>
-#include <WiFiManager.h>
+#include <WebServer.h>
+#include <DNSServer.h>
+#include <esp_wifi.h>
+#include <algorithm>
+#include <vector>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 // Exact 64-bit millisecond timestamps (doubles would be rounded in JSON).
@@ -37,7 +41,9 @@ constexpr int BUTTON_A_PIN = 4, BUTTON_B_PIN = 5;  // optional reset buttons to 
 
 constexpr float START_W_THRESHOLD = 3.5f, IDLE_W_THRESHOLD = 1.5f;
 constexpr float POWER_TOLERANCE = 0.15f, CURRENT_TOLERANCE = 0.20f, PF_TOLERANCE = 0.10f;
-constexpr uint32_t SAMPLE_TIME_MS = 1500, MAX_APPLIANCES = 20;
+// Recognition ignores the first SETTLE_MS (motor start-up, inrush), then
+// averages SAMPLE_TIME_MS of steady load, so one appliance yields one signature.
+constexpr uint32_t SETTLE_MS = 3000, SAMPLE_TIME_MS = 2000, MAX_APPLIANCES = 20;
 constexpr uint32_t DEFAULT_LIMIT_S = 30 * 60;  // runtime warning and safety ceiling for new appliances
 constexpr uint64_t SENSOR_TIMEOUT_MS = 5000;
 
@@ -69,7 +75,10 @@ struct Snapshot {
   SensorSample sensor = {};
   ApplianceSignature profiles[MAX_APPLIANCES];
   uint32_t count = 0, profilesVersion = 0;
-  int activeID = -1;
+  // Running appliance: index into outlets[activeOwner]'s catalog. Appliances
+  // are portable, so it may have been learned on the other outlet.
+  int activeID = -1, activeOwner = -1;
+  char activeName[64] = {}, activeProfileID[64] = {};  // filled for publishing
   float peak = 0;
   int64_t startEpoch = 0, capturedEpoch = 0;
   uint64_t capturedMono = 0;
@@ -91,6 +100,14 @@ struct SocketChannel {
 PZEM004Tv30 pzemA(Serial2, PZEM_A_RX, PZEM_A_TX), pzemB(Serial1, PZEM_B_RX, PZEM_B_TX);
 SocketChannel outlets[2];
 char sessionID[40];
+
+// History events for activity_log, uploaded by the network task.
+struct Event {
+  char type[24] = {}, profileID[64] = {}, detail[40] = {};
+  int outlet = 0;
+  int64_t at = 0;
+};
+QueueHandle_t events;
 
 // ==========================================
 // TIME HELPERS (never block waiting for NTP)
@@ -121,10 +138,28 @@ bool persistSafety(SocketChannel& ch) {
   applyRelay(ch);
   return ok;
 }
-void endSession(SocketChannel& ch) { ch.data.activeID = -1; ch.data.peak = 0; }
+ApplianceSignature* activeProfile(SocketChannel& ch) {
+  auto& d = ch.data;
+  if (d.activeID < 0 || d.activeOwner < 0) return nullptr;
+  auto& owner = outlets[d.activeOwner].data;
+  return d.activeID < int(owner.count) ? &owner.profiles[d.activeID] : nullptr;
+}
+const char* activeProfileID(SocketChannel& ch) {
+  auto* p = activeProfile(ch);
+  return p ? p->profileID : "";
+}
+void logEvent(SocketChannel& ch, const char* type, const char* profileID = "", const char* detail = "") {
+  Event e;
+  strlcpy(e.type, type, sizeof(e.type)); strlcpy(e.profileID, profileID, sizeof(e.profileID));
+  strlcpy(e.detail, detail, sizeof(e.detail));
+  e.outlet = int(&ch - outlets); e.at = epochMs();
+  if (events) xQueueSend(events, &e, 0);  // full queue: drop rather than block safety
+}
+void endSession(SocketChannel& ch) { ch.data.activeID = ch.data.activeOwner = -1; ch.data.peak = 0; }
 void lock(SocketChannel& ch) {
   ch.data.safety.state = SocketState::LockedOut; ++ch.data.safety.revision;
   if (ch.data.alert.id[0]) strlcpy(ch.data.alert.resolution, "SHUTDOWN", sizeof(ch.data.alert.resolution));
+  logEvent(ch, "LOCKED_OUT", activeProfileID(ch));
   endSession(ch); persistSafety(ch);
   Serial.printf("[%s] LOCKED OUT, relay off\n", ch.outlet);
 }
@@ -176,6 +211,7 @@ void beginAlert(SocketChannel& ch, const char* type, uint64_t now) {
   snprintf(a.id, sizeof(a.id), "%s_%s_%lu", sessionID, ch.outlet, (unsigned long)ch.data.safety.revision);
   strlcpy(a.type, type, sizeof(a.type)); strlcpy(a.resolution, "PENDING", sizeof(a.resolution));
   a.trigger = epochMs(); a.expiry = a.trigger ? a.trigger + 60000 : 0;
+  logEvent(ch, "SAFETY_WARNING", activeProfileID(ch), type);
   persistSafety(ch);
   Serial.printf("[%s] WARNING %s: 60 s until lockout\n", ch.outlet, type);
 }
@@ -224,40 +260,66 @@ void loadProfiles(SocketChannel& ch) {
 // ==========================================
 // APPLIANCE RECOGNITION
 // ==========================================
+// Half-width of a signature's matching window (also published as its range).
+float band(float stored, float tolerance) { return max(fabsf(stored) * tolerance, 0.05f); }
 bool within(float live, float stored, float tolerance) {
-  return isfinite(live) && isfinite(stored) && fabsf(live - stored) <= max(fabsf(stored) * tolerance, 0.05f);
+  return isfinite(live) && isfinite(stored) && fabsf(live - stored) <= band(stored, tolerance);
 }
 bool matches(const ApplianceSignature& scan, const ApplianceSignature& p) {
   return within(scan.steadyPower, p.steadyPower, POWER_TOLERANCE) &&
          within(scan.current, p.current, CURRENT_TOLERANCE) &&
          isfinite(scan.pf) && fabsf(scan.pf - p.pf) <= PF_TOLERANCE;
 }
+// Finds a learned appliance by ID in either outlet's catalog.
+bool findProfile(const char* id, int& owner, int& index) {
+  for (int o = 0; o < 2; ++o) {
+    for (uint32_t i = 0; i < outlets[o].data.count; ++i) {
+      if (strcmp(id, outlets[o].data.profiles[i].profileID) == 0) { owner = o; index = i; return true; }
+    }
+  }
+  return false;
+}
+bool isRunning(int owner, int index) {
+  for (auto& c : outlets) if (c.data.activeOwner == owner && c.data.activeID == index) return true;
+  return false;
+}
 void finishSampling(SocketChannel& ch) {
   auto& d = ch.data; auto& sig = ch.pending;
   if (!ch.samples) return;
   sig.steadyPower /= ch.samples; sig.current /= ch.samples; sig.voltage /= ch.samples; sig.pf /= ch.samples;
-  d.activeID = -1;
-  float best = INFINITY;  // closest power match wins
-  for (uint32_t i = 0; i < d.count; ++i) {
-    float diff = fabsf(sig.steadyPower - d.profiles[i].steadyPower);
-    if (matches(sig, d.profiles[i]) && diff < best) { best = diff; d.activeID = i; }
+  d.activeID = d.activeOwner = -1;
+  // Appliances are portable: compare against what BOTH outlets have learned,
+  // so one learned on outlet A is recognized on outlet B. Closest power wins.
+  float best = INFINITY;
+  for (int o = 0; o < 2; ++o) {
+    const auto& catalog = outlets[o].data;
+    for (uint32_t i = 0; i < catalog.count; ++i) {
+      float diff = fabsf(sig.steadyPower - catalog.profiles[i].steadyPower);
+      if (matches(sig, catalog.profiles[i]) && diff < best) { best = diff; d.activeOwner = o; d.activeID = i; }
+    }
   }
+  bool learned = false;
   if (d.activeID < 0 && d.count < MAX_APPLIANCES) {
-    // Unknown appliance: add it to the catalog so the app prompts the user to register it.
+    // Unknown appliance: learn it here so the app prompts the user to register it.
     snprintf(sig.profileID, sizeof(sig.profileID), "UNNAMED_DEVICE_%lld_%08lx",
              (long long)(epochMs() ? epochMs() : monotonicMs()), (unsigned long)esp_random());
-    strlcpy(sig.name, sig.profileID, sizeof(sig.name)); sig.registeredAt = epochMs();
-    d.activeID = d.count; d.profiles[d.count++] = sig;
-  }
-  if (d.activeID >= 0) {
-    ++d.profiles[d.activeID].totalSessions;
+    strlcpy(sig.name, sig.profileID, sizeof(sig.name)); sig.registeredAt = epochMs(); sig.totalSessions = 1;
+    d.activeOwner = int(&ch - outlets); d.activeID = d.count; d.profiles[d.count++] = sig;
+    learned = true;
     if (!saveProfiles(ch)) return;
   }
-  uint32_t ceiling = d.activeID >= 0 ? d.profiles[d.activeID].safetyCeilingDuration : DEFAULT_LIMIT_S;
+  auto* p = activeProfile(ch);
+  if (p && !learned) {
+    ++p->totalSessions;
+    auto& owner = outlets[d.activeOwner];
+    if (writeProfiles(owner)) ++owner.data.profilesVersion;  // a lost count is not a hazard
+  }
+  uint32_t ceiling = p ? p->safetyCeilingDuration : DEFAULT_LIMIT_S;
   d.safety.state = SocketState::Active; ++d.safety.revision;
   d.safety.deadline = d.safety.started + uint64_t(ceiling) * 1000;
+  logEvent(ch, learned ? "NEW_APPLIANCE" : "APPLIANCE_ON", p ? p->profileID : "", p ? "" : "unrecognized");
   Serial.printf("[%s] Active: %s (limit %lu s)\n", ch.outlet,
-                d.activeID >= 0 ? d.profiles[d.activeID].name : "unrecognized, catalog full", (unsigned long)ceiling);
+                p ? p->name : "unrecognized, catalog full", (unsigned long)ceiling);
 }
 void handleSensor(SocketChannel& ch, const SensorSample& sample, uint64_t now) {
   auto& d = ch.data;
@@ -271,16 +333,20 @@ void handleSensor(SocketChannel& ch, const SensorSample& sample, uint64_t now) {
     ch.samples = 0; d.startEpoch = epochMs(); d.peak = 0;
     if (!persistSafety(ch)) return;
   } else if (sample.power < IDLE_W_THRESHOLD) {
+    if (state == SocketState::Active) logEvent(ch, "APPLIANCE_OFF", activeProfileID(ch));
     d.safety.state = SocketState::Idle; ++d.safety.revision;  // appliance switched off
     endSession(ch); persistSafety(ch);
     return;
   }
   d.peak = max(d.peak, sample.power);
   if (d.safety.state == SocketState::Sampling) {
-    ch.pending.steadyPower += sample.power; ch.pending.peakPower = max(ch.pending.peakPower, sample.power);
-    ch.pending.current += sample.current; ch.pending.voltage += sample.voltage; ch.pending.pf += sample.pf;
-    ++ch.samples;
-    if (now - d.safety.started >= SAMPLE_TIME_MS) finishSampling(ch);
+    ch.pending.peakPower = max(ch.pending.peakPower, sample.power);
+    if (now - d.safety.started >= SETTLE_MS) {  // steady load only
+      ch.pending.steadyPower += sample.power; ch.pending.current += sample.current;
+      ch.pending.voltage += sample.voltage; ch.pending.pf += sample.pf;
+      ++ch.samples;
+    }
+    if (now - d.safety.started >= SETTLE_MS + SAMPLE_TIME_MS) finishSampling(ch);
   }
 }
 
@@ -303,6 +369,7 @@ void handleCommand(SocketChannel& ch, const Command& cmd, uint64_t now) {
       endSession(ch);
       if (d.alert.id[0]) strlcpy(d.alert.resolution, "RESET", sizeof(d.alert.resolution));
       result = persistSafety(ch) ? "ACCEPTED" : "REJECTED_STORAGE_FAILURE";
+      if (strcmp(result, "ACCEPTED") == 0) logEvent(ch, "SAFETY_RESET");
     }
   } else if (d.safety.state == SocketState::LockedOut) result = "REJECTED_PHYSICAL_RESET_REQUIRED";
   else if (fresh) {
@@ -310,36 +377,47 @@ void handleCommand(SocketChannel& ch, const Command& cmd, uint64_t now) {
     if (strcmp(cmd.type, "SMART_OVERRIDE") == 0) {
       if (strcmp(cmd.alertID, d.alert.id) == 0 && d.safety.overrideRuntime(now, cmd.extension)) {
         strlcpy(d.alert.resolution, "OVERRIDDEN", sizeof(d.alert.resolution)); result = "ACCEPTED";
+        logEvent(ch, "OVERRIDE", activeProfileID(ch));
       }
     } else if (strcmp(cmd.type, "TURN_OFF") == 0 && d.safety.state == SocketState::Warning) {
       lock(ch); result = "ACCEPTED";
     } else if (strcmp(cmd.type, "TURN_ON") == 0 || strcmp(cmd.type, "TURN_OFF") == 0) {
-      if (d.safety.remotePower(strcmp(cmd.type, "TURN_ON") == 0)) {
+      bool on = strcmp(cmd.type, "TURN_ON") == 0;
+      String running = activeProfileID(ch);
+      if (d.safety.remotePower(on)) {
         if (d.safety.state == SocketState::Disabled) endSession(ch);
+        logEvent(ch, on ? "OUTLET_ON" : "OUTLET_OFF", running.c_str(), "app");
         result = "ACCEPTED";
       }
     } else if (strcmp(cmd.type, "REMOVE_PROFILE") == 0) {
-      // Any appliance except the one running now can be forgotten.
-      for (uint32_t i = 0; i < d.count; ++i) {
-        if (strcmp(cmd.profileID, d.profiles[i].profileID) != 0) continue;
-        if (int(i) == d.activeID) break;
-        for (uint32_t j = i + 1; j < d.count; ++j) d.profiles[j - 1] = d.profiles[j];
-        --d.count;
-        if (d.activeID > int(i)) --d.activeID;  // keep pointing at the running appliance
-        if (saveProfiles(ch)) { ++d.safety.revision; result = "ACCEPTED"; }
-        break;
+      // Any appliance not running right now can be forgotten, whichever outlet learned it.
+      int o, i;
+      if (findProfile(cmd.profileID, o, i) && !isRunning(o, i)) {
+        auto& owner = outlets[o].data;
+        for (uint32_t j = i + 1; j < owner.count; ++j) owner.profiles[j - 1] = owner.profiles[j];
+        --owner.count;
+        for (auto& c : outlets) {  // keep running appliances pointing at the right entry
+          if (c.data.activeOwner == o && c.data.activeID > i) --c.data.activeID;
+        }
+        if (saveProfiles(outlets[o])) {
+          ++d.safety.revision; result = "ACCEPTED";
+          logEvent(ch, "APPLIANCE_DELETED", cmd.profileID);
+        }
       }
     } else if (strcmp(cmd.type, "EDIT_PROFILE") == 0 && d.safety.state != SocketState::Warning) {
-      for (uint32_t i = 0; i < d.count; ++i) {
-        if (strcmp(cmd.profileID, d.profiles[i].profileID) != 0) continue;
-        if (!cmd.maxRunTime || cmd.ceiling < cmd.maxRunTime || cmd.ceiling > 604800 || !cmd.name[0]) break;
-        auto& p = d.profiles[i]; strlcpy(p.name, cmd.name, sizeof(p.name));
+      int o, i;
+      if (findProfile(cmd.profileID, o, i) && cmd.maxRunTime && cmd.ceiling >= cmd.maxRunTime &&
+          cmd.ceiling <= 604800 && cmd.name[0]) {
+        auto& p = outlets[o].data.profiles[i]; strlcpy(p.name, cmd.name, sizeof(p.name));
         p.maxRunTime = cmd.maxRunTime; p.safetyCeilingDuration = cmd.ceiling;
-        if (saveProfiles(ch)) {
-          if (d.activeID == int(i)) d.safety.deadline = d.safety.started + uint64_t(cmd.ceiling) * 1000;
+        if (saveProfiles(outlets[o])) {
+          for (auto& c : outlets) {  // apply the new limit wherever it is running
+            if (c.data.activeOwner != o || c.data.activeID != i) continue;
+            c.data.safety.deadline = c.data.safety.started + uint64_t(cmd.ceiling) * 1000;
+            if (&c != &ch) ++c.data.safety.revision;
+          }
           ++d.safety.revision; result = "ACCEPTED";
         }
-        break;
       }
     }
     if (!persistSafety(ch)) result = "REJECTED_STORAGE_FAILURE";
@@ -429,11 +507,12 @@ void addOutlet(JsonDocument& root, int i, const Snapshot& s, bool includeCatalog
   root[b + "currentState"] = stateName(st); root[b + "sessionID"] = sessionID;
   root[b + "revision"] = s.safety.revision; root[b + "runtime_warning"] = s.safety.runtimeWarning;
   root[b + "relay_on"] = relayEnergized(st); root[b + "storage_ok"] = ch.storageOK;
-  root[b + "profileID"] = s.activeID >= 0 ? s.profiles[s.activeID].profileID : "";
+  root[b + "profileID"] = s.activeProfileID;
   // The effective deadline, including any accepted runtime override.
   root[b + "safetyDeadline"] = running && s.safety.deadline > s.capturedMono && s.capturedEpoch
       ? timestamp(s.capturedEpoch + int64_t(s.safety.deadline - s.capturedMono)) : String("N/A");
-  root[b + "appliance"] = s.activeID >= 0 ? s.profiles[s.activeID].name : (running ? "Recognizing appliance" : "None");
+  root[b + "appliance"] = s.activeProfileID[0] ? s.activeName
+      : st == SocketState::Sampling ? "Recognizing appliance" : running ? "Unknown appliance" : "None";
   root[b + "sensor_valid"] = sensorOK;
   root[b + "power_W"] = sensorOK ? s.sensor.power : 0; root[b + "current_A"] = sensorOK ? s.sensor.current : 0;
   root[b + "voltage_V"] = sensorOK ? s.sensor.voltage : 0; root[b + "power_factor"] = sensorOK ? s.sensor.pf : 0;
@@ -465,6 +544,12 @@ void addOutlet(JsonDocument& root, int i, const Snapshot& s, bool includeCatalog
       profile["current_A"] = p.current; profile["voltage_V"] = p.voltage; profile["powerFactor"] = p.pf;
       profile["maxRunTime"] = p.maxRunTime; profile["safetyCeilingDuration"] = p.safetyCeilingDuration;
       profile["totalSessions"] = p.totalSessions; profile["registered_at"] = timestamp(p.registeredAt);
+      // The recognition window: a steady load inside every range matches.
+      JsonObject range = profile["range"].to<JsonObject>();
+      float dp = band(p.steadyPower, POWER_TOLERANCE), dc = band(p.current, CURRENT_TOLERANCE);
+      range["powerMin_W"] = p.steadyPower - dp; range["powerMax_W"] = p.steadyPower + dp;
+      range["currentMin_A"] = p.current - dc; range["currentMax_A"] = p.current + dc;
+      range["pfMin"] = p.pf - PF_TOLERANCE; range["pfMax"] = p.pf + PF_TOLERANCE;
     }
   }
 }
@@ -492,16 +577,194 @@ void addStatus(JsonDocument& root, const Snapshot* s) {
 }
 
 // ==========================================
-// WI-FI PROVISIONING
-// First setup: WiFiManager portal "WisePlug-AP". Later changes: the app writes
-// devices/gadget-1/wifiConfig; new credentials are tried for 20 s and rolled
-// back to the previous network if they fail.
+// WI-FI: home network + local setup network
+// Boot: try the saved router for 20 s. If that fails, or nothing is saved, the
+// plug opens its own Wi-Fi "wisewp" (open, one tap to join). Phones then show
+// the setup page by themselves (captive portal): it lists the 2.4 GHz networks
+// the plug can see, so the user taps theirs, types its password and is done.
+// The app can do the same through /status, /networks and /save-wifi. The
+// station never searches while "wisewp" is up, so the setup network stays on
+// one channel and phones stay joined. While nobody is joined, the saved
+// router is retried every 2 minutes (after a power cut the router often boots
+// slower than the plug). New details are saved only once they connect; a
+// failed change made from the app rolls back to the saved network, one made
+// from setup returns to "wisewp". No reboot: it would lock a running outlet.
 // ==========================================
+constexpr const char* SETUP_AP_SSID = "wisewp";
+constexpr uint64_t CONNECT_TIMEOUT_MS = 20000, OFFLINE_TO_SETUP_MS = 60000, SETUP_RETRY_MS = 120000;
+
+enum class NetMode { Connecting, Online, Setup };
+NetMode netMode = NetMode::Connecting;
 Preferences wifiPrefs;
+String savedSsid, savedPass;  // last network that worked
+String trialSsid, trialPass;  // being tried; saved once connected
+bool trialFromSetup = false, legacyCredentials = false;
+uint64_t modeSince = 0, lastConnected = 0;
 int64_t appliedConfig = 0;
-String previousSsid, previousPass;
-uint64_t trialStarted = 0;
-bool trialActive = false;
+WebServer setupServer(80);
+DNSServer setupDns;
+String queuedSsid, queuedPass;  // received by /save-wifi
+bool queued = false;
+uint64_t queuedAt = 0;
+String networksJson = "[]";  // last scan, for the setup page and the app
+uint64_t scannedAt = 0;
+
+// Credentials kept by the ESP-IDF itself (e.g. saved by an older firmware).
+bool storedByEspIdf() {
+  wifi_config_t conf = {};
+  return esp_wifi_get_config(WIFI_IF_STA, &conf) == ESP_OK && conf.sta.ssid[0];
+}
+// Networks the plug can actually join (it only hears 2.4 GHz): strongest
+// first, one entry per name, names exactly as broadcast (spaces included).
+void scanNetworks() {
+  int n = WiFi.scanNetworks();
+  std::vector<int> order;
+  for (int i = 0; i < n; ++i) if (WiFi.SSID(i).length()) order.push_back(i);
+  std::sort(order.begin(), order.end(), [](int a, int b) { return WiFi.RSSI(a) > WiFi.RSSI(b); });
+  JsonDocument doc; JsonArray list = doc.to<JsonArray>();
+  std::vector<String> seen;
+  for (int i : order) {
+    String ssid = WiFi.SSID(i);
+    if (std::find(seen.begin(), seen.end(), ssid) != seen.end()) continue;
+    seen.push_back(ssid);
+    JsonObject network = list.add<JsonObject>();
+    network["ssid"] = ssid; network["rssi"] = WiFi.RSSI(i);
+    network["secure"] = WiFi.encryptionType(i) != WIFI_AUTH_OPEN;
+    if (list.size() >= 20) break;
+  }
+  WiFi.scanDelete();
+  networksJson = ""; serializeJson(doc, networksJson); scannedAt = monotonicMs();
+}
+void startConnect(const String& ssid, const String& pass, bool trial, bool fromSetup) {
+  if (netMode == NetMode::Setup) { setupServer.stop(); setupDns.stop(); WiFi.softAPdisconnect(true); }
+  WiFi.mode(WIFI_STA); WiFi.disconnect(); WiFi.setAutoReconnect(true);
+  trialSsid = trial ? ssid : ""; trialPass = trial ? pass : ""; trialFromSetup = fromSetup;
+  if (ssid.length()) WiFi.begin(ssid.c_str(), pass.c_str());
+  else WiFi.begin();  // whatever the ESP-IDF has stored
+  netMode = NetMode::Connecting; modeSince = monotonicMs();
+  Serial.printf("Wi-Fi: connecting to \"%s\"\n", ssid.length() ? ssid.c_str() : "stored network");
+}
+void startSetup() {
+  WiFi.setAutoReconnect(false); WiFi.disconnect();
+  WiFi.mode(WIFI_AP_STA);  // the station stays idle; it is only used to list networks
+  scanNetworks();          // before the AP starts, so the scan cannot disturb phones
+  WiFi.softAP(SETUP_AP_SSID);
+  setupDns.start(53, "*", WiFi.softAPIP());  // captive portal: every name -> this page
+  setupServer.begin();
+  netMode = NetMode::Setup; modeSince = monotonicMs();
+  Serial.printf("Wi-Fi: join \"%s\" and open http://%s\n", SETUP_AP_SSID, WiFi.softAPIP().toString().c_str());
+}
+
+const char SETUP_PAGE[] PROGMEM = R"HTML(<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>WisePlug setup</title>
+<style>body{font-family:sans-serif;max-width:420px;margin:20px auto;padding:0 16px;color:#222}
+button,input{width:100%;padding:14px;margin:5px 0;font-size:17px;box-sizing:border-box;border-radius:10px}
+input{border:1px solid #bbb}.go{background:#00A4EF;color:#fff;border:0;font-weight:bold}
+.net{background:#f1f3f5;border:0;text-align:left}a{color:#00A4EF}</style></head>
+<body><h2>Connect your WisePlug</h2><p id="hint">Tap your home Wi-Fi:</p><div id="list">Searching&hellip;</div>
+<form id="form" method="post" action="/save-wifi" hidden><p>Password for <b id="name"></b></p>
+<input type="hidden" name="ssid" id="ssid"><input name="password" id="pw" type="password" maxlength="63" placeholder="Wi-Fi password">
+<button class="go">Connect</button></form>
+<p><a href="#" id="other">My network is not listed</a> &middot; <a href="#" id="again">Search again</a></p>
+<p style="color:#888;font-size:13px">Only 2.4 GHz networks can be used. A "5G" network will not appear.</p>
+<script>
+const list=document.getElementById('list'),form=document.getElementById('form');
+function pick(n,secure){form.hidden=false;ssid.value=n;document.getElementById('name').textContent='"'+n+'"';
+pw.hidden=!secure;pw.required=secure;if(secure)pw.focus();form.scrollIntoView();}
+function load(again){list.textContent='Searching…';fetch('/networks'+(again?'?refresh=1':'')).then(r=>r.json()).then(nets=>{
+list.textContent=nets.length?'':'No 2.4 GHz networks found. Move closer to the router and search again.';
+nets.forEach(w=>{const b=document.createElement('button');b.type='button';b.className='net';
+b.textContent=(w.secure?'🔒 ':'')+w.ssid+(w.rssi>-60?'  (strong)':w.rssi>-75?'':'  (weak)');
+b.onclick=()=>pick(w.ssid,w.secure);list.appendChild(b);});});}
+other.onclick=e=>{e.preventDefault();const n=prompt('Network name, exactly as it is written:');if(n)pick(n,true);};
+again.onclick=e=>{e.preventDefault();load(true);};load(false);
+</script></body></html>)HTML";
+
+// Lets the app (including the web build) read replies from this local address.
+void sendCors() {
+  setupServer.sendHeader("Access-Control-Allow-Origin", "*");
+  setupServer.sendHeader("Access-Control-Allow-Private-Network", "true");
+}
+void handleSaveWifi() {
+  sendCors();
+  if (setupServer.method() == HTTP_OPTIONS) {
+    setupServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    setupServer.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+    setupServer.send(204);
+    return;
+  }
+  String ssid = setupServer.arg("ssid"), pass = setupServer.arg("password");
+  const char* error = !ssid.length() || ssid.length() > 32 ? "Enter a network name up to 32 characters."
+      : pass.length() && (pass.length() < 8 || pass.length() > 63) ? "Wi-Fi passwords are 8 to 63 characters."
+      : nullptr;
+  if (setupServer.hasArg("app")) {  // JSON for the app; the form gets a page
+    JsonDocument doc; doc["ok"] = !error; doc["device"] = DEVICE_ID;
+    if (error) doc["error"] = error;
+    String body; serializeJson(doc, body);
+    setupServer.send(error ? 400 : 200, "application/json", body);
+  } else {
+    setupServer.send(error ? 400 : 200, "text/html",
+        String("<!doctype html><meta name=\"viewport\" content=\"width=device-width\"><p style=\"font-family:sans-serif\">") +
+        (error ? error : "Saved. The WisePlug is joining your network now. Reconnect this phone to your home Wi-Fi.") + "</p>");
+  }
+  if (!error) { queuedSsid = ssid; queuedPass = pass; queued = true; queuedAt = monotonicMs(); }
+}
+void setupRoutes() {
+  setupServer.on("/", HTTP_GET, [] { setupServer.send_P(200, "text/html", SETUP_PAGE); });
+  setupServer.on("/status", HTTP_GET, [] {
+    sendCors();
+    setupServer.send(200, "application/json", String("{\"device\":\"") + DEVICE_ID + "\",\"mode\":\"setup\"}");
+  });
+  setupServer.on("/networks", HTTP_GET, [] {
+    if (setupServer.hasArg("refresh") || !scannedAt) scanNetworks();
+    sendCors();
+    setupServer.send(200, "application/json", networksJson);
+  });
+  setupServer.on("/save-wifi", HTTP_ANY, handleSaveWifi);
+  setupServer.on("/config", HTTP_ANY, handleSaveWifi);
+  setupServer.onNotFound([] {  // phones probe a URL to detect captive portals
+    setupServer.sendHeader("Location", "http://192.168.4.1/");
+    setupServer.send(302);
+  });
+}
+
+void updateWifi(uint64_t now) {
+  bool connected = WiFi.status() == WL_CONNECTED;
+  switch (netMode) {
+    case NetMode::Connecting:
+      if (connected) {
+        netMode = NetMode::Online; lastConnected = now;
+        String ssid = trialSsid.length() ? trialSsid : WiFi.SSID();
+        String pass = trialSsid.length() ? trialPass : WiFi.psk();
+        if (ssid.length() && (ssid != savedSsid || pass != savedPass)) {  // it works: keep it
+          savedSsid = ssid; savedPass = pass;
+          wifiPrefs.putString("ssid", ssid); wifiPrefs.putString("pass", pass);
+        }
+        trialSsid = "";
+        Serial.printf("Wi-Fi: online on %s\n", WiFi.SSID().c_str());
+      } else if (now - modeSince > CONNECT_TIMEOUT_MS) {
+        bool rollback = trialSsid.length() && !trialFromSetup && savedSsid.length();
+        if (rollback) startConnect(savedSsid, savedPass, false, false);
+        else startSetup();
+      }
+      break;
+    case NetMode::Online:
+      if (connected) lastConnected = now;
+      else if (now - lastConnected > OFFLINE_TO_SETUP_MS) startSetup();  // router gone
+      break;
+    case NetMode::Setup:
+      setupDns.processNextRequest(); setupServer.handleClient();
+      if (queued && now - queuedAt > 1000) {  // let the reply reach the phone first
+        queued = false;
+        startConnect(queuedSsid, queuedPass, true, true);
+      } else if (now - modeSince > SETUP_RETRY_MS && WiFi.softAPgetStationNum() == 0 &&
+                 (savedSsid.length() || legacyCredentials)) {
+        startConnect(savedSsid, savedPass, false, false);
+      }
+      break;
+  }
+}
+
 void checkWifiConfig() {
   String path = String("devices/") + DEVICE_ID + "/wifiConfig", body;
   if (firebaseRequest("GET", path, "", &body) != HTTP_CODE_OK) return;
@@ -516,10 +779,22 @@ void checkWifiConfig() {
   String ackBody; serializeJson(ack, ackBody);
   firebaseRequest("PATCH", path, ackBody);
   firebaseRequest("DELETE", path + "/password");  // keep the secret only on the device
-  previousSsid = WiFi.SSID(); previousPass = WiFi.psk();
-  Serial.printf("Switching Wi-Fi to %s\n", ssid.c_str());
-  WiFi.disconnect(); WiFi.begin(ssid.c_str(), pass.c_str());  // persisted for reboot
-  trialStarted = monotonicMs(); trialActive = true;
+  startConnect(ssid, pass, true, false);  // rolls back to the saved network if it fails
+}
+
+// Uploads queued history events; an event leaves the queue only once stored.
+void sendEvents() {
+  Event e;
+  while (xQueuePeek(events, &e, 0) == pdTRUE) {
+    JsonDocument doc;
+    doc["type"] = e.type; doc["outlet"] = e.outlet == 0 ? "A" : "B";
+    if (e.profileID[0]) doc["profileID"] = e.profileID;
+    if (e.detail[0]) doc["detail"] = e.detail;
+    if (e.at) doc["time"] = e.at; else doc["time"][".sv"] = "timestamp";
+    String body; serializeJson(doc, body);
+    if (firebaseRequest("POST", "activity_log", body) != HTTP_CODE_OK) return;
+    xQueueReceive(events, &e, 0);
+  }
 }
 
 // ==========================================
@@ -531,30 +806,20 @@ void networkTask(void*) {
   while (firebaseHost.endsWith("/")) firebaseHost.remove(firebaseHost.length() - 1);
   tls.setInsecure();  // TODO: pin Google's root CA before production use
   wifiPrefs.begin("wifi", false); appliedConfig = wifiPrefs.getLong64("applied", 0);
+  savedSsid = wifiPrefs.getString("ssid", ""); savedPass = wifiPrefs.getString("pass", "");
   WiFi.mode(WIFI_STA); WiFi.setAutoReconnect(true);
-  static WiFiManager wm;
-  wm.setConfigPortalBlocking(false);
-  wm.autoConnect("WisePlug-AP");
+  legacyCredentials = storedByEspIdf();
+  setupRoutes();
+  if (savedSsid.length() || legacyCredentials) startConnect(savedSsid, savedPass, false, false);
+  else startSetup();  // nothing to connect to yet
   configTime(0, 0, "pool.ntp.org", "time.google.com");  // UTC; the app localizes
   static Snapshot latest[2]; bool available[2] = {false, false};
   uint32_t publishedVersion[2] = {UINT32_MAX, UINT32_MAX};
-  uint64_t lastConnected = monotonicMs(), lastCommands = 0, lastPublish = 0, lastCatalog = 0, lastConfig = 0;
+  uint64_t lastCommands = 0, lastPublish = 0, lastCatalog = 0, lastConfig = 0;
   for (;;) {
-    wm.process();
     uint64_t now = monotonicMs();
-    bool connected = WiFi.status() == WL_CONNECTED;
-    if (connected) lastConnected = now;
-    if (trialActive && (connected || now - trialStarted > 20000)) {
-      trialActive = false;
-      if (!connected && previousSsid.length()) {
-        Serial.println("New Wi-Fi failed, restoring previous network");
-        WiFi.disconnect(); WiFi.begin(previousSsid.c_str(), previousPass.c_str());
-      }
-    }
-    if (connected && wm.getConfigPortalActive()) wm.stopConfigPortal();
-    if (!connected && !trialActive && now - lastConnected > 60000 && !wm.getConfigPortalActive()) {
-      wm.startConfigPortal("WisePlug-AP");  // let the user re-provision locally
-    }
+    updateWifi(now);
+    bool connected = netMode == NetMode::Online && WiFi.status() == WL_CONNECTED;
     for (int i = 0; i < 2; ++i) {
       if (xQueueReceive(outlets[i].snapshots, &latest[i], 0) == pdTRUE) available[i] = true;
     }
@@ -574,8 +839,9 @@ void networkTask(void*) {
         }
       }
       if (now - lastConfig >= 10000) { lastConfig = now; checkWifiConfig(); }
+      sendEvents();
     }
-    vTaskDelay(pdMS_TO_TICKS(100));
+    vTaskDelay(pdMS_TO_TICKS(netMode == NetMode::Setup ? 10 : 100));  // snappy setup page
   }
 }
 
@@ -586,6 +852,7 @@ void setup() {
   // Relays stay off until the persisted safety state is known.
   for (int pin : {RELAY_A_PIN, RELAY_B_PIN}) { digitalWrite(pin, RELAY_OFF); pinMode(pin, OUTPUT); }
   Serial.begin(115200);
+  events = xQueueCreate(16, sizeof(Event));
   // The PZEM constructors open these ports before the core is fully started,
   // which is unreliable; open them again here so both meters respond.
   Serial2.begin(9600, SERIAL_8N1, PZEM_A_RX, PZEM_A_TX);
@@ -620,7 +887,8 @@ void loop() {
   for (auto& ch : outlets) {
     auto& d = ch.data;
     auto& safety = d.safety;
-    uint32_t maxRun = d.activeID >= 0 ? d.profiles[d.activeID].maxRunTime : DEFAULT_LIMIT_S;
+    auto* running = activeProfile(ch);
+    uint32_t maxRun = running ? running->maxRunTime : DEFAULT_LIMIT_S;
     if (safety.tick(now, maxRun)) {
       if (safety.state == SocketState::Warning) beginAlert(ch, "SAFETY_CEILING_EXCEEDED", now); else lock(ch);
     }
@@ -630,7 +898,10 @@ void loop() {
       ch.stableButton = raw;
       if (!raw && ch.storageOK) {
         if (safety.state == SocketState::Warning) lock(ch);
-        else { safety.physicalPress(); endSession(ch); persistSafety(ch); }
+        else {
+          safety.physicalPress(); endSession(ch); persistSafety(ch);
+          logEvent(ch, safety.state == SocketState::Disabled ? "OUTLET_OFF" : "OUTLET_ON", "", "button");
+        }
       }
     }
     SensorSample sample;
@@ -646,6 +917,9 @@ void loop() {
         d.alert.trigger = d.capturedEpoch - int64_t(now - safety.warningStarted);
         d.alert.expiry = d.alert.trigger + 60000; persistSafety(ch);
       }
+      auto* p = activeProfile(ch);
+      strlcpy(d.activeName, p ? p->name : "", sizeof(d.activeName));
+      strlcpy(d.activeProfileID, p ? p->profileID : "", sizeof(d.activeProfileID));
       xQueueOverwrite(ch.snapshots, &d);
     }
   }
