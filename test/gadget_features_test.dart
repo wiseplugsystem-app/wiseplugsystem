@@ -53,9 +53,18 @@ void main() {
     expect(status.isOnline(now), isTrue);
     expect(status.needsSafetyAlert, isFalse);
     expect(status.isOnline(now.add(const Duration(minutes: 1))), isFalse);
-    expect(GadgetStatus.fromMap({'remainingLimit': 0}).needsSafetyAlert, isTrue);
-    expect(GadgetStatus.fromMap({'remainingLimit': -2}).needsSafetyAlert, isTrue);
-    expect(GadgetStatus.fromMap({'safetyTriggered': true}).needsSafetyAlert, isTrue);
+    expect(
+      GadgetStatus.fromMap({'remainingLimit': 0}).needsSafetyAlert,
+      isTrue,
+    );
+    expect(
+      GadgetStatus.fromMap({'remainingLimit': -2}).needsSafetyAlert,
+      isTrue,
+    );
+    expect(
+      GadgetStatus.fromMap({'safetyTriggered': true}).needsSafetyAlert,
+      isTrue,
+    );
     // No limit published (nothing running) must not raise the alert.
     expect(GadgetStatus.fromMap({}).needsSafetyAlert, isFalse);
   });

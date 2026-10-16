@@ -184,7 +184,7 @@ void main() {
         ),
       );
       await tester.pump(const Duration(seconds: 1));
-      expect(find.text('seconds'), findsOneWidget);
+      expect(find.text('Seconds Remaining'), findsOneWidget);
     });
     await tester.pumpWidget(const SizedBox());
   });

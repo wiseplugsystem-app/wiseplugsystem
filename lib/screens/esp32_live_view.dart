@@ -173,6 +173,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
             width: 380,
             child: Column(
               mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 const Text('Do you want to register this appliance?'),
                 const SizedBox(height: 8),
@@ -186,15 +187,17 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                   ),
                 const SizedBox(height: 20),
                 _Panel(
-                  child: Column(
-                    children: [
-                      _Pair('Outlet', reading.outlet),
-                      _Pair(
-                        'Power draw',
-                        measurement(reading.activePower, 'W'),
-                      ),
-                      _Pair('Signature', profile.profileID, color: _blue),
-                    ],
+                  child: _PairLayout(
+                    labelWidth: 110,
+                    child: Column(
+                      children: [
+                        _Pair('Outlet', reading.outlet),
+                        _Pair(
+                          'Power draw',
+                          measurement(reading.activePower, 'W'),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ],
@@ -932,6 +935,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                 padding: const EdgeInsets.all(22),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     Row(
                       children: [
@@ -985,38 +989,49 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                     ),
                     const SizedBox(height: 20),
                     _Panel(
-                      child: Column(
-                        children: [
-                          _Pair('Signature ID', p.profileID, color: _blue),
-                          _Pair(
-                            'Plugged into',
-                            connected ? 'Outlet ${reading!.outlet}' : 'Not running',
-                          ),
-                          _Pair(
-                            'Safety limit',
-                            p.hasSafetyLimit
-                                ? _duration(p.safetyCeilingDuration)
-                                : 'Not available',
-                            color: _green,
-                          ),
-                          _Pair(
-                            'Status',
-                            _readError
-                                ? 'Offline'
-                                : profileStatus(p, reading, _profiles, now),
-                          ),
-                          _Pair(
-                            'Total sessions',
-                            p.totalSessions?.toString() ?? 'Not available',
-                          ),
-                          // The steady-power window the WisePlug matches on.
-                          _Pair(
-                            'Recognition range',
-                            p.powerMin == null || p.powerMax == null
-                                ? 'Not available'
-                                : '${p.powerMin!.clamp(0, double.infinity).toStringAsFixed(1)}–${p.powerMax!.toStringAsFixed(1)} W',
-                          ),
-                        ],
+                      child: _PairLayout(
+                        labelWidth: 150,
+                        child: Column(
+                          children: [
+                            _Pair(
+                              'Saved name',
+                              p.needsRegistration
+                                  ? 'Not registered yet'
+                                  : p.name,
+                              color: _blue,
+                            ),
+                            _Pair(
+                              'Plugged into',
+                              connected
+                                  ? 'Outlet ${reading!.outlet}'
+                                  : 'Not running',
+                            ),
+                            _Pair(
+                              'Safety limit',
+                              p.hasSafetyLimit
+                                  ? _duration(p.safetyCeilingDuration)
+                                  : 'Not available',
+                              color: _green,
+                            ),
+                            _Pair(
+                              'Status',
+                              _readError
+                                  ? 'Offline'
+                                  : profileStatus(p, reading, _profiles, now),
+                            ),
+                            _Pair(
+                              'Total sessions',
+                              p.totalSessions?.toString() ?? 'Not available',
+                            ),
+                            // The steady-power window the WisePlug matches on.
+                            _Pair(
+                              'Recognition range',
+                              p.powerMin == null || p.powerMax == null
+                                  ? 'Not available'
+                                  : '${p.powerMin!.clamp(0, double.infinity).toStringAsFixed(1)}–${p.powerMax!.toStringAsFixed(1)} W',
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                     const SizedBox(height: 20),
@@ -1466,27 +1481,49 @@ class _Panel extends StatelessWidget {
   );
 }
 
+/// Lays out the [_Pair]s below it as a left-aligned table: labels in one
+/// column of [labelWidth], values lined up next to them.
+class _PairLayout extends InheritedWidget {
+  final double labelWidth;
+  const _PairLayout({required this.labelWidth, required super.child});
+
+  static double? of(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<_PairLayout>()?.labelWidth;
+
+  @override
+  bool updateShouldNotify(_PairLayout old) => old.labelWidth != labelWidth;
+}
+
 class _Pair extends StatelessWidget {
   final String label, value;
   final Color? color;
   const _Pair(this.label, this.value, {this.color});
   @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 6),
-    child: Wrap(
-      alignment: WrapAlignment.spaceBetween,
-      crossAxisAlignment: WrapCrossAlignment.center,
-      spacing: 10,
-      runSpacing: 4,
-      children: [
-        Text(label, style: const TextStyle(color: Colors.grey)),
-        Text(
-          value,
-          style: TextStyle(fontWeight: FontWeight.w700, color: color),
-        ),
-      ],
-    ),
-  );
+  Widget build(BuildContext context) {
+    final labelText = Text(label, style: const TextStyle(color: Colors.grey));
+    final valueText = Text(
+      value,
+      style: TextStyle(fontWeight: FontWeight.w700, color: color),
+    );
+    final labelWidth = _PairLayout.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: labelWidth == null
+          ? Wrap(
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 10,
+              runSpacing: 4,
+              children: [labelText, valueText],
+            )
+          : Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SizedBox(width: labelWidth, child: labelText),
+                Expanded(child: valueText),
+              ],
+            ),
+    );
+  }
 }
 
 class _Badge extends StatelessWidget {
@@ -1645,19 +1682,19 @@ class _PowerControlState extends State<_PowerControl> {
                     const SizedBox(height: 5),
                     Text(
                       (widget.applianceName == null
-                          ? ''
-                          : 'Outlet ${widget.outlet} · ') +
-                      (_busy
-                          ? 'Waiting for ESP32…'
-                          : r == null || !r.isFresh(widget.now)
-                          ? 'Unavailable'
-                          : r.isLockedOut
-                          ? 'Locked · reset with button or safety alert'
-                          : on && !appliance
-                          ? 'On · no appliance detected'
-                          : on
-                          ? 'On · monitoring enabled'
-                          : 'Off · monitoring disabled'),
+                              ? ''
+                              : 'Outlet ${widget.outlet} · ') +
+                          (_busy
+                              ? 'Waiting for ESP32…'
+                              : r == null || !r.isFresh(widget.now)
+                              ? 'Unavailable'
+                              : r.isLockedOut
+                              ? 'Locked · reset with button or safety alert'
+                              : on && !appliance
+                              ? 'On · no appliance detected'
+                              : on
+                              ? 'On · monitoring enabled'
+                              : 'Off · monitoring disabled'),
                       style: const TextStyle(color: Colors.grey),
                     ),
                   ],

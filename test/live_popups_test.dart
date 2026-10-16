@@ -16,6 +16,7 @@ class PopupDevice extends Fake implements Esp32Service {
   @override
   Stream<GadgetStatus> streamGadgetStatus() => gadget.stream;
   final commands = <String>[];
+  Map<String, Object?> lastFields = const {};
   String? savedName;
   Completer<void>? registrationGate;
   @override
@@ -43,6 +44,7 @@ class PopupDevice extends Fake implements Esp32Service {
     Map<String, Object?> fields = const {},
   }) async {
     commands.add(type);
+    lastFields = fields;
   }
 
   @override
@@ -104,7 +106,7 @@ GadgetStatus status({
 );
 
 Finder inDialog(Finder finder) =>
-    find.descendant(of: find.byType(AlertDialog), matching: finder);
+    find.descendant(of: find.byType(Dialog), matching: finder);
 
 Future<void> mount(
   WidgetTester tester,
@@ -130,30 +132,35 @@ Future<void> mount(
 }
 
 void main() {
-  testWidgets('legacy reconnect prompts again without a session or start time', (tester) async {
-    final device = PopupDevice();
-    await mount(tester, device);
-    OutletReading legacy(String status) => OutletReading.fromMap('A', {
-      'status': status,
-      'appliance': 'Fan',
-      'last_updated_ms': DateTime.now().millisecondsSinceEpoch,
-    });
-    device.profiles.add([LearnedAppliance.fromMap('A', 'sig', {'name': 'Fan'})]);
-    device.readings.add({'A': legacy('Active')});
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('No, Disregard'));
-    await tester.pumpAndSettle();
-    device.readings.add({'A': legacy('Active')});
-    await tester.pumpAndSettle();
-    expect(find.text('New Appliance Detected'), findsNothing);
-    device.readings.add({'A': legacy('Idle')});
-    await tester.pumpAndSettle();
-    device.readings.add({'A': legacy('Active')});
-    await tester.pumpAndSettle();
-    expect(find.text('New Appliance Detected'), findsOneWidget);
-    await tester.pumpWidget(const SizedBox());
-    await device.close();
-  });
+  testWidgets(
+    'legacy reconnect prompts again without a session or start time',
+    (tester) async {
+      final device = PopupDevice();
+      await mount(tester, device);
+      OutletReading legacy(String status) => OutletReading.fromMap('A', {
+        'status': status,
+        'appliance': 'Fan',
+        'last_updated_ms': DateTime.now().millisecondsSinceEpoch,
+      });
+      device.profiles.add([
+        LearnedAppliance.fromMap('A', 'sig', {'name': 'Fan'}),
+      ]);
+      device.readings.add({'A': legacy('Active')});
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('No, Disregard'));
+      await tester.pumpAndSettle();
+      device.readings.add({'A': legacy('Active')});
+      await tester.pumpAndSettle();
+      expect(find.text('New Appliance Detected'), findsNothing);
+      device.readings.add({'A': legacy('Idle')});
+      await tester.pumpAndSettle();
+      device.readings.add({'A': legacy('Active')});
+      await tester.pumpAndSettle();
+      expect(find.text('New Appliance Detected'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+      await device.close();
+    },
+  );
 
   testWidgets(
     'named firmware appliance prompts when its catalog arrives late',
@@ -257,7 +264,6 @@ void main() {
     await device.close();
   });
 
-
   testWidgets('saving registration does not dismiss a newer safety warning', (
     tester,
   ) async {
@@ -294,85 +300,91 @@ void main() {
     await device.close();
   });
 
-  testWidgets('safety alert triggers only on safetyTriggered or no limit left', (
-    tester,
-  ) async {
-    final device = PopupDevice();
-    final alarm = FakeAlarm();
-    await mount(tester, device, alarm: alarm);
-    device.profiles.add([]);
-    device.readings.add({'A': reading()});
-    device.gadget.add(status(remaining: 120));
-    await tester.pumpAndSettle();
-    expect(find.text('WARNING'), findsNothing);
-    expect(alarm.plays, 0);
-    // Stale data from an offline gadget never raises the alarm.
-    device.gadget.add(
-      status(
-        triggered: true,
-        lastSeen: DateTime.now().subtract(const Duration(minutes: 5)),
-      ),
-    );
-    await tester.pumpAndSettle();
-    expect(find.text('WARNING'), findsNothing);
-    device.gadget.add(status(remaining: 0));
-    await tester.pumpAndSettle();
-    expect(find.text('WARNING'), findsOneWidget);
-    expect(alarm.playing, isTrue);
-    device.gadget.add(status(remaining: 30));
-    await tester.pumpAndSettle();
-    expect(find.text('WARNING'), findsNothing);
-    expect(alarm.playing, isFalse);
-    await tester.pumpWidget(const SizedBox());
-    await device.close();
-  });
+  testWidgets(
+    'safety alert triggers only on safetyTriggered or no limit left',
+    (tester) async {
+      final device = PopupDevice();
+      final alarm = FakeAlarm();
+      await mount(tester, device, alarm: alarm);
+      device.profiles.add([]);
+      device.readings.add({'A': reading()});
+      device.gadget.add(status(remaining: 120));
+      await tester.pumpAndSettle();
+      expect(find.text('WARNING'), findsNothing);
+      expect(alarm.plays, 0);
+      // Stale data from an offline gadget never raises the alarm.
+      device.gadget.add(
+        status(
+          triggered: true,
+          lastSeen: DateTime.now().subtract(const Duration(minutes: 5)),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('WARNING'), findsNothing);
+      device.gadget.add(status(remaining: 0));
+      await tester.pumpAndSettle();
+      expect(find.text('WARNING'), findsOneWidget);
+      expect(alarm.playing, isTrue);
+      device.gadget.add(status(remaining: 30));
+      await tester.pumpAndSettle();
+      expect(find.text('WARNING'), findsNothing);
+      expect(alarm.playing, isFalse);
+      await tester.pumpWidget(const SizedBox());
+      await device.close();
+    },
+  );
 
-  testWidgets('turn off silences, reset clears, dismiss holds until next event', (
-    tester,
-  ) async {
-    final device = PopupDevice();
-    final alarm = FakeAlarm();
-    await mount(tester, device, alarm: alarm);
-    device.profiles.add([]);
-    device.readings.add({'A': reading(state: 'WARNING')});
-    device.gadget.add(status(triggered: true));
-    await tester.pumpAndSettle();
-    expect(inDialog(find.textContaining('s until lockout')), findsOneWidget);
-    await tester.tap(find.text('Turn Off Now'));
-    await tester.pumpAndSettle();
-    expect(device.commands, ['TURN_OFF']);
-    expect(alarm.playing, isFalse);
-    device.readings.add({'A': reading(state: 'LOCKED_OUT')});
-    device.gadget.add(status(triggered: true));
-    await tester.pumpAndSettle();
-    expect(inDialog(find.textContaining('— Locked out')), findsOneWidget);
-    expect(find.text('Turn Off Now'), findsNothing);
-    await tester.tap(find.text('Reset Safety'));
-    await tester.pumpAndSettle();
-    expect(device.commands, ['TURN_OFF', 'RESET_SAFETY']);
-    device.readings.add({'A': reading(state: 'IDLE')});
-    device.gadget.add(status());
-    await tester.pumpAndSettle();
-    expect(find.text('WARNING'), findsNothing);
+  testWidgets(
+    'turn off silences, reset clears, dismiss holds until next event',
+    (tester) async {
+      final device = PopupDevice();
+      final alarm = FakeAlarm();
+      await mount(tester, device, alarm: alarm);
+      device.profiles.add([]);
+      device.readings.add({'A': reading(state: 'WARNING')});
+      device.gadget.add(status(triggered: true));
+      await tester.pumpAndSettle();
+      expect(inDialog(find.text('Seconds Remaining')), findsOneWidget);
+      expect(
+        inDialog(find.text('Are you still using the Appliance?')),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Turn Off Now'));
+      await tester.pumpAndSettle();
+      expect(device.commands, ['TURN_OFF']);
+      expect(alarm.playing, isFalse);
+      device.readings.add({'A': reading(state: 'LOCKED_OUT')});
+      device.gadget.add(status(triggered: true));
+      await tester.pumpAndSettle();
+      expect(inDialog(find.text('Power cut')), findsOneWidget);
+      expect(find.text('Turn Off Now'), findsNothing);
+      await tester.tap(find.text('Reset Safety'));
+      await tester.pumpAndSettle();
+      expect(device.commands, ['TURN_OFF', 'RESET_SAFETY']);
+      device.readings.add({'A': reading(state: 'IDLE')});
+      device.gadget.add(status());
+      await tester.pumpAndSettle();
+      expect(find.text('WARNING'), findsNothing);
 
-    device.gadget.add(status(triggered: true));
-    await tester.pumpAndSettle();
-    expect(find.text('WARNING'), findsOneWidget);
-    await tester.tap(find.text('Dismiss'));
-    await tester.pumpAndSettle();
-    device.gadget.add(status(triggered: true));
-    await tester.pumpAndSettle();
-    expect(find.text('WARNING'), findsNothing);
-    device.gadget.add(status());
-    device.gadget.add(status(triggered: true));
-    await tester.pumpAndSettle();
-    expect(find.text('WARNING'), findsOneWidget);
-    expect(alarm.plays, 3);
-    await tester.tap(find.text('Dismiss'));
-    await tester.pumpAndSettle();
-    await tester.pumpWidget(const SizedBox());
-    await device.close();
-  });
+      device.gadget.add(status(triggered: true));
+      await tester.pumpAndSettle();
+      expect(find.text('WARNING'), findsOneWidget);
+      await tester.tap(find.text('Dismiss'));
+      await tester.pumpAndSettle();
+      device.gadget.add(status(triggered: true));
+      await tester.pumpAndSettle();
+      expect(find.text('WARNING'), findsNothing);
+      device.gadget.add(status());
+      device.gadget.add(status(triggered: true));
+      await tester.pumpAndSettle();
+      expect(find.text('WARNING'), findsOneWidget);
+      expect(alarm.plays, 3);
+      await tester.tap(find.text('Dismiss'));
+      await tester.pumpAndSettle();
+      await tester.pumpWidget(const SizedBox());
+      await device.close();
+    },
+  );
 
   testWidgets('a name already used by another appliance is refused', (
     tester,
@@ -404,6 +416,32 @@ void main() {
     await tester.tap(find.text('Save Profile'));
     await tester.pumpAndSettle();
     expect(device.savedName, 'Desk lamp');
+    await tester.pumpWidget(const SizedBox());
+    await device.close();
+  });
+
+  testWidgets('the countdown is the focus and override extends 15 minutes', (
+    tester,
+  ) async {
+    final device = PopupDevice();
+    await mount(tester, device);
+    device.profiles.add([]);
+    device.readings.add({'A': reading(state: 'WARNING')});
+    device.gadget.add(status(triggered: true));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    // The reading's countdown expires ~45 s from now.
+    final number = tester.widget<Text>(
+      inDialog(find.textContaining(RegExp(r'^\d{1,2}$'))),
+    );
+    expect(int.parse(number.data!), inInclusiveRange(43, 45));
+    expect(number.style!.fontSize, greaterThanOrEqualTo(80));
+    await tester.tap(find.text('Yes, Override'));
+    await tester.pump();
+    expect(device.commands, ['SMART_OVERRIDE']);
+    expect(device.lastFields, {'alertID': 'alert-1', 'extensionDuration': 900});
+    await tester.tap(find.text('Dismiss'));
+    await tester.pump(const Duration(milliseconds: 500));
     await tester.pumpWidget(const SizedBox());
     await device.close();
   });

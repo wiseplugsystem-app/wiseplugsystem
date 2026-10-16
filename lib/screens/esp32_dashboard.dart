@@ -365,11 +365,25 @@ class Esp32ProfileEditorState extends State<Esp32ProfileEditor> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text('Outlet ${widget.profile.outlet} · detected signature'),
-          SelectableText(
-            widget.profile.profileID,
-            style: const TextStyle(color: Colors.blue),
-          ),
+          // Users see the saved name; the firmware ID stays internal.
+          if (widget.registration)
+            Text(
+              'New appliance detected on Outlet ${widget.reading.outlet}. '
+              'Give it a name you will recognize.',
+            )
+          else ...[
+            const Text('Saved as'),
+            Text(
+              widget.profile.needsRegistration
+                  ? 'Unregistered appliance'
+                  : widget.profile.name,
+              style: const TextStyle(
+                color: Colors.blue,
+                fontSize: 18,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
           const SizedBox(height: 20),
           TextField(
             controller: _name,

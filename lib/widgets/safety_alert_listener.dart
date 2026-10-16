@@ -170,7 +170,11 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
   }
 
   /// Sends [type] to every outlet matching [test] and waits for the ESP32.
-  Future<void> _send(String type, bool Function(OutletReading) test) async {
+  Future<void> _send(
+    String type,
+    bool Function(OutletReading) test, {
+    Map<String, Object?> Function(OutletReading)? fields,
+  }) async {
     final targets = widget.readings().values.where(test).toList();
     if (targets.isEmpty) {
       setState(() => _error = 'Live outlet data is unavailable. Try again.');
@@ -185,7 +189,11 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
         if (type == 'RESET_SAFETY') {
           await widget.service.resetSafety(reading);
         } else {
-          await widget.service.command(reading, type);
+          await widget.service.command(
+            reading,
+            type,
+            fields: fields?.call(reading) ?? const {},
+          );
         }
       }
       await widget.onSilence();
@@ -196,172 +204,206 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
     }
   }
 
+  /// Keeps the appliance running: the ESP32 extends the session by 15 min.
+  static Map<String, Object?> _override(OutletReading r) => {
+    'alertID': r.alertID,
+    'extensionDuration': 900,
+  };
+
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: widget.updates,
     builder: (context, _) {
-      final status = widget.status();
       final now = DateTime.now();
       final triggered = widget
           .readings()
           .values
           .where((r) => r.isWarning || r.isLockedOut)
           .toList();
-      final warning = triggered.any((r) => r.isWarning);
-      return AlertDialog(
-        scrollable: true, // short screens: content scrolls, buttons stay visible
-        content: SizedBox(
-          width: 360,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(18),
-                decoration: BoxDecoration(
-                  color: Colors.red,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: const Column(
-                  children: [
-                    Icon(Icons.warning, color: Colors.white, size: 30),
-                    Text(
-                      'WARNING',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 23,
-                      ),
+      final warnings = triggered.where((r) => r.isWarning).toList();
+      final warning = warnings.isNotEmpty;
+      final seconds = warning
+          ? warnings
+                .map((r) => r.secondsRemaining(now))
+                .reduce((a, b) => a < b ? a : b)
+          : 0;
+      final outlets = triggered.map((r) => 'Outlet ${r.outlet}').join(' & ');
+      return Dialog(
+        insetPadding: const EdgeInsets.all(20),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 400),
+          // Scrolls on short screens so the buttons stay reachable.
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const _Header(),
+                const SizedBox(height: 28),
+                if (warning) ...[
+                  // The countdown is the focus: big, centered, alone.
+                  Text(
+                    '$seconds',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 96,
+                      fontWeight: FontWeight.w800,
+                      height: 1,
+                      color: seconds <= 10 ? Colors.red : null,
                     ),
-                    Text(
-                      'Safety Limit Exceeded!',
-                      style: TextStyle(color: Colors.white),
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    'Seconds Remaining',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 18),
+                  ),
+                  const SizedBox(height: 26),
+                  const Text(
+                    'Are you still using the Appliance?',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 19, fontWeight: FontWeight.w700),
+                  ),
+                ] else ...[
+                  const Icon(Icons.power_off, size: 84, color: Colors.red),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Power cut',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 28, fontWeight: FontWeight.w800),
+                  ),
+                  const SizedBox(height: 10),
+                  const Text(
+                    'The outlet was switched off for safety. Inspect the '
+                    'appliance, then reset to switch it back on.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.grey, height: 1.4),
+                  ),
+                ],
+                if (outlets.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    outlets,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.grey),
+                  ),
+                ],
+                if (_busy)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 12),
+                    child: Text(
+                      'Waiting for the WisePlug…',
+                      textAlign: TextAlign.center,
                     ),
-                  ],
+                  ),
+                if (_error != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 12),
+                    child: Text(
+                      _error!,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.red),
+                    ),
+                  ),
+                const SizedBox(height: 24),
+                Row(
+                  children: warning
+                      ? [
+                          _choice(
+                            'Turn Off Now',
+                            () => _send('TURN_OFF', (r) => r.isWarning),
+                          ),
+                          const SizedBox(width: 14),
+                          _choice(
+                            'Yes, Override',
+                            () => _send(
+                              'SMART_OVERRIDE',
+                              (r) => r.isWarning,
+                              fields: _override,
+                            ),
+                          ),
+                        ]
+                      : [
+                          _choice('Dismiss', widget.onDismiss),
+                          const SizedBox(width: 14),
+                          _choice(
+                            'Reset Safety',
+                            () => _send(
+                              'RESET_SAFETY',
+                              (r) => r.isWarning || r.isLockedOut,
+                            ),
+                            danger: true,
+                          ),
+                        ],
                 ),
-              ),
-              const SizedBox(height: 20),
-              _Countdown(
-                seconds: warning
-                    ? triggered
-                          .where((r) => r.isWarning)
-                          .map((r) => r.secondsRemaining(now))
-                          .reduce((a, b) => a < b ? a : b)
-                    : null,
-                locked: triggered.isNotEmpty && !warning,
-              ),
-              const SizedBox(height: 16),
-              for (final r in triggered)
-                Text(
-                  'Outlet ${r.outlet} · ${r.appliance} — '
-                  '${r.isWarning ? '${r.secondsRemaining(now)} s until lockout' : 'Locked out'}',
-                  textAlign: TextAlign.center,
-                ),
-              if (triggered.isEmpty) const Text('Waiting for outlet details…'),
-              const SizedBox(height: 8),
-              Text(
-                'Power draw: ${status?.powerDraw.toStringAsFixed(1) ?? '—'} W',
-                style: const TextStyle(color: Colors.grey),
-              ),
-              const SizedBox(height: 12),
-              const Text(
-                'Inspect the appliance before resetting. Reset switches the outlet back on; Turn Off Now cuts its power.',
-                style: TextStyle(fontSize: 11, color: Colors.grey),
-                textAlign: TextAlign.center,
-              ),
-              if (_busy) const Text('Waiting for ESP32 confirmation…'),
-              if (_error != null)
-                Text(_error!, style: const TextStyle(color: Colors.red)),
-            ],
+                if (warning)
+                  TextButton(
+                    onPressed: _busy ? null : widget.onDismiss,
+                    child: const Text('Dismiss'),
+                  ),
+              ],
+            ),
           ),
         ),
-        actions: [
-          if (warning)
-            FilledButton(
-              onPressed: _busy
-                  ? null
-                  : () => _send('TURN_OFF', (r) => r.isWarning),
-              child: const Text('Turn Off Now'),
-            ),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
-            onPressed: _busy
-                ? null
-                : () => _send(
-                    'RESET_SAFETY',
-                    (r) => r.isWarning || r.isLockedOut,
-                  ),
-            child: const Text('Reset Safety'),
-          ),
-          TextButton(
-            onPressed: _busy ? null : widget.onDismiss,
-            child: const Text('Dismiss'),
-          ),
-        ],
       );
     },
   );
+
+  Widget _choice(
+    String label,
+    VoidCallback onPressed, {
+    bool danger = false,
+  }) => Expanded(
+    child: FilledButton(
+      style: FilledButton.styleFrom(
+        backgroundColor: danger ? Colors.red : const Color(0xFFC9DDFB),
+        foregroundColor: danger ? Colors.white : Colors.black87,
+        padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 8),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+      ),
+      onPressed: _busy ? null : onPressed,
+      child: FittedBox(child: Text(label)),
+    ),
+  );
 }
 
-/// Large 60-second ring before the outlet is switched off automatically.
-class _Countdown extends StatelessWidget {
-  final int? seconds;
-  final bool locked;
-  const _Countdown({required this.seconds, required this.locked});
-
+class _Header extends StatelessWidget {
+  const _Header();
   @override
-  Widget build(BuildContext context) {
-    final s = seconds;
-    return SizedBox.square(
-      dimension: 132,
-      child: Stack(
-        alignment: Alignment.center,
-        children: [
-          SizedBox.expand(
-            child: TweenAnimationBuilder<double>(
-              tween: Tween(end: s == null ? 0 : s / 60),
-              duration: const Duration(milliseconds: 900),
-              builder: (context, value, _) => CircularProgressIndicator(
-                value: value,
-                strokeWidth: 10,
-                color: Colors.red,
-                backgroundColor: Colors.red.withValues(alpha: .12),
-              ),
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 12),
+    decoration: BoxDecoration(
+      color: const Color(0xFFFF1A1A),
+      borderRadius: BorderRadius.circular(16),
+    ),
+    child: const Column(
+      children: [
+        Icon(Icons.warning_rounded, color: Colors.white, size: 44),
+        SizedBox(height: 4),
+        FittedBox(
+          child: Text(
+            'WARNING',
+            style: TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w900,
+              fontSize: 30,
             ),
           ),
-          if (s != null)
-            Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  '$s',
-                  style: const TextStyle(
-                    fontSize: 48,
-                    fontWeight: FontWeight.w900,
-                    color: Colors.red,
-                    height: 1,
-                  ),
-                ),
-                const Text('seconds', style: TextStyle(color: Colors.grey)),
-              ],
-            )
-          else
-            Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  locked ? Icons.power_off : Icons.hourglass_empty,
-                  size: 40,
-                  color: Colors.red,
-                ),
-                Text(
-                  locked ? 'Power cut' : '—',
-                  style: const TextStyle(fontWeight: FontWeight.w700),
-                ),
-              ],
+        ),
+        FittedBox(
+          child: Text(
+            'Safety Limit Exceeded!',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 19,
+              fontWeight: FontWeight.w700,
             ),
-        ],
-      ),
-    );
-  }
+          ),
+        ),
+      ],
+    ),
+  );
 }

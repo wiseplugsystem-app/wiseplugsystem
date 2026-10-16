@@ -194,7 +194,8 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Live appliance'));
       await tester.pumpAndSettle();
-      expect(find.text('p1'), findsOneWidget);
+      expect(find.text('p1'), findsNothing); // the internal ID stays hidden
+      expect(find.text('Saved name'), findsOneWidget);
       expect(find.text('7'), findsOneWidget);
       expect(find.text('500.0 W'), findsNothing);
       expect(find.text('Peak power'), findsNothing);
