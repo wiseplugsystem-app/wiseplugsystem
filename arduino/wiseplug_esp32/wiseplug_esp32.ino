@@ -66,9 +66,11 @@ constexpr uint32_t DEFAULT_LIMIT_S = 30 * 60;
 // (appliance_instances.max_runtime_mins <= 10080).
 constexpr uint32_t MAX_CONFIRMED_LIMIT_S = 7 * 24 * 3600;
 constexpr uint64_t SENSOR_TIMEOUT_MS = 5000;
-// A recognition upload is retried this many times, then dropped (the run
-// simply keeps its current cutoff), so it never holds up the session log.
-constexpr uint32_t RECOGNITION_ATTEMPTS = 3;
+// A recognition upload that fails (e.g. Wi-Fi reconnecting) is retried every
+// RECOGNITION_RETRY_MS for as long as its run lasts; it is dropped once the run
+// ends or a later stage of the same run is waiting. Meanwhile the run keeps
+// its current (default) cutoff.
+constexpr uint64_t RECOGNITION_RETRY_MS = 5000;
 
 constexpr uint32_t MIN_SESSION_S = 10;           // shorter runs are not reported as usage
 constexpr float OVERRIDE_BUFFER = 0.20f;         // override: +20% safety buffer
@@ -105,7 +107,9 @@ struct Snapshot {
   SensorSample sensor = {};
   // The appliance on this outlet, as Supabase recognized it (empty until then).
   char activeName[64] = {}, activeProfileID[64] = {};   // name, appliance_instances.id
-  char recognition[24] = "NONE";  // NONE, RECOGNIZING, or recognize-appliance's status
+  // NONE; RECOGNIZING (measuring); PENDING (measured, Supabase has not answered
+  // yet); or recognize-appliance's status.
+  char recognition[24] = "NONE";
   bool confirmed = false;         // MATCHED_CONFIRMED: the appliance's own cutoff applies
   float steadyW = 0;              // this run's steady average power (anomaly trip)
   float peak = 0;
@@ -133,6 +137,7 @@ struct SocketChannel {
   // The run in progress (its sessionStartMono), 0 when none: read by the
   // Supabase task to drop uploads of runs that have already ended.
   std::atomic<uint64_t> runMono{0};
+  std::atomic<int> stageQueued{0};  // the latest stage queued for that run
   double sessionWh = 0;
   float lastPower = 0, sessionPeakCurrent = 0, sessionPeakPower = 0;
   uint64_t lowSince = 0;  // first of the consecutive readings below IDLE_W_THRESHOLD
@@ -279,6 +284,11 @@ void queueRecognition(SocketChannel& ch, int stage) {
   r.startEpoch = ch.sessionStartEpoch; r.startMono = ch.sessionStartMono;
   r.f = ch.rec.features(stage);
   if (stage == 2) ch.data.steadyW = r.f.avgPowerW;
+  // Measured; until Supabase answers, the app shows "Unknown appliance".
+  if (stage == 2 && strcmp(ch.data.recognition, "RECOGNIZING") == 0) {
+    strlcpy(ch.data.recognition, "PENDING", sizeof(ch.data.recognition));
+  }
+  ch.stageQueued = stage;
   Serial.printf("[%s] Stage %d: %.1f W, PF %.2f, %.1f V, peak x%.2f, settled %.0f s%s%s (%lu readings)\n",
                 ch.outlet, stage, r.f.avgPowerW, r.f.avgPf, r.f.avgVoltageV, r.f.startupPeakRatio,
                 r.f.settlingTimeS, r.f.hasVariation ? ", variation" : "", r.f.unstable ? ", UNSTABLE" : "",
@@ -290,7 +300,7 @@ void queueRecognition(SocketChannel& ch, int stage) {
 void endSession(SocketChannel& ch, const char* reason = "ENDED") {
   ch.rec.cancel();
   reportSession(ch, reason);
-  ch.runMono = 0;
+  ch.runMono = 0; ch.stageQueued = 0;
   auto& d = ch.data;
   d.activeName[0] = d.activeProfileID[0] = 0;
   strlcpy(d.recognition, "NONE", sizeof(d.recognition));
@@ -424,7 +434,7 @@ void handleSensor(SocketChannel& ch, const SensorSample& sample, uint64_t now) {
     strlcpy(d.recognition, "RECOGNIZING", sizeof(d.recognition));
     ch.sessionOpen = true; ch.lowSince = 0;
     ch.sessionStartMono = now; ch.sessionStartEpoch = d.startEpoch; ch.lastEnergySample = now;
-    ch.runMono = now;
+    ch.runMono = now; ch.stageQueued = 0;
     ch.sessionWh = 0; ch.lastPower = sample.power;
     ch.sessionPeakCurrent = sample.current; ch.sessionPeakPower = sample.power;
     ch.rec.begin(now, ch.standbyW);
@@ -686,8 +696,12 @@ int64_t datedAt(int64_t at, uint64_t mono) {
   int64_t nowMs = epochMs();
   return nowMs ? nowMs - int64_t(monotonicMs() - mono) : 0;
 }
-// The run that [startMono] belongs to is still in progress on [outlet].
-bool runInProgress(int outlet, uint64_t startMono) { return outlets[outlet].runMono.load() == startMono; }
+// The report is still worth sending: its run is in progress on its outlet
+// and no later stage of that run is waiting behind it.
+bool stillNeeded(const RecognitionReport& r) {
+  const auto& ch = outlets[r.outlet];
+  return ch.runMono.load() == r.startMono && ch.stageQueued.load() <= r.stage;
+}
 
 // recognize-appliance: one stage of a run. Answers come back to loop() through
 // recognitionReplies. Returns false to retry later.
@@ -725,7 +739,6 @@ bool sendRecognition(const RecognitionReport& r) {
 // up the others: safety reports first, then recognition, then session logs.
 void sendSupabase() {
   static uint64_t safetyRetryAt = 0, recognitionRetryAt = 0, sessionRetryAt = 0;
-  static uint32_t recognitionAttempts = 0;
   uint64_t now = monotonicMs();
   SafetyReport r;
   while (now >= safetyRetryAt && xQueuePeek(safetyReports, &r, 0) == pdTRUE) {
@@ -745,16 +758,11 @@ void sendSupabase() {
   // Before the session log of the same run, which closes its outlet session.
   RecognitionReport f;
   while (monotonicMs() >= recognitionRetryAt && xQueuePeek(recognitionReports, &f, 0) == pdTRUE) {
-    // A run that has ended no longer needs a cutoff: its answer would be useless.
-    if (!runInProgress(f.outlet, f.startMono) || sendRecognition(f)) {
-      xQueueReceive(recognitionReports, &f, 0); recognitionAttempts = 0; continue;
-    }
-    // Unreachable or failing: the run keeps its current (default) cutoff.
-    if (++recognitionAttempts >= RECOGNITION_ATTEMPTS) {
-      Serial.printf("[%s] Stage %d not delivered: keeping the default cutoff\n", outlets[f.outlet].outlet, f.stage);
-      xQueueReceive(recognitionReports, &f, 0); recognitionAttempts = 0; continue;
-    }
-    recognitionRetryAt = monotonicMs() + 10000;
+    // A run that has ended needs no cutoff, and Stage 2 replaces Stage 1.
+    if (!stillNeeded(f) || sendRecognition(f)) { xQueueReceive(recognitionReports, &f, 0); continue; }
+    // Unreachable or failing: the run keeps its current (default) cutoff; try again soon.
+    Serial.printf("[%s] Stage %d not delivered yet, retrying\n", outlets[f.outlet].outlet, f.stage);
+    recognitionRetryAt = monotonicMs() + RECOGNITION_RETRY_MS;
     break;
   }
   SessionSummary s;
