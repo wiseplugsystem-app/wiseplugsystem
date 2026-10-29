@@ -46,3 +46,9 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+# Supabase CLI and credentials
+supabase/.temp/
+supabase/.branches/
+supabase/functions/.env
+*service-account*.json

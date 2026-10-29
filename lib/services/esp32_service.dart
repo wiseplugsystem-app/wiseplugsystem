@@ -8,6 +8,7 @@ import 'dart:convert';
 import '../models/activity_event.dart';
 import '../models/esp32_data.dart';
 import '../models/gadget_status.dart';
+import '../models/telemetry.dart';
 import 'device_binding.dart';
 import 'wifi_provisioning.dart';
 
@@ -221,6 +222,21 @@ class Esp32Service {
 
   Future<void> clearActivity() => database.ref('activity_log').remove();
 
+  /// One outlet's live readings, pushed over the RTDB WebSocket each time the
+  /// ESP32 writes them (every 3 s). The app only reads: it never measures.
+  Stream<TelemetryReading> streamLiveTelemetry(OutletChannel channel) =>
+      database
+          .ref('${DeviceBinding.liveTelemetryPath}/${channel.key}')
+          .onValue
+          .where((event) => event.snapshot.value is Map)
+          .map((e) => TelemetryReading.fromMap(channel, e.snapshot.value));
+
+  /// Both outlets in one stream, for the dashboard and total power.
+  Stream<OutletTelemetry> streamAllLiveTelemetry() => database
+      .ref(DeviceBinding.liveTelemetryPath)
+      .onValue
+      .map((event) => OutletTelemetry.fromMap(event.snapshot.value));
+
   /// Makes the ESP32 forget a learned appliance, then removes its saved name.
   Future<void> deleteProfile(
     OutletReading reading,
@@ -234,6 +250,31 @@ class Esp32Service {
     await database
         .ref(
           'appliance_registrations/OUTLET_${profile.outlet}/${profile.profileID}',
+        )
+        .remove();
+  }
+
+  /// "This is one of my appliances": the plug folds [source] (an appliance it
+  /// just learned) into the registered [target], widening the target's
+  /// recognition range, so the next time it draws like this it is recognized
+  /// as [target]. [reading] is the outlet the command is sent through.
+  Future<void> mergeProfile(
+    OutletReading reading,
+    LearnedAppliance source,
+    LearnedAppliance target,
+  ) async {
+    if (source.profileID == target.profileID) {
+      throw ArgumentError('Choose a different appliance to merge into.');
+    }
+    await command(
+      reading,
+      'MERGE_PROFILE',
+      fields: {'profileID': target.profileID, 'sourceID': source.profileID},
+    );
+    // The source no longer exists on the plug; drop any name saved for it.
+    await database
+        .ref(
+          'appliance_registrations/OUTLET_${source.outlet}/${source.profileID}',
         )
         .remove();
   }
@@ -304,7 +345,20 @@ class Esp32Service {
         ? reading.isFresh(now) && reading.sessionID.isNotEmpty
         : reading.canCommand(now);
     if (!allowed) {
-      throw StateError('Fresh, unlocked device state is required.');
+      // Say which check failed: each one points at a different fault.
+      final updated = reading.lastUpdated;
+      throw StateError(
+        updated == null || updated.year < 2000
+            ? 'Outlet ${reading.outlet}: the WisePlug has not synced its clock '
+                  'with internet time yet. Wait a minute and try again.'
+            : !reading.isFresh(now)
+            ? 'Outlet ${reading.outlet}: the WisePlug last reported '
+                  '${now.difference(updated).inSeconds} s ago. Check that it is '
+                  'online, then try again.'
+            : reading.sessionID.isEmpty
+            ? 'Outlet ${reading.outlet}: the WisePlug has not reported a session yet.'
+            : 'Outlet ${reading.outlet} is locked. Use Reset Safety.',
+      );
     }
     // Interlock (also enforced by the ESP32): an empty outlet is not switched
     // off. "Turn Off Now" during a warning always applies.

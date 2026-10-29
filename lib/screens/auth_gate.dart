@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 
 import '../services/esp32_service.dart';
 import '../services/auth_error.dart';
+import '../services/supabase_backend.dart';
 import '../widgets/wiseplug_logo.dart';
 
 class AuthGate extends StatelessWidget {
@@ -274,8 +275,17 @@ class _NotificationSessionState extends State<_NotificationSession> {
   StreamSubscription<String>? _tokens;
   StreamSubscription<RemoteMessage>? _messages;
   late final String _uid = FirebaseAuth.instance.currentUser!.uid;
-  Future<void> _saveToken(String token) =>
-      Esp32Service().database.ref('users/$_uid/fcmTokens/$token').set(true);
+  final _supabase = SupabaseBackend();
+  Future<void> _saveToken(String token) async {
+    await Esp32Service().database.ref('users/$_uid/fcmTokens/$token').set(true);
+    if (!SupabaseBackend.configured) return;
+    try {
+      await _supabase.savePushToken(token); // for evaluate-safety-alert pushes
+    } catch (error) {
+      debugPrint('Supabase push token not saved: $error');
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -283,6 +293,14 @@ class _NotificationSessionState extends State<_NotificationSession> {
   }
 
   Future<void> _initialize() async {
+    // Same Firebase account in Supabase: claim the device, get the RLS claim.
+    if (SupabaseBackend.configured) {
+      try {
+        await _supabase.linkAccount();
+      } catch (error) {
+        debugPrint('Supabase link failed; history is unavailable: $error');
+      }
+    }
     if (kIsWeb ||
         (defaultTargetPlatform != TargetPlatform.android &&
             defaultTargetPlatform != TargetPlatform.iOS)) {

@@ -9,6 +9,7 @@ class DeviceBinding {
 
   static String get statusPath => 'devices/$gadgetId/status';
   static String get wifiConfigPath => 'devices/$gadgetId/wifiConfig';
+  static String get liveTelemetryPath => 'devices/$gadgetId/live_telemetry';
 
   /// Call once at startup before any database access.
   static Future<String> ensureBound([SharedPreferences? prefs]) async {

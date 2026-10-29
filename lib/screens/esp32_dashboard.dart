@@ -282,6 +282,10 @@ class Esp32ProfileEditor extends StatefulWidget {
 
   /// Lower-cased names of the user's other appliances; reused names are refused.
   final Set<String> takenNames;
+
+  /// Registered appliances this new reading may really be (e.g. a charger
+  /// drawing more or less than when it was saved). Picking one merges.
+  final List<LearnedAppliance> existing;
   const Esp32ProfileEditor({
     super.key,
     required this.service,
@@ -289,6 +293,7 @@ class Esp32ProfileEditor extends StatefulWidget {
     required this.profile,
     this.registration = false,
     this.takenNames = const {},
+    this.existing = const [],
   });
   @override
   State<Esp32ProfileEditor> createState() => Esp32ProfileEditorState();
@@ -308,6 +313,25 @@ class Esp32ProfileEditorState extends State<Esp32ProfileEditor> {
   );
   bool _busy = false;
   String? _error;
+  LearnedAppliance? _sameAs; // registration: "it's one of my appliances"
+
+  Future<void> _merge() async {
+    final target = _sameAs;
+    if (target == null) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await widget.service.mergeProfile(widget.reading, widget.profile, target);
+      if (mounted) _closeSelf(true);
+    } catch (error) {
+      if (mounted) setState(() => _error = '$error');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   @override
   void dispose() {
     _name.dispose();
@@ -395,6 +419,39 @@ class Esp32ProfileEditorState extends State<Esp32ProfileEditor> {
               border: OutlineInputBorder(),
             ),
           ),
+          // A charger or similar may draw differently than when it was saved:
+          // let the user say which appliance it is instead of saving a copy.
+          if (widget.registration && widget.existing.isNotEmpty) ...[
+            const SizedBox(height: 20),
+            const Text('Or is it one of your saved appliances?'),
+            const SizedBox(height: 8),
+            DropdownButtonFormField<LearnedAppliance>(
+              initialValue: _sameAs,
+              isExpanded: true,
+              decoration: const InputDecoration(
+                labelText: 'Saved appliance',
+                border: OutlineInputBorder(),
+              ),
+              items: [
+                for (final p in widget.existing)
+                  DropdownMenuItem(value: p, child: Text(p.name)),
+              ],
+              onChanged: _busy ? null : (p) => setState(() => _sameAs = p),
+            ),
+            const SizedBox(height: 8),
+            OutlinedButton(
+              onPressed: _busy || _sameAs == null ? null : _merge,
+              child: Text(
+                _sameAs == null
+                    ? 'Same appliance'
+                    : 'Yes, it is ${_sameAs!.name}',
+              ),
+            ),
+            const Text(
+              'WisePlug will recognize it at this power level from now on.',
+              style: TextStyle(color: Colors.grey, fontSize: 12),
+            ),
+          ],
           if (!widget.registration) ...[
             const SizedBox(height: 16),
             Text(

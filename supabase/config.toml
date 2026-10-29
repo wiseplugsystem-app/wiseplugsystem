@@ -1,0 +1,22 @@
+# Supabase CLI settings for the WisePlug project (npx supabase ...).
+project_id = "wiseplug"
+
+# Every function checks its own caller (device key or Firebase ID token), so
+# the gateway's Supabase-JWT check is turned off.
+[functions.match-signature]
+verify_jwt = false
+
+[functions.log-session]
+verify_jwt = false
+
+[functions.evaluate-safety-alert]
+verify_jwt = false
+
+[functions.link-account]
+verify_jwt = false
+
+[functions.identify-appliance]
+verify_jwt = false
+
+[functions.confirm-appliance]
+verify_jwt = false

@@ -1,0 +1,4 @@
+{
+  "version": null,
+  "note": "Placeholder. Replace with embedder.json exported by training/wiseplug_embedding.ipynb, then redeploy identify-appliance and confirm-appliance. Until then identification uses the feature k-NN."
+}

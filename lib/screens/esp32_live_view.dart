@@ -245,6 +245,10 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
             profile: profile,
             registration: true,
             takenNames: _takenNames(except: profile),
+            existing: [
+              for (final p in _profiles)
+                if (!p.needsRegistration && p.profileID != profile.profileID) p,
+            ],
           ),
         );
         if (saved == true && mounted) {

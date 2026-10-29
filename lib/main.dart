@@ -11,12 +11,15 @@ import 'screens/profiles_tab.dart';
 import 'screens/settings_tab.dart';
 import 'screens/appliance_registration_screen.dart';
 import 'services/device_binding.dart';
+import 'services/supabase_backend.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
   await DeviceBinding.ensureBound();
+  // Permanent store (sessions, alerts, profiles); skipped unless configured.
+  await SupabaseBackend.initialize();
 
   runApp(const WisePlugApp());
 }
