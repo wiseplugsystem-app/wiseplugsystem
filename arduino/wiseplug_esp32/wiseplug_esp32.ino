@@ -1,7 +1,6 @@
 // WisePlug ESP32 firmware: two PZEM-004T v3 meters, two relays, Firebase
 // Realtime Database over REST. Matches the Flutter app's protocol:
 //   telemetry_logs/outlet_A|B              live state, read by the app
-//   appliance_profiles/OUTLET_A|B/<id>     learned appliance catalog
 //   commands/outlet_A|B -> command_results confirmed app commands
 //   alerts/<alertID>                       push-notification records
 //   devices/gadget-1/status, /wifiConfig   gadget summary, Wi-Fi provisioning
@@ -10,6 +9,13 @@
 //   devices/gadget-1/live_telemetry/outlet_1|2   sanitized readings, every 3 s
 // Optional (SUPABASE_FUNCTIONS_URL in secrets.h): session summaries and
 // safety reports are POSTed to Supabase Edge Functions (supabase/functions).
+//
+// Appliance recognition is rule-based and happens in Supabase
+// (recognize-appliance). The plug measures each run (recognition_window.h),
+// sends a Stage 1 and a Stage 2 summary, and applies the cutoff it gets back.
+// Until an appliance is MATCHED_CONFIRMED, and whenever Supabase cannot be
+// reached, the run uses the conservative DEFAULT_LIMIT_S. The plug no longer
+// matches appliances itself.
 //
 // Libraries: PZEM004Tv30, ArduinoJson 7 (WebServer and DNSServer ship with the ESP32 core).
 #include <PZEM004Tv30.h>
@@ -30,7 +36,7 @@
 #include <time.h>
 #include "secrets.h"        // FIREBASE_HOST, FIREBASE_AUTH. Never commit or share.
 #include "safety_state.h"   // shared state machine, unit-tested in test/
-#include "signature_window.h"  // steady-state features for identify-appliance
+#include "recognition_window.h"  // per-run features for recognize-appliance
 
 // ==========================================
 // CONFIGURATION
@@ -46,29 +52,32 @@ constexpr int PZEM_A_RX = 32, PZEM_A_TX = 33, PZEM_B_RX = 25, PZEM_B_TX = 26;
 constexpr int RELAY_A_PIN = 18, RELAY_B_PIN = 19;
 constexpr int BUTTON_A_PIN = 4, BUTTON_B_PIN = 5;  // optional reset buttons to GND
 
-constexpr float START_W_THRESHOLD = 3.5f, IDLE_W_THRESHOLD = 1.5f;
-constexpr float POWER_TOLERANCE = 0.15f, CURRENT_TOLERANCE = 0.20f, PF_TOLERANCE = 0.10f;
-// Recognition ignores the first SETTLE_MS (motor start-up, inrush), then
-// averages SAMPLE_TIME_MS of steady load, so one appliance yields one signature.
-// 1 s + 1.5 s: recognized about 2.5 s after switching on (the older sketch took
-// 1.5 s but measured during the surge, which mis-learned motor appliances).
-constexpr uint32_t SETTLE_MS = 1000, SAMPLE_TIME_MS = 1500, MAX_APPLIANCES = 20;
-constexpr uint32_t DEFAULT_LIMIT_S = 30 * 60;  // unrecognized appliances (catalog full)
+// Plug-in: power above START_W_THRESHOLD. Unplug / switched off: power below
+// IDLE_W_THRESHOLD for UNPLUG_MS in a row (a single low reading is noise).
+constexpr float START_W_THRESHOLD = 2.0f, IDLE_W_THRESHOLD = 1.5f;
+constexpr uint64_t UNPLUG_MS = 3000;
+// SAFETY: the conservative cutoff for every run that is not MATCHED_CONFIRMED:
+// before recognition, for UNKNOWN / AMBIGUOUS / SAME_TYPE_IN_USE /
+// MATCHED_PROVISIONAL loads, and whenever Supabase cannot be reached. It is
+// also the ceiling for any server cutoff of an unconfirmed load, so keep it at
+// or above recognition_config.default_cutoff_minutes (30).
+constexpr uint32_t DEFAULT_LIMIT_S = 30 * 60;
+// A confirmed appliance's cutoff comes from Supabase, at most 7 days
+// (appliance_instances.max_runtime_mins <= 10080).
+constexpr uint32_t MAX_CONFIRMED_LIMIT_S = 7 * 24 * 3600;
 constexpr uint64_t SENSOR_TIMEOUT_MS = 5000;
+// A recognition upload is retried this many times, then dropped (the run
+// simply keeps its current cutoff), so it never holds up the session log.
+constexpr uint32_t RECOGNITION_ATTEMPTS = 3;
 
-// Learning phase: each appliance's first LEARNING_SESSIONS completed uses are
-// recorded without any warning. Their average duration then becomes its
-// baseline, and later sessions are limited to baseline x LEARNED_MARGIN.
-// HARD_CAP_S is the per-appliance backstop ("safety ceiling", editable): the
-// only limit while learning, so a forgotten appliance is still switched off.
-constexpr uint32_t LEARNING_SESSIONS = 7, HARD_CAP_S = 4 * 3600;
-constexpr uint32_t MIN_SESSION_S = 10, MIN_LEARNED_LIMIT_S = 5 * 60;
-constexpr float LEARNED_MARGIN = 1.5f, OVERRIDE_BUFFER = 0.20f;  // override: +20% safety buffer
+constexpr uint32_t MIN_SESSION_S = 10;           // shorter runs are not reported as usage
+constexpr float OVERRIDE_BUFFER = 0.20f;         // override: +20% safety buffer
 // Electrical trips lock the outlet out at once: no countdown, no override.
 // MAX_CURRENT_A is the hardware rating (relay/SSR contacts, wiring, socket);
-// lower it to match the weakest part. A learned appliance drawing
-// ANOMALY_FACTOR x its signature for ANOMALY_SAMPLES readings in a row
-// (~0.6 s, so a motor's start-up surge does not count) is a fault.
+// lower it to match the weakest part. A CONFIRMED appliance drawing
+// ANOMALY_FACTOR x its own steady power (measured in this run) for
+// ANOMALY_SAMPLES readings in a row (~0.6 s, so a short surge does not count)
+// is a fault.
 constexpr float MAX_CURRENT_A = 10.0f, ANOMALY_FACTOR = 2.0f;
 constexpr uint32_t ANOMALY_SAMPLES = 3;
 
@@ -81,49 +90,10 @@ constexpr float NOISE_W = 0.5f, MIN_HZ = 45.0f, MAX_HZ = 65.0f;
 // ==========================================
 // DATA STRUCTURES
 // ==========================================
-struct ApplianceSignature {
-  char name[64] = {}, profileID[64] = {};
-  float steadyPower = 0, peakPower = 0, current = 0, voltage = 0, pf = 0;
-  uint32_t maxRunTime = HARD_CAP_S, safetyCeilingDuration = HARD_CAP_S, totalSessions = 0;
-  int64_t registeredAt = 0;
-  // Learning: durations (s) of the last completed uses, oldest first.
-  uint32_t history[LEARNING_SESSIONS] = {};
-  uint32_t sessions = 0, baselineSec = 0;  // completed uses; learned average
-  uint8_t historyCount = 0;
-  bool learned = false;
-  // Everything this appliance has been seen drawing (steady readings of
-  // normal uses, and of profiles merged into it). Recognition accepts a scan
-  // inside this range plus the tolerance bands, so an appliance whose draw
-  // varies (a charging laptop) is still recognized once registered.
-  float minPower = 0, maxPower = 0, minCurrent = 0, maxCurrent = 0, minPf = 0, maxPf = 0;
-};
-// Previous stored layout ("profiles_v4"): the same without the observed range.
-struct ApplianceSignatureV4 {
-  char name[64], profileID[64];
-  float steadyPower, peakPower, current, voltage, pf;
-  uint32_t maxRunTime, safetyCeilingDuration, totalSessions;
-  int64_t registeredAt;
-  uint32_t history[LEARNING_SESSIONS];
-  uint32_t sessions, baselineSec;
-  uint8_t historyCount;
-  bool learned;
-};
-// Older stored layout ("profiles_v3"), migrated once into learning mode.
-struct ApplianceSignatureV3 {
-  char name[64], profileID[64];
-  float steadyPower, peakPower, current, voltage, pf;
-  uint32_t maxRunTime, safetyCeilingDuration, totalSessions;
-  int64_t registeredAt;
-};
-// Record layout written by the previous sketch ("app_N" keys), migrated once.
-struct LegacySignature {
-  char name[32]; float steadyPower, peakPower, current, voltage, pf; int safetyLimitMinutes;
-};
 struct SensorSample { float power, current, voltage, pf, energy, frequency; bool valid; uint64_t captured; };
 struct Command {
-  char id[64] = {}, session[40] = {}, type[24] = {}, alertID[80] = {}, profileID[64] = {}, name[64] = {};
-  char sourceID[64] = {};  // MERGE_PROFILE: the profile folded into profileID
-  uint32_t revision = 0, maxRunTime = 0, ceiling = 0;
+  char id[64] = {}, session[40] = {}, type[24] = {}, alertID[80] = {};
+  uint32_t revision = 0;
   int64_t expires = 0;
 };
 struct AlertRecord {
@@ -133,12 +103,11 @@ struct AlertRecord {
 struct Snapshot {
   SafetyState safety;
   SensorSample sensor = {};
-  ApplianceSignature profiles[MAX_APPLIANCES];
-  uint32_t count = 0, profilesVersion = 0;
-  // Running appliance: index into outlets[activeOwner]'s catalog. Appliances
-  // are portable, so it may have been learned on the other outlet.
-  int activeID = -1, activeOwner = -1;
-  char activeName[64] = {}, activeProfileID[64] = {};  // filled for publishing
+  // The appliance on this outlet, as Supabase recognized it (empty until then).
+  char activeName[64] = {}, activeProfileID[64] = {};   // name, appliance_instances.id
+  char recognition[24] = "NONE";  // NONE, RECOGNIZING, or recognize-appliance's status
+  bool confirmed = false;         // MATCHED_CONFIRMED: the appliance's own cutoff applies
+  float steadyW = 0;              // this run's steady average power (anomaly trip)
   float peak = 0;
   int64_t startEpoch = 0, capturedEpoch = 0;
   uint64_t capturedMono = 0;
@@ -148,28 +117,27 @@ struct Snapshot {
 };
 struct SocketChannel {
   Preferences prefs;
-  const char *ns, *outlet, *catalog, *legacyCatalog;
+  const char *ns, *outlet;
   int relay, button;
   Snapshot data;
-  ApplianceSignature pending;
-  uint32_t samples = 0, anomalySamples = 0;
+  uint32_t anomalySamples = 0;
   uint64_t buttonChanged = 0, lastSnapshot = 0;
   bool rawButton = true, stableButton = true, storageOK = true;
   QueueHandle_t sensors, commands, snapshots;
   // Set by the network task: the lockSeq the app unlocked (0 = none).
   std::atomic<uint32_t> unlockSeq{0};
   // Usage of the run in progress, reported to Supabase when it ends.
-  bool sessionOpen = false, sessionCounted = false, tripping = false;
+  bool sessionOpen = false, tripping = false;
   int64_t sessionStartEpoch = 0;
   uint64_t sessionStartMono = 0, lastEnergySample = 0;
+  // The run in progress (its sessionStartMono), 0 when none: read by the
+  // Supabase task to drop uploads of runs that have already ended.
+  std::atomic<uint64_t> runMono{0};
   double sessionWh = 0;
   float lastPower = 0, sessionPeakCurrent = 0, sessionPeakPower = 0;
-  // Lowest/highest steady readings of this run (sampling window and Active),
-  // folded into the appliance's observed range when the use ends normally.
-  bool seenAny = false;
-  float seenMinP = 0, seenMaxP = 0, seenMinI = 0, seenMaxI = 0, seenMinPf = 0, seenMaxPf = 0;
-  // First 35 s of the run, summarised for identify-appliance (Supabase).
-  SignatureWindow window;
+  uint64_t lowSince = 0;  // first of the consecutive readings below IDLE_W_THRESHOLD
+  // The run's measurement for recognize-appliance (Stage 1 and Stage 2).
+  RecognitionWindow rec;
   float standbyW = 0;  // smoothed draw while idle (an appliance's standby)
 };
 
@@ -198,40 +166,35 @@ QueueHandle_t notices;
 // in a queue while offline; each is sent once, as a summary, never per tick.
 struct SessionSummary {
   int outlet = 0;
-  char profileID[64] = {}, name[64] = {}, reason[16] = {};
+  char name[64] = {}, reason[16] = {};
   int64_t startEpoch = 0, endEpoch = 0;
   uint64_t endMono = 0;
-  uint32_t durationS = 0, sessionCount = 0, baselineS = 0, limitS = 0;
+  uint32_t durationS = 0, limitS = 0;
   float energyWh = 0, peakCurrent = 0, peakPower = 0;
-  float sigPower = 0, sigCurrent = 0, sigPf = 0;  // firmware signature, mirrored to Postgres
-  bool learned = false, counted = false;
 };
 struct SafetyReport {
   int outlet = 0;
-  char eventID[88] = {}, type[24] = {}, profileID[64] = {}, name[64] = {};
-  uint32_t runtimeS = 0, limitS = 0, baselineS = 0, sessionCount = 0;
+  char eventID[88] = {}, type[24] = {}, name[64] = {};
+  uint32_t runtimeS = 0, limitS = 0;
   float power = 0, current = 0;
-  bool learned = false;
   int64_t at = 0;
   uint64_t mono = 0;
 };
-// A run's steady-state features, and the server's answer for that run.
-struct FeatureReport {
-  int outlet = 0;
+// One stage of a run's measurement for recognize-appliance, and its answer.
+struct RecognitionReport {
+  int outlet = 0, stage = 0;
   char eventID[88] = {};
   int64_t startEpoch = 0;
   uint64_t startMono = 0;
-  SignatureFeatures f = {};
-  SignatureSignal signal = {};
-  float standbyW = 0;
+  RecFeatures f;
 };
-struct CutoffReply {
-  int outlet = 0;
+struct RecognitionReply {
+  int outlet = 0, stage = 0;
   uint64_t startMono = 0;  // which run it is for
   uint32_t cutoffS = 0;
-  char outcome[12] = {};
+  char status[24] = {}, applianceID[64] = {}, name[64] = {};
 };
-QueueHandle_t sessionReports, safetyReports, featureReports, cutoffReplies;
+QueueHandle_t sessionReports, safetyReports, recognitionReports, recognitionReplies;
 
 // ==========================================
 // TIME HELPERS (never block waiting for NTP)
@@ -262,15 +225,13 @@ bool persistSafety(SocketChannel& ch) {
   applyRelay(ch);
   return ok;
 }
-ApplianceSignature* activeProfile(SocketChannel& ch) {
-  auto& d = ch.data;
-  if (d.activeID < 0 || d.activeOwner < 0) return nullptr;
-  auto& owner = outlets[d.activeOwner].data;
-  return d.activeID < int(owner.count) ? &owner.profiles[d.activeID] : nullptr;
+const char* activeProfileID(SocketChannel& ch) { return ch.data.activeProfileID; }
+const char* activeName(SocketChannel& ch) {
+  return ch.data.activeName[0] ? ch.data.activeName : "Unknown appliance";
 }
-const char* activeProfileID(SocketChannel& ch) {
-  auto* p = activeProfile(ch);
-  return p ? p->profileID : "";
+// The cutoff the running session has now (seconds from its start).
+uint32_t currentLimitS(const SafetyState& s) {
+  return s.deadline > s.started ? uint32_t((s.deadline - s.started) / 1000) : 0;
 }
 void logEvent(SocketChannel& ch, const char* type, const char* profileID = "", const char* detail = "") {
   Event e;
@@ -279,21 +240,16 @@ void logEvent(SocketChannel& ch, const char* type, const char* profileID = "", c
   e.outlet = int(&ch - outlets); e.at = epochMs();
   if (events) xQueueSend(events, &e, 0);  // full queue: drop rather than block safety
 }
-uint32_t sessionLimit(const ApplianceSignature* p);  // defined with the learning logic
-void ensureRange(ApplianceSignature& p);             // defined with the matching logic
-// Supabase safety report for the running appliance (queued; sent by the network task).
+// Supabase safety report for the running appliance (queued; sent by the Supabase task).
 void reportSafety(SocketChannel& ch, const char* type, const char* eventID, float power, float current) {
   if (!safetyReports) return;
   SafetyReport r;
-  auto* p = activeProfile(ch);
   uint64_t now = monotonicMs();
   r.outlet = int(&ch - outlets);
   strlcpy(r.type, type, sizeof(r.type)); strlcpy(r.eventID, eventID, sizeof(r.eventID));
-  strlcpy(r.profileID, p ? p->profileID : "", sizeof(r.profileID));
-  strlcpy(r.name, p ? p->name : "Unknown appliance", sizeof(r.name));
-  if (p) { r.learned = p->learned; r.baselineS = p->baselineSec; r.sessionCount = p->sessions; }
+  strlcpy(r.name, activeName(ch), sizeof(r.name));
   r.runtimeS = ch.sessionOpen ? uint32_t((now - ch.sessionStartMono) / 1000) : 0;
-  r.limitS = sessionLimit(p);
+  r.limitS = currentLimitS(ch.data.safety);
   r.power = power; r.current = current; r.at = epochMs(); r.mono = now;
   xQueueSend(safetyReports, &r, 0);  // full queue: drop rather than block safety
 }
@@ -306,39 +262,39 @@ void reportSession(SocketChannel& ch, const char* reason) {
   uint32_t seconds = uint32_t((now - ch.sessionStartMono) / 1000);
   if (!sessionReports || (seconds < MIN_SESSION_S && strcmp(reason, "LOCKED_OUT") != 0)) return;
   SessionSummary s;
-  auto* p = activeProfile(ch);
   s.outlet = int(&ch - outlets);
   strlcpy(s.reason, reason, sizeof(s.reason));
-  strlcpy(s.profileID, p ? p->profileID : "", sizeof(s.profileID));
-  strlcpy(s.name, p ? p->name : "Unknown appliance", sizeof(s.name));
-  if (p) {
-    s.sessionCount = p->sessions; s.baselineS = p->baselineSec; s.learned = p->learned;
-    s.sigPower = p->steadyPower; s.sigCurrent = p->current; s.sigPf = p->pf;
-  }
-  s.limitS = sessionLimit(p);
+  strlcpy(s.name, activeName(ch), sizeof(s.name));
+  s.limitS = currentLimitS(ch.data.safety);
   s.startEpoch = ch.sessionStartEpoch; s.endEpoch = epochMs(); s.endMono = now; s.durationS = seconds;
   s.energyWh = float(ch.sessionWh); s.peakCurrent = ch.sessionPeakCurrent; s.peakPower = ch.sessionPeakPower;
-  s.counted = ch.sessionCounted;
   xQueueSend(sessionReports, &s, 0);
 }
-// Queues the run's signature for identify-appliance once its window closes.
-void queueFeatures(SocketChannel& ch) {
-  if (!featureReports || !ch.sessionOpen) return;
-  FeatureReport r;
-  r.outlet = int(&ch - outlets);
+// Queues one stage of the run's measurement for recognize-appliance. The
+// event ID (boot session + outlet + start time) makes retries idempotent.
+void queueRecognition(SocketChannel& ch, int stage) {
+  RecognitionReport r;
+  r.outlet = int(&ch - outlets); r.stage = stage;
   snprintf(r.eventID, sizeof(r.eventID), "%s_%s_%llu", sessionID, ch.outlet, (unsigned long long)ch.sessionStartMono);
   r.startEpoch = ch.sessionStartEpoch; r.startMono = ch.sessionStartMono;
-  r.f = ch.window.features(); r.signal = ch.window.signal; r.standbyW = ch.standbyW;
-  xQueueSend(featureReports, &r, 0);  // full queue: drop rather than block safety
-  Serial.printf("[%s] Signature: %.1f W, %.3f A, PF %.2f, Q %.1f var, cv %.3f, peak x%.2f (%lu readings, signal %lu s)\n",
-                ch.outlet, r.f.power, r.f.current, r.f.pf, r.f.reactive, r.f.cv, r.f.peakRatio,
-                (unsigned long)r.f.readings, (unsigned long)r.signal.n);
+  r.f = ch.rec.features(stage);
+  if (stage == 2) ch.data.steadyW = r.f.avgPowerW;
+  Serial.printf("[%s] Stage %d: %.1f W, PF %.2f, %.1f V, peak x%.2f, settled %.0f s%s%s (%lu readings)\n",
+                ch.outlet, stage, r.f.avgPowerW, r.f.avgPf, r.f.avgVoltageV, r.f.startupPeakRatio,
+                r.f.settlingTimeS, r.f.hasVariation ? ", variation" : "", r.f.unstable ? ", UNSTABLE" : "",
+                (unsigned long)r.f.readings);
+  // Without Supabase (or a full queue) the run simply keeps the default cutoff.
+  if (recognitionReports) xQueueSend(recognitionReports, &r, 0);
 }
 // Every way a run ends comes through here, so each one is reported once.
 void endSession(SocketChannel& ch, const char* reason = "ENDED") {
-  ch.window.cancel();  // a run shorter than the window is not identified
+  ch.rec.cancel();
   reportSession(ch, reason);
-  ch.data.activeID = ch.data.activeOwner = -1; ch.data.peak = 0;
+  ch.runMono = 0;
+  auto& d = ch.data;
+  d.activeName[0] = d.activeProfileID[0] = 0;
+  strlcpy(d.recognition, "NONE", sizeof(d.recognition));
+  d.confirmed = false; d.steadyW = 0; d.peak = 0;
 }
 void lock(SocketChannel& ch) {
   if (ch.data.safety.state == SocketState::Warning && !ch.tripping) {
@@ -351,40 +307,24 @@ void lock(SocketChannel& ch) {
   endSession(ch, "LOCKED_OUT"); persistSafety(ch);
   Serial.printf("[%s] LOCKED OUT, relay off\n", ch.outlet);
 }
-// Keys left by earlier sketches. NVS is only ~16 KB (shared with Wi-Fi), so
-// stale blobs make later saves fail.
+// Keys left by earlier sketches, including the old on-plug appliance catalog
+// ("profiles_v5": recognition now happens in Supabase). NVS is only ~16 KB
+// (shared with Wi-Fi), so they are removed only when a save has failed.
 void removeStaleKeys(SocketChannel& ch) {
-  for (const char* key : {"profiles_v2", "count_v2", "count", "profiles_v3", "count_v3", "profiles_v4"}) {
+  for (const char* key : {"profiles_v2", "count_v2", "count", "profiles_v3", "count_v3", "profiles_v4", "profiles_v5"}) {
     if (ch.prefs.isKey(key)) ch.prefs.remove(key);
   }
-  for (uint32_t n = 0; n < MAX_APPLIANCES; ++n) {
+  for (uint32_t n = 0; n < 20; ++n) {
     char key[16]; snprintf(key, sizeof(key), "app_%lu", (unsigned long)n);
     if (ch.prefs.isKey(key)) ch.prefs.remove(key);
   }
 }
-// Stores only the learned entries; the blob length gives the count.
-bool writeProfiles(SocketChannel& ch) {
-  if (!ch.data.count) return !ch.prefs.isKey("profiles_v5") || ch.prefs.remove("profiles_v5");
-  size_t bytes = ch.data.count * sizeof(ApplianceSignature);
-  return ch.prefs.putBytes("profiles_v5", ch.data.profiles, bytes) == bytes;
-}
-bool saveProfiles(SocketChannel& ch) {
-  if (!writeProfiles(ch)) {
-    removeStaleKeys(ch);  // free space, then retry once
-    if (!writeProfiles(ch)) {
-      Serial.printf("[%s] Flash storage full: cannot save appliances\n", ch.outlet);
-      ch.storageOK = false; lock(ch); return false;
-    }
-  }
-  ++ch.data.profilesVersion;
-  return true;
-}
-// Called before accepting a reset when storage had failed.
+// Called before accepting a reset when storage had failed: reopen and free space.
 bool repairStorage(SocketChannel& ch) {
   ch.prefs.end();
   if (!ch.prefs.begin(ch.ns, false)) return false;
   removeStaleKeys(ch);
-  return writeProfiles(ch);
+  return true;  // persistSafety() then proves a write works
 }
 void beginAlert(SocketChannel& ch, const char* type, uint64_t now) {
   ch.data.safety.state = SocketState::Warning;
@@ -403,10 +343,9 @@ void beginAlert(SocketChannel& ch, const char* type, uint64_t now) {
 // stays locked) and queue the notification. Works with or without Wi-Fi.
 void trip(SocketChannel& ch, const char* reason, const SensorSample& s, uint64_t now) {
   digitalWrite(ch.relay, RELAY_OFF);
-  auto* p = activeProfile(ch);
   Notice n;
   strlcpy(n.reason, reason, sizeof(n.reason));
-  strlcpy(n.appliance, p ? p->name : "Unknown appliance", sizeof(n.appliance));
+  strlcpy(n.appliance, activeName(ch), sizeof(n.appliance));
   n.outlet = int(&ch - outlets); n.power = s.power; n.current = s.current;
   n.at = epochMs(); n.mono = now;
   if (notices) xQueueSend(notices, &n, 0);  // full queue: drop rather than block safety
@@ -424,9 +363,11 @@ void trip(SocketChannel& ch, const char* reason, const SensorSample& s, uint64_t
 // Checked on every reading while the relay is on, in any running state.
 bool electricalTrip(SocketChannel& ch, const SensorSample& s, uint64_t now) {
   if (s.current > MAX_CURRENT_A) { trip(ch, "OVERCURRENT", s, now); return true; }
-  auto* p = activeProfile(ch);
-  bool anomaly = ch.data.safety.state == SocketState::Active && p && p->learned &&
-      (s.power > p->steadyPower * ANOMALY_FACTOR + 5.0f || s.current > p->current * ANOMALY_FACTOR + 0.1f);
+  // Only for a confirmed appliance, against its own steady power in this run
+  // (a provisional or unknown load may legitimately change its draw).
+  const auto& d = ch.data;
+  bool anomaly = d.safety.state == SocketState::Active && d.confirmed && d.steadyW > 0 &&
+      s.power > d.steadyW * ANOMALY_FACTOR + 5.0f;
   ch.anomalySamples = anomaly ? ch.anomalySamples + 1 : 0;
   if (ch.anomalySamples < ANOMALY_SAMPLES) return false;
   trip(ch, "POWER_ANOMALY", s, now);
@@ -443,184 +384,6 @@ void appUnlock(SocketChannel& ch) {
   if (persistSafety(ch)) logEvent(ch, "SAFETY_RESET", "", "app");
   Serial.printf("[%s] Unlocked from the app\n", ch.outlet);
 }
-void loadProfiles(SocketChannel& ch) {
-  auto& d = ch.data;
-  uint32_t stored = 0;
-  bool rewrite = false;
-  if (ch.prefs.isKey("profiles_v5")) {
-    size_t len = ch.prefs.getBytesLength("profiles_v5");
-    stored = len / sizeof(ApplianceSignature);
-    if (len % sizeof(ApplianceSignature) || stored > MAX_APPLIANCES ||
-        ch.prefs.getBytes("profiles_v5", d.profiles, sizeof(d.profiles)) != len) {
-      // A corrupt catalog is not a hazard: drop it instead of locking the outlet.
-      Serial.printf("[%s] Stored appliances unreadable, starting a new list\n", ch.outlet);
-      stored = 0; rewrite = true;
-    }
-  } else if (ch.prefs.isKey("profiles_v4")) {
-    // Previous format: same appliances, learning kept; ranges start at the signature.
-    static ApplianceSignatureV4 old[MAX_APPLIANCES];
-    size_t len = ch.prefs.getBytesLength("profiles_v4");
-    uint32_t n = len / sizeof(ApplianceSignatureV4);
-    if (len % sizeof(ApplianceSignatureV4) || n > MAX_APPLIANCES ||
-        ch.prefs.getBytes("profiles_v4", old, sizeof(old)) != len) n = 0;
-    for (uint32_t i = 0; i < n; ++i) {
-      auto& p = d.profiles[i]; p = ApplianceSignature{};
-      memcpy(p.name, old[i].name, sizeof(p.name)); memcpy(p.profileID, old[i].profileID, sizeof(p.profileID));
-      p.steadyPower = old[i].steadyPower; p.peakPower = old[i].peakPower; p.current = old[i].current;
-      p.voltage = old[i].voltage; p.pf = old[i].pf;
-      p.maxRunTime = old[i].maxRunTime; p.safetyCeilingDuration = old[i].safetyCeilingDuration;
-      p.totalSessions = old[i].totalSessions; p.registeredAt = old[i].registeredAt;
-      memcpy(p.history, old[i].history, sizeof(p.history));
-      p.sessions = old[i].sessions; p.baselineSec = old[i].baselineSec;
-      p.historyCount = old[i].historyCount; p.learned = old[i].learned;
-    }
-    Serial.printf("[%s] Upgraded %lu stored appliances to range signatures\n", ch.outlet, (unsigned long)n);
-    stored = n; rewrite = true;
-  } else if (ch.prefs.isKey("profiles_v3")) {
-    // Previous format: keep each appliance and start its learning phase.
-    static ApplianceSignatureV3 old[MAX_APPLIANCES];
-    size_t len = ch.prefs.getBytesLength("profiles_v3");
-    uint32_t n = len / sizeof(ApplianceSignatureV3);
-    if (ch.prefs.isKey("count_v3")) n = min(n, ch.prefs.getUInt("count_v3", 0));  // fixed-size variant
-    if (len % sizeof(ApplianceSignatureV3) || n > MAX_APPLIANCES ||
-        ch.prefs.getBytes("profiles_v3", old, sizeof(old)) != len) n = 0;
-    for (uint32_t i = 0; i < n; ++i) {
-      auto& p = d.profiles[i]; p = ApplianceSignature{};
-      memcpy(p.name, old[i].name, sizeof(p.name)); memcpy(p.profileID, old[i].profileID, sizeof(p.profileID));
-      p.steadyPower = old[i].steadyPower; p.peakPower = old[i].peakPower; p.current = old[i].current;
-      p.voltage = old[i].voltage; p.pf = old[i].pf; p.totalSessions = old[i].totalSessions;
-      p.registeredAt = old[i].registeredAt;
-      // Untouched old defaults (30 min) become the learning backstop.
-      p.safetyCeilingDuration = old[i].safetyCeilingDuration == DEFAULT_LIMIT_S ? HARD_CAP_S : old[i].safetyCeilingDuration;
-      p.maxRunTime = old[i].maxRunTime == DEFAULT_LIMIT_S ? p.safetyCeilingDuration : old[i].maxRunTime;
-    }
-    stored = n; rewrite = true;
-  }
-  d.count = 0;
-  for (uint32_t n = 0; n < stored; ++n) {
-    auto p = d.profiles[n];
-    if (!memchr(p.name, 0, sizeof(p.name)) || !memchr(p.profileID, 0, sizeof(p.profileID)) || !p.maxRunTime ||
-        p.safetyCeilingDuration < p.maxRunTime || p.safetyCeilingDuration > 604800) { rewrite = true; continue; }
-    if (p.historyCount > LEARNING_SESSIONS) { p.historyCount = LEARNING_SESSIONS; rewrite = true; }
-    ensureRange(p);  // migrated profiles start with their signature as the range
-    d.profiles[d.count++] = p;
-  }
-  // One-time migration of appliances learned by the previous sketch.
-  int legacy = ch.prefs.isKey("count") ? ch.prefs.getInt("count", 0) : 0;
-  if (legacy <= 0) {
-    if (rewrite) saveProfiles(ch);
-    removeStaleKeys(ch);
-    return;
-  }
-  for (int n = 0; n < legacy && n < int(MAX_APPLIANCES) && d.count < MAX_APPLIANCES; ++n) {
-    char key[16]; snprintf(key, sizeof(key), "app_%d", n);
-    LegacySignature old;
-    if (ch.prefs.getBytes(key, &old, sizeof(old)) != sizeof(old)) continue;
-    old.name[31] = 0;
-    auto& p = d.profiles[d.count++]; p = ApplianceSignature{};
-    strlcpy(p.name, old.name[0] ? old.name : "Migrated appliance", sizeof(p.name));
-    snprintf(p.profileID, sizeof(p.profileID), "%s_LEGACY_%d", ch.catalog, n);
-    p.steadyPower = old.steadyPower; p.peakPower = old.peakPower; p.current = old.current;
-    p.voltage = old.voltage; p.pf = old.pf;
-    ensureRange(p);
-    uint32_t limit = old.safetyLimitMinutes > 0 ? uint32_t(old.safetyLimitMinutes) * 60 : DEFAULT_LIMIT_S;
-    p.maxRunTime = p.safetyCeilingDuration = min(limit, uint32_t(604800));
-  }
-  if (saveProfiles(ch)) removeStaleKeys(ch);
-}
-
-// ==========================================
-// APPLIANCE RECOGNITION
-// ==========================================
-// Half-width of a signature's matching window (also published as its range).
-float band(float stored, float tolerance) { return max(fabsf(stored) * tolerance, 0.05f); }
-// A profile without an observed range yet (new or migrated) starts with its
-// learned signature as a single point.
-void ensureRange(ApplianceSignature& p) {
-  if (p.maxPower > 0 || p.maxCurrent > 0) return;
-  p.minPower = p.maxPower = p.steadyPower;
-  p.minCurrent = p.maxCurrent = p.current;
-  p.minPf = p.maxPf = p.pf;
-}
-// Recognition window of one quantity: the observed range widened by the band
-// on each side. For a single-point range this is the classic +/- tolerance.
-bool inRange(float live, float lo, float hi, float tolerance) {
-  return isfinite(live) && live >= lo - band(lo, tolerance) && live <= hi + band(hi, tolerance);
-}
-bool matches(const ApplianceSignature& scan, const ApplianceSignature& p) {
-  return inRange(scan.steadyPower, p.minPower, p.maxPower, POWER_TOLERANCE) &&
-         inRange(scan.current, p.minCurrent, p.maxCurrent, CURRENT_TOLERANCE) &&
-         isfinite(scan.pf) && scan.pf >= p.minPf - PF_TOLERANCE && scan.pf <= p.maxPf + PF_TOLERANCE;
-}
-// How far a matching scan is from a profile, using power, current and power
-// factor together, weighted like the server (P 40 %, I 30 %, PF 20 %).
-// 0 when the scan lies inside every observed range; between two such
-// profiles the one with the tighter ranges (more specific) is preferred.
-float axisDistance(float x, float lo, float hi, float tolerance) {
-  float outside = max(max(lo - x, x - hi), 0.0f) / band((lo + hi) / 2, tolerance);
-  float width = (hi - lo) / band((lo + hi) / 2, tolerance);  // 0 for a point range
-  return outside * outside + 0.01f * width;
-}
-float signatureDistance(const ApplianceSignature& scan, const ApplianceSignature& p) {
-  return 0.4f * axisDistance(scan.steadyPower, p.minPower, p.maxPower, POWER_TOLERANCE) +
-         0.3f * axisDistance(scan.current, p.minCurrent, p.maxCurrent, CURRENT_TOLERANCE) +
-         0.2f * axisDistance(scan.pf, p.minPf, p.maxPf, PF_TOLERANCE);
-}
-// Records a steady reading of the current run (sampling window or Active).
-void noteSeen(SocketChannel& ch, const SensorSample& s) {
-  if (!ch.seenAny) {
-    ch.seenAny = true;
-    ch.seenMinP = ch.seenMaxP = s.power; ch.seenMinI = ch.seenMaxI = s.current; ch.seenMinPf = ch.seenMaxPf = s.pf;
-    return;
-  }
-  ch.seenMinP = min(ch.seenMinP, s.power); ch.seenMaxP = max(ch.seenMaxP, s.power);
-  ch.seenMinI = min(ch.seenMinI, s.current); ch.seenMaxI = max(ch.seenMaxI, s.current);
-  ch.seenMinPf = min(ch.seenMinPf, s.pf); ch.seenMaxPf = max(ch.seenMaxPf, s.pf);
-}
-// Folds another range into [p]'s observed range.
-void widenRange(ApplianceSignature& p, float minP, float maxP, float minI, float maxI, float minPf, float maxPf) {
-  ensureRange(p);
-  p.minPower = min(p.minPower, minP); p.maxPower = max(p.maxPower, maxP);
-  p.minCurrent = min(p.minCurrent, minI); p.maxCurrent = max(p.maxCurrent, maxI);
-  p.minPf = min(p.minPf, minPf); p.maxPf = max(p.maxPf, maxPf);
-}
-
-// Profiles the user has named in the app (appliance_registrations), synced by
-// the network task. Recognition prefers them over auto-learned UNNAMED copies,
-// so a registered appliance is not shown as unrecognized because a similar
-// unnamed profile happened to be closer. Runtime only: nothing is stored.
-constexpr int MAX_REGISTERED = 48;
-portMUX_TYPE registeredMux = portMUX_INITIALIZER_UNLOCKED;
-char registeredIDs[MAX_REGISTERED][64];
-int registeredCount = 0;
-bool isRegistered(const char* profileID) {
-  bool found = false;
-  portENTER_CRITICAL(&registeredMux);
-  for (int i = 0; i < registeredCount && !found; ++i) found = strcmp(registeredIDs[i], profileID) == 0;
-  portEXIT_CRITICAL(&registeredMux);
-  return found;
-}
-// Finds a learned appliance by ID in either outlet's catalog.
-bool findProfile(const char* id, int& owner, int& index) {
-  for (int o = 0; o < 2; ++o) {
-    for (uint32_t i = 0; i < outlets[o].data.count; ++i) {
-      if (strcmp(id, outlets[o].data.profiles[i].profileID) == 0) { owner = o; index = i; return true; }
-    }
-  }
-  return false;
-}
-bool isRunning(int owner, int index) {
-  for (auto& c : outlets) if (c.data.activeOwner == owner && c.data.activeID == index) return true;
-  return false;
-}
-// The session limit for an appliance: only its backstop while learning; then
-// baseline x LEARNED_MARGIN (at least MIN_LEARNED_LIMIT_S, never above it).
-uint32_t sessionLimit(const ApplianceSignature* p) {
-  if (!p) return DEFAULT_LIMIT_S;
-  if (!p->learned) return p->safetyCeilingDuration;
-  uint32_t learned = max(uint32_t(p->baselineSec * LEARNED_MARGIN), MIN_LEARNED_LIMIT_S);
-  return min(learned, p->safetyCeilingDuration);
-}
 // Time granted by "Yes, Override": a safety buffer of OVERRIDE_BUFFER x how
 // long the session has run (on the first warning, that is its limit), kept
 // within 1 min..1 h. The app computes the same value (overrideBufferSeconds).
@@ -628,105 +391,20 @@ uint32_t overrideSeconds(const SafetyState& s, uint64_t now) {
   uint64_t buffer = uint64_t((now - s.started) / 1000 * OVERRIDE_BUFFER);
   return uint32_t(min(max(buffer, uint64_t(60)), uint64_t(3600)));
 }
-// "Near limit" once a session runs longer than the learned typical use.
-uint32_t warnAfter(const ApplianceSignature* p) {
-  if (!p) return DEFAULT_LIMIT_S;
-  return p->learned ? min(max(p->baselineSec, MIN_SESSION_S), p->maxRunTime) : p->maxRunTime;
-}
-// Called when a recognized appliance finishes normally (switched off or
-// unplugged). Lock-outs are not recorded: they are not typical use.
-void recordSession(SocketChannel& ch, uint64_t now) {
-  auto* p = activeProfile(ch);
-  if (!p) return;
-  uint32_t seconds = uint32_t((now - ch.data.safety.started) / 1000);
-  if (seconds < MIN_SESSION_S) return;  // a blip teaches nothing
-  if (p->historyCount < LEARNING_SESSIONS) {
-    p->history[p->historyCount++] = seconds;
-  } else {  // keep the latest uses for display
-    memmove(p->history, p->history + 1, sizeof(p->history) - sizeof(p->history[0]));
-    p->history[LEARNING_SESSIONS - 1] = seconds;
-  }
-  ++p->sessions;
-  // A normal use teaches the appliance's real range of draw (lock-outs never reach here).
-  if (ch.seenAny) widenRange(*p, ch.seenMinP, ch.seenMaxP, ch.seenMinI, ch.seenMaxI, ch.seenMinPf, ch.seenMaxPf);
-  ch.sessionCounted = p->sessions <= LEARNING_SESSIONS;  // one of the first 7 uses
-  if (!p->learned && p->historyCount >= LEARNING_SESSIONS) {
-    uint64_t sum = 0;
-    for (uint32_t i = 0; i < LEARNING_SESSIONS; ++i) sum += p->history[i];
-    p->baselineSec = uint32_t(sum / LEARNING_SESSIONS);
-    p->learned = true;
-    logEvent(ch, "LEARNING_COMPLETE", p->profileID);
-    Serial.printf("[%s] %s learned: typical use %lu s, limit %lu s\n", ch.outlet, p->name,
-                  (unsigned long)p->baselineSec, (unsigned long)sessionLimit(p));
-  }
-  auto& owner = outlets[ch.data.activeOwner];
-  if (writeProfiles(owner)) ++owner.data.profilesVersion;  // best effort: not a hazard
-}
-void finishSampling(SocketChannel& ch) {
-  auto& d = ch.data; auto& sig = ch.pending;
-  if (!ch.samples) return;
-  sig.steadyPower /= ch.samples; sig.current /= ch.samples; sig.voltage /= ch.samples; sig.pf /= ch.samples;
-  d.activeID = d.activeOwner = -1;
-  // Appliances are portable: compare against what BOTH outlets have learned,
-  // so one learned on outlet A is recognized on outlet B. Among the profiles
-  // whose windows all contain the scan, a registered (named) one wins over an
-  // unnamed copy; then the closest by power, current and PF together.
-  // Outlet exclusivity: an appliance running on the other outlet cannot also
-  // be plugged in here, so it is skipped. If nothing else matches, the load
-  // is learned as a new appliance (e.g. a second fan) for the user to name.
-  const auto& other = outlets[1 - int(&ch - outlets)].data;
-  float best = INFINITY;
-  bool bestRegistered = false;
-  for (int o = 0; o < 2; ++o) {
-    const auto& catalog = outlets[o].data;
-    for (uint32_t i = 0; i < catalog.count; ++i) {
-      const auto& p = catalog.profiles[i];
-      if (other.activeOwner == o && other.activeID == int(i)) continue;  // running next door
-      if (!matches(sig, p)) continue;
-      bool named = isRegistered(p.profileID);
-      // Outlet context breaks near-ties between look-alikes (two identical
-      // fans): prefer the one first learned on this outlet.
-      float dist = signatureDistance(sig, p) + (o == int(&ch - outlets) ? 0.0f : 0.02f);
-      if ((named && !bestRegistered) || (named == bestRegistered && dist < best)) {
-        best = dist; bestRegistered = named; d.activeOwner = o; d.activeID = i;
-      }
-    }
-  }
-  bool learned = false;
-  if (d.activeID < 0 && d.count < MAX_APPLIANCES) {
-    // Unknown appliance: learn it here so the app prompts the user to register it.
-    snprintf(sig.profileID, sizeof(sig.profileID), "UNNAMED_DEVICE_%lld_%08lx",
-             (long long)(epochMs() ? epochMs() : monotonicMs()), (unsigned long)esp_random());
-    strlcpy(sig.name, sig.profileID, sizeof(sig.name)); sig.registeredAt = epochMs(); sig.totalSessions = 1;
-    // Its range starts as what the sampling window saw.
-    if (ch.seenAny) {
-      sig.minPower = ch.seenMinP; sig.maxPower = ch.seenMaxP; sig.minCurrent = ch.seenMinI;
-      sig.maxCurrent = ch.seenMaxI; sig.minPf = ch.seenMinPf; sig.maxPf = ch.seenMaxPf;
-    }
-    ensureRange(sig);
-    d.activeOwner = int(&ch - outlets); d.activeID = d.count; d.profiles[d.count++] = sig;
-    learned = true;
-    if (!saveProfiles(ch)) return;
-  }
-  auto* p = activeProfile(ch);
-  if (p && !learned) {
-    ++p->totalSessions;
-    auto& owner = outlets[d.activeOwner];
-    if (writeProfiles(owner)) ++owner.data.profilesVersion;  // a lost count is not a hazard
-  }
-  uint32_t ceiling = sessionLimit(p);  // backstop while learning, then learned
-  d.safety.state = SocketState::Active; ++d.safety.revision;
-  d.safety.deadline = d.safety.started + uint64_t(ceiling) * 1000;
-  logEvent(ch, learned ? "NEW_APPLIANCE" : "APPLIANCE_ON", p ? p->profileID : "", p ? "" : "unrecognized");
-  Serial.printf("[%s] Active: %s (limit %lu s)\n", ch.outlet,
-                p ? p->name : "unrecognized, catalog full", (unsigned long)ceiling);
-}
+
+// ==========================================
+// RUN DETECTION AND MEASUREMENT (control loop)
+// IDLE -> plug-in (> START_W) -> STARTUP -> SETTLING -> STEADY -> REPORTED,
+// measured by RecognitionWindow; the run ends when the power stays below
+// IDLE_W for UNPLUG_MS. The safety state is Sampling ("Recognizing
+// appliance") until the first stage is sent, then Active. The cutoff starts
+// at DEFAULT_LIMIT_S and changes only through recognize-appliance's replies.
+// ==========================================
 void handleSensor(SocketChannel& ch, const SensorSample& sample, uint64_t now) {
   auto& d = ch.data;
   d.sensor = sample;
   if (!sample.valid) return;
   if (!ch.sessionOpen && sample.power < START_W_THRESHOLD) ch.standbyW = ch.standbyW * 0.9f + sample.power * 0.1f;
-  if (ch.window.add(now, sample.power, sample.current, sample.voltage, sample.pf)) queueFeatures(ch);
   if (ch.sessionOpen) {  // energy of this run: power integrated at the meter's rate
     uint64_t dt = now - ch.lastEnergySample;
     if (dt <= SENSOR_TIMEOUT_MS) ch.sessionWh += (ch.lastPower + sample.power) / 2.0 * double(dt) / 3600000.0;
@@ -739,36 +417,38 @@ void handleSensor(SocketChannel& ch, const SensorSample& sample, uint64_t now) {
   if (state == SocketState::Disabled || state == SocketState::LockedOut || state == SocketState::Warning) return;
   if (state == SocketState::Idle) {
     if (sample.power <= START_W_THRESHOLD) return;
-    d.safety.begin(now, DEFAULT_LIMIT_S); ch.pending = ApplianceSignature{};
-    ch.samples = 0; d.startEpoch = epochMs(); d.peak = 0;
-    ch.sessionOpen = true; ch.sessionCounted = false;
+    // Plug-in: the conservative default applies until Supabase confirms an appliance.
+    d.safety.begin(now, DEFAULT_LIMIT_S);
+    d.startEpoch = epochMs(); d.peak = 0;
+    d.activeName[0] = d.activeProfileID[0] = 0; d.confirmed = false; d.steadyW = 0;
+    strlcpy(d.recognition, "RECOGNIZING", sizeof(d.recognition));
+    ch.sessionOpen = true; ch.lowSince = 0;
     ch.sessionStartMono = now; ch.sessionStartEpoch = d.startEpoch; ch.lastEnergySample = now;
+    ch.runMono = now;
     ch.sessionWh = 0; ch.lastPower = sample.power;
     ch.sessionPeakCurrent = sample.current; ch.sessionPeakPower = sample.power;
-    ch.seenAny = false;
-    ch.window.begin(now); ch.window.add(now, sample.power, sample.current, sample.voltage, sample.pf);
+    ch.rec.begin(now, ch.standbyW);
     if (!persistSafety(ch)) return;
+    logEvent(ch, "APPLIANCE_ON");
+    Serial.printf("[%s] Plug-in: %.1f W, measuring (limit %lu s until confirmed)\n",
+                  ch.outlet, sample.power, (unsigned long)DEFAULT_LIMIT_S);
   } else if (sample.power < IDLE_W_THRESHOLD) {
-    if (state == SocketState::Active) {
-      logEvent(ch, "APPLIANCE_OFF", activeProfileID(ch));
-      recordSession(ch, now);
-    }
-    d.safety.state = SocketState::Idle; ++d.safety.revision;  // appliance switched off
+    // Unplugged or switched off only after UNPLUG_MS of low readings.
+    if (!ch.lowSince) ch.lowSince = now;
+    if (now - ch.lowSince < UNPLUG_MS) return;
+    logEvent(ch, "APPLIANCE_OFF", activeProfileID(ch));
+    d.safety.state = SocketState::Idle; ++d.safety.revision;
     endSession(ch, "APPLIANCE_OFF"); persistSafety(ch);
+    Serial.printf("[%s] Unplugged / switched off\n", ch.outlet);
     return;
+  } else {
+    ch.lowSince = 0;
   }
   d.peak = max(d.peak, sample.power);
-  if (d.safety.state == SocketState::Active) noteSeen(ch, sample);  // widens the range at the end
-  if (d.safety.state == SocketState::Sampling) {
-    ch.pending.peakPower = max(ch.pending.peakPower, sample.power);
-    if (now - d.safety.started >= SETTLE_MS) {  // steady load only
-      ch.pending.steadyPower += sample.power; ch.pending.current += sample.current;
-      ch.pending.voltage += sample.voltage; ch.pending.pf += sample.pf;
-      ++ch.samples;
-      noteSeen(ch, sample);
-    }
-    if (now - d.safety.started >= SETTLE_MS + SAMPLE_TIME_MS) finishSampling(ch);
-  }
+  int stage = ch.rec.add(now, sample.power, sample.pf, sample.voltage);
+  if (!stage) return;
+  queueRecognition(ch, stage);
+  if (d.safety.state == SocketState::Sampling) { d.safety.state = SocketState::Active; ++d.safety.revision; }
 }
 
 // ==========================================
@@ -806,88 +486,16 @@ void handleCommand(SocketChannel& ch, const Command& cmd, uint64_t now) {
     } else if (strcmp(cmd.type, "TURN_ON") == 0 || strcmp(cmd.type, "TURN_OFF") == 0) {
       bool on = strcmp(cmd.type, "TURN_ON") == 0;
       String running = activeProfileID(ch);
-      bool wasActive = d.safety.state == SocketState::Active;
       if (!on && d.safety.state == SocketState::Idle) {
         result = "REJECTED_NO_APPLIANCE";  // interlock: nothing plugged in to switch off
       } else if (d.safety.remotePower(on)) {
-        if (d.safety.state == SocketState::Disabled) {
-          if (wasActive) recordSession(ch, now);  // switched off after a normal use
-          endSession(ch, "TURNED_OFF");
-        }
+        if (d.safety.state == SocketState::Disabled) endSession(ch, "TURNED_OFF");
         logEvent(ch, on ? "OUTLET_ON" : "OUTLET_OFF", running.c_str(), "app");
         result = "ACCEPTED";
       }
-    } else if (strcmp(cmd.type, "REMOVE_PROFILE") == 0) {
-      // Any appliance not running right now can be forgotten, whichever outlet learned it.
-      int o, i;
-      if (findProfile(cmd.profileID, o, i) && !isRunning(o, i)) {
-        auto& owner = outlets[o].data;
-        for (uint32_t j = i + 1; j < owner.count; ++j) owner.profiles[j - 1] = owner.profiles[j];
-        --owner.count;
-        for (auto& c : outlets) {  // keep running appliances pointing at the right entry
-          if (c.data.activeOwner == o && c.data.activeID > i) --c.data.activeID;
-        }
-        if (saveProfiles(outlets[o])) {
-          ++d.safety.revision; result = "ACCEPTED";
-          logEvent(ch, "APPLIANCE_DELETED", cmd.profileID);
-        }
-      }
-    } else if (strcmp(cmd.type, "MERGE_PROFILE") == 0) {
-      // "This is one of my appliances": fold profile sourceID (usually the
-      // UNNAMED copy just learned) into the registered profileID. The target
-      // keeps its name, limits and learning; its range grows to cover the
-      // source, and a run of the source continues as the target.
-      int to, ti, so, si;
-      // Both running at once means two physical appliances: never merge them.
-      auto running = [](int owner, int id) {
-        for (auto& c : outlets) if (c.data.activeOwner == owner && c.data.activeID == id) return true;
-        return false;
-      };
-      if (strcmp(cmd.profileID, cmd.sourceID) != 0 && findProfile(cmd.profileID, to, ti) &&
-          findProfile(cmd.sourceID, so, si) && !(running(to, ti) && running(so, si))) {
-        auto& src = outlets[so].data.profiles[si];
-        auto& dst = outlets[to].data.profiles[ti];
-        ensureRange(src);
-        widenRange(dst, src.minPower, src.maxPower, src.minCurrent, src.maxCurrent, src.minPf, src.maxPf);
-        dst.totalSessions += src.totalSessions;
-        auto& owner = outlets[so].data;
-        for (uint32_t j = si + 1; j < owner.count; ++j) owner.profiles[j - 1] = owner.profiles[j];
-        --owner.count;
-        if (to == so && ti > si) --ti;  // the target moved down one slot
-        const auto& merged = outlets[to].data.profiles[ti];  // after the shift
-        for (auto& c : outlets) {
-          if (c.data.activeOwner != so) continue;
-          if (c.data.activeID == si) {
-            // The running copy continues as the registered appliance, with its limit.
-            c.data.activeOwner = to; c.data.activeID = ti; ++c.data.safety.revision;
-            if (c.data.safety.state == SocketState::Active) {
-              c.data.safety.deadline = c.data.safety.started + uint64_t(sessionLimit(&merged)) * 1000;
-            }
-          } else if (c.data.activeID > si) --c.data.activeID;
-        }
-        bool saved = saveProfiles(outlets[so]) && (to == so || saveProfiles(outlets[to]));
-        if (saved) {
-          ++d.safety.revision; result = "ACCEPTED";
-          logEvent(ch, "APPLIANCE_MERGED", cmd.profileID, "");
-          Serial.printf("[%s] Merged %s into %s\n", ch.outlet, cmd.sourceID, cmd.profileID);
-        }
-      }
-    } else if (strcmp(cmd.type, "EDIT_PROFILE") == 0 && d.safety.state != SocketState::Warning) {
-      int o, i;
-      if (findProfile(cmd.profileID, o, i) && cmd.maxRunTime && cmd.ceiling >= cmd.maxRunTime &&
-          cmd.ceiling <= 604800 && cmd.name[0]) {
-        auto& p = outlets[o].data.profiles[i]; strlcpy(p.name, cmd.name, sizeof(p.name));
-        p.maxRunTime = cmd.maxRunTime; p.safetyCeilingDuration = cmd.ceiling;
-        if (saveProfiles(outlets[o])) {
-          for (auto& c : outlets) {  // apply the new limit wherever it is running
-            if (c.data.activeOwner != o || c.data.activeID != i) continue;
-            c.data.safety.deadline = c.data.safety.started + uint64_t(sessionLimit(&p)) * 1000;
-            if (&c != &ch) ++c.data.safety.revision;
-          }
-          ++d.safety.revision; result = "ACCEPTED";
-        }
-      }
     }
+    // REMOVE_PROFILE, MERGE_PROFILE and EDIT_PROFILE are gone: appliances and
+    // their limits live in Supabase now, so they are REJECTED_INVALID.
     if (!persistSafety(ch)) result = "REJECTED_STORAGE_FAILURE";
   }
   strlcpy(d.commandResult, result, sizeof(d.commandResult));
@@ -937,29 +545,6 @@ int firebaseRequest(const char* method, const String& path, const String& body =
   return code;
 }
 
-// Refreshes registeredIDs from appliance_registrations/OUTLET_A|B/<profileID>,
-// the names the user gave appliances in the app (either outlet's list counts).
-void syncRegistrations() {
-  String body;
-  if (firebaseRequest("GET", "appliance_registrations", "", &body) != HTTP_CODE_OK) return;
-  JsonDocument doc;
-  if (deserializeJson(doc, body)) return;
-  static char ids[MAX_REGISTERED][64];
-  int n = 0;
-  for (const char* catalog : {"OUTLET_A", "OUTLET_B"}) {
-    JsonObjectConst list = doc[catalog];
-    if (list.isNull()) continue;
-    for (JsonPairConst entry : list) {
-      if (n >= MAX_REGISTERED) break;
-      strlcpy(ids[n++], entry.key().c_str(), sizeof(ids[0]));
-    }
-  }
-  portENTER_CRITICAL(&registeredMux);
-  memcpy(registeredIDs, ids, sizeof(ids));
-  registeredCount = n;
-  portEXIT_CRITICAL(&registeredMux);
-}
-
 char lastQueued[2][64] = {};
 void readCommands() {
   String body;
@@ -972,10 +557,7 @@ void readCommands() {
     Command c;
     strlcpy(c.id, j["commandID"] | "", sizeof(c.id)); strlcpy(c.session, j["sessionID"] | "", sizeof(c.session));
     strlcpy(c.type, j["type"] | "", sizeof(c.type)); strlcpy(c.alertID, j["alertID"] | "", sizeof(c.alertID));
-    strlcpy(c.profileID, j["profileID"] | "", sizeof(c.profileID)); strlcpy(c.name, j["name"] | "", sizeof(c.name));
-    strlcpy(c.sourceID, j["sourceID"] | "", sizeof(c.sourceID));
     c.revision = uint32_t(j["revision"].as<double>()); c.expires = j["expiresAt"].as<int64_t>();
-    c.maxRunTime = uint32_t(j["maxRunTime"].as<double>()); c.ceiling = uint32_t(j["safetyCeilingDuration"].as<double>());
     if (!c.id[0] || strcmp(c.id, lastQueued[i]) == 0) continue;
     if (xQueueSend(outlets[i].commands, &c, 0) == pdTRUE) strlcpy(lastQueued[i], c.id, sizeof(lastQueued[i]));
   }
@@ -988,7 +570,7 @@ const char* stateName(SocketState s) {
     case SocketState::Disabled: return "DISABLED"; default: return "IDLE";
   }
 }
-void addOutlet(JsonDocument& root, int i, const Snapshot& s, bool includeCatalog) {
+void addOutlet(JsonDocument& root, int i, const Snapshot& s) {
   const auto& ch = outlets[i];
   String b = String("telemetry_logs/") + ch.outlet + "/";
   auto st = s.safety.state;
@@ -1002,12 +584,16 @@ void addOutlet(JsonDocument& root, int i, const Snapshot& s, bool includeCatalog
   // app's unlock is not overwritten every second.
   root[String("devices/") + DEVICE_ID + "/outlets/" + ch.outlet + "/relayState"] = relayEnergized(st);
   root[b + "relay_on"] = relayEnergized(st); root[b + "storage_ok"] = ch.storageOK;
-  root[b + "profileID"] = s.activeProfileID;
+  root[b + "profileID"] = s.activeProfileID;  // Supabase appliance id, "" until recognized
+  // Rule-based recognition: RECOGNIZING, UNKNOWN, AMBIGUOUS, SAME_TYPE_IN_USE,
+  // MATCHED_PROVISIONAL or MATCHED_CONFIRMED (the app shows the prompt).
+  root[b + "recognitionStatus"] = s.recognition; root[b + "applianceConfirmed"] = s.confirmed;
   // The effective deadline, including any accepted runtime override.
   root[b + "safetyDeadline"] = running && s.safety.deadline > s.capturedMono && s.capturedEpoch
       ? timestamp(s.capturedEpoch + int64_t(s.safety.deadline - s.capturedMono)) : String("N/A");
   root[b + "appliance"] = s.activeProfileID[0] ? s.activeName
-      : st == SocketState::Sampling ? "Recognizing appliance" : running ? "Unknown appliance" : "None";
+      : running && strcmp(s.recognition, "RECOGNIZING") == 0 ? "Recognizing appliance"
+      : running ? "Unknown appliance" : "None";
   root[b + "sensor_valid"] = sensorOK;
   root[b + "power_W"] = sensorOK ? s.sensor.power : 0; root[b + "current_A"] = sensorOK ? s.sensor.current : 0;
   root[b + "voltage_V"] = sensorOK ? s.sensor.voltage : 0; root[b + "power_factor"] = sensorOK ? s.sensor.pf : 0;
@@ -1026,39 +612,6 @@ void addOutlet(JsonDocument& root, int i, const Snapshot& s, bool includeCatalog
     root[a + "deviceID"] = ch.outlet; root[a + "alertType"] = s.alert.type;
     root[a + "triggerTime"] = timestamp(s.alert.trigger); root[a + "countdownExpiry"] = timestamp(s.alert.expiry);
     root[a + "resolution"] = s.alert.resolution;
-  }
-  if (includeCatalog) {
-    String path = String("appliance_profiles/") + ch.catalog;
-    root[String("appliance_profiles/") + ch.legacyCatalog] = nullptr;  // drop the old sketch's catalog
-    if (!s.count) { root[path] = nullptr; return; }
-    JsonObject catalog = root[path].to<JsonObject>();
-    for (uint32_t n = 0; n < s.count; ++n) {
-      const auto& p = s.profiles[n];
-      JsonObject profile = catalog[p.profileID].to<JsonObject>();
-      profile["name"] = p.name; profile["steadyPower_W"] = p.steadyPower; profile["peakPower_W"] = p.peakPower;
-      profile["current_A"] = p.current; profile["voltage_V"] = p.voltage; profile["powerFactor"] = p.pf;
-      profile["maxRunTime"] = p.maxRunTime; profile["safetyCeilingDuration"] = p.safetyCeilingDuration;
-      profile["totalSessions"] = p.totalSessions; profile["registered_at"] = timestamp(p.registeredAt);
-      // Learning phase: uses recorded, their durations (s), learned average and limit.
-      profile["sessionCount"] = p.sessions;
-      JsonArray history = profile["sessionHistory"].to<JsonArray>();
-      for (uint32_t h = 0; h < p.historyCount; ++h) history.add(p.history[h]);
-      profile["baselineAverage"] = p.baselineSec; profile["isLearningComplete"] = p.learned;
-      profile["learnedLimit"] = sessionLimit(&p);
-      // The recognition window: a steady load inside every range matches. It is
-      // the observed range (what this appliance has really drawn) plus the bands.
-      JsonObject range = profile["range"].to<JsonObject>();
-      range["powerMin_W"] = max(p.minPower - band(p.minPower, POWER_TOLERANCE), 0.0f);
-      range["powerMax_W"] = p.maxPower + band(p.maxPower, POWER_TOLERANCE);
-      range["currentMin_A"] = max(p.minCurrent - band(p.minCurrent, CURRENT_TOLERANCE), 0.0f);
-      range["currentMax_A"] = p.maxCurrent + band(p.maxCurrent, CURRENT_TOLERANCE);
-      range["pfMin"] = max(p.minPf - PF_TOLERANCE, 0.0f); range["pfMax"] = min(p.maxPf + PF_TOLERANCE, 1.0f);
-      // The raw observed range, without the bands.
-      JsonObject seen = profile["observed"].to<JsonObject>();
-      seen["powerMin_W"] = p.minPower; seen["powerMax_W"] = p.maxPower;
-      seen["currentMin_A"] = p.minCurrent; seen["currentMax_A"] = p.maxCurrent;
-      seen["pfMin"] = p.minPf; seen["pfMax"] = p.maxPf;
-    }
   }
 }
 // Device summary at devices/gadget-1/status. The app treats a stale lastSeen
@@ -1114,7 +667,7 @@ void addLiveTelemetry(JsonDocument& root, int i, const Snapshot& s) {
 #ifdef SUPABASE_FUNCTIONS_URL
 WiFiClientSecure supaTls;
 HTTPClient supaHttp;
-uint64_t supabaseRetryAt = 0;  // back off after a failure instead of retrying every pass
+
 int supabasePost(const char* function, const String& body, String* response = nullptr) {
   if (!supaHttp.begin(supaTls, String(SUPABASE_FUNCTIONS_URL) + "/" + function)) return -1;
   supaHttp.setTimeout(8000);
@@ -1133,78 +686,93 @@ int64_t datedAt(int64_t at, uint64_t mono) {
   int64_t nowMs = epochMs();
   return nowMs ? nowMs - int64_t(monotonicMs() - mono) : 0;
 }
+// The run that [startMono] belongs to is still in progress on [outlet].
+bool runInProgress(int outlet, uint64_t startMono) { return outlets[outlet].runMono.load() == startMono; }
+
+// recognize-appliance: one stage of a run. Answers come back to loop() through
+// recognitionReplies. Returns false to retry later.
+bool sendRecognition(const RecognitionReport& r) {
+  int64_t start = datedAt(r.startEpoch, r.startMono);
+  if (!start) return false;  // clock not set yet
+  JsonDocument doc;
+  doc["deviceId"] = DEVICE_ID; doc["outlet"] = r.outlet == 0 ? "outlet_1" : "outlet_2";
+  doc["eventId"] = r.eventID; doc["startedAt"] = start; doc["stage"] = r.stage;
+  JsonObject x = doc["features"].to<JsonObject>();
+  // At the meter's resolution: 0.1 W, 0.01 PF, 0.1 V.
+  x["avg_power_w"] = roundf(r.f.avgPowerW * 100) / 100; x["avg_pf"] = roundf(r.f.avgPf * 1000) / 1000;
+  x["avg_voltage_v"] = roundf(r.f.avgVoltageV * 10) / 10;
+  x["startup_peak_ratio"] = roundf(r.f.startupPeakRatio * 1000) / 1000;
+  x["settling_time_s"] = roundf(r.f.settlingTimeS * 10) / 10;
+  if (r.f.hasVariation) x["power_variation"] = roundf(r.f.powerVariation * 10000) / 10000;
+  if (r.f.hasCycle) x["cycle_period_s"] = roundf(r.f.cyclePeriodS * 10) / 10;
+  if (r.f.hasStandby) x["standby_power_w"] = roundf(r.f.standbyPowerW * 100) / 100;
+  x["unstable"] = r.f.unstable;
+  String body, response; serializeJson(doc, body);
+  int code = supabasePost("recognize-appliance", body, &response);
+  if (code != 200 && code != 201) return supabaseDone(code);  // 4xx: malformed, never retried
+  JsonDocument reply;
+  if (deserializeJson(reply, response) || !reply["cutoffS"].is<uint32_t>()) return true;
+  RecognitionReply c;
+  c.outlet = r.outlet; c.stage = r.stage; c.startMono = r.startMono; c.cutoffS = reply["cutoffS"];
+  strlcpy(c.status, reply["status"] | "", sizeof(c.status));
+  strlcpy(c.applianceID, reply["applianceId"] | "", sizeof(c.applianceID));
+  strlcpy(c.name, reply["applianceName"] | "", sizeof(c.name));
+  xQueueSend(recognitionReplies, &c, 0);
+  return true;
+}
+
+// Each kind of report has its own retry time, so a failing one never holds
+// up the others: safety reports first, then recognition, then session logs.
 void sendSupabase() {
-  if (monotonicMs() < supabaseRetryAt) return;
+  static uint64_t safetyRetryAt = 0, recognitionRetryAt = 0, sessionRetryAt = 0;
+  static uint32_t recognitionAttempts = 0;
+  uint64_t now = monotonicMs();
   SafetyReport r;
-  while (xQueuePeek(safetyReports, &r, 0) == pdTRUE) {  // safety first
+  while (now >= safetyRetryAt && xQueuePeek(safetyReports, &r, 0) == pdTRUE) {
     int64_t at = datedAt(r.at, r.mono);
-    if (!at) return;
+    if (!at) break;
     JsonDocument doc;
     doc["deviceId"] = DEVICE_ID; doc["outlet"] = r.outlet == 0 ? "outlet_1" : "outlet_2";
     doc["eventId"] = r.eventID; doc["type"] = r.type; doc["occurredAt"] = at;
-    doc["profileId"] = r.profileID; doc["applianceName"] = r.name;
-    doc["runtimeS"] = r.runtimeS; doc["limitS"] = r.limitS; doc["baselineS"] = r.baselineS;
-    doc["learned"] = r.learned; doc["sessionCount"] = r.sessionCount;
+    doc["profileId"] = ""; doc["applianceName"] = r.name;
+    doc["runtimeS"] = r.runtimeS; doc["limitS"] = r.limitS; doc["baselineS"] = 0;
+    doc["learned"] = false; doc["sessionCount"] = 0;
     doc["powerW"] = r.power; doc["currentA"] = r.current;
     String body; serializeJson(doc, body);
-    int code = supabasePost("evaluate-safety-alert", body);
-    if (!supabaseDone(code)) { supabaseRetryAt = monotonicMs() + 30000; return; }
+    if (!supabaseDone(supabasePost("evaluate-safety-alert", body))) { safetyRetryAt = monotonicMs() + 30000; break; }
     xQueueReceive(safetyReports, &r, 0);
   }
-  // Before session summaries: log-session ends the run that this identifies.
-  FeatureReport f;
-  while (xQueuePeek(featureReports, &f, 0) == pdTRUE) {
-    int64_t start = datedAt(f.startEpoch, f.startMono);
-    if (!start) return;
-    JsonDocument doc;
-    doc["deviceId"] = DEVICE_ID; doc["outlet"] = f.outlet == 0 ? "outlet_1" : "outlet_2";
-    doc["eventId"] = f.eventID; doc["startedAt"] = start;
-    doc["windowS"] = f.f.windowS; doc["readings"] = f.f.readings; doc["standbyW"] = f.standbyW;
-    JsonObject x = doc["features"].to<JsonObject>();
-    x["power"] = f.f.power; x["current"] = f.f.current; x["pf"] = f.f.pf; x["reactive"] = f.f.reactive;
-    x["cv"] = f.f.cv; x["peakRatio"] = f.f.peakRatio;
-    if (f.signal.n >= 24) {  // the server's minimum; fewer means meter dropouts
-      JsonObject sig = doc["signal"].to<JsonObject>();
-      JsonArray p = sig["power"].to<JsonArray>(), i = sig["current"].to<JsonArray>(), pf = sig["pf"].to<JsonArray>();
-      for (uint32_t k = 0; k < f.signal.n; ++k) {  // at the meter's resolution
-        p.add(roundf(f.signal.power[k] * 10) / 10);
-        i.add(roundf(f.signal.current[k] * 1000) / 1000);
-        pf.add(roundf(f.signal.pf[k] * 100) / 100);
-      }
+  // Before the session log of the same run, which closes its outlet session.
+  RecognitionReport f;
+  while (monotonicMs() >= recognitionRetryAt && xQueuePeek(recognitionReports, &f, 0) == pdTRUE) {
+    // A run that has ended no longer needs a cutoff: its answer would be useless.
+    if (!runInProgress(f.outlet, f.startMono) || sendRecognition(f)) {
+      xQueueReceive(recognitionReports, &f, 0); recognitionAttempts = 0; continue;
     }
-    String body, response; serializeJson(doc, body);
-    int code = supabasePost("identify-appliance", body, &response);
-    if (!supabaseDone(code)) { supabaseRetryAt = monotonicMs() + 30000; return; }
-    xQueueReceive(featureReports, &f, 0);
-    JsonDocument reply;
-    if ((code == 200 || code == 201) && !deserializeJson(reply, response) && reply["cutoffS"].is<uint32_t>()) {
-      CutoffReply c;
-      c.outlet = f.outlet; c.startMono = f.startMono; c.cutoffS = reply["cutoffS"];
-      strlcpy(c.outcome, reply["outcome"] | "", sizeof(c.outcome));
-      xQueueSend(cutoffReplies, &c, 0);
+    // Unreachable or failing: the run keeps its current (default) cutoff.
+    if (++recognitionAttempts >= RECOGNITION_ATTEMPTS) {
+      Serial.printf("[%s] Stage %d not delivered: keeping the default cutoff\n", outlets[f.outlet].outlet, f.stage);
+      xQueueReceive(recognitionReports, &f, 0); recognitionAttempts = 0; continue;
     }
+    recognitionRetryAt = monotonicMs() + 10000;
+    break;
   }
   SessionSummary s;
-  while (xQueuePeek(sessionReports, &s, 0) == pdTRUE) {
+  while (monotonicMs() >= sessionRetryAt && xQueuePeek(sessionReports, &s, 0) == pdTRUE) {
     int64_t end = datedAt(s.endEpoch, s.endMono);
-    if (!end) return;
+    if (!end) break;
     JsonDocument doc;
     doc["deviceId"] = DEVICE_ID; doc["outlet"] = s.outlet == 0 ? "outlet_1" : "outlet_2";
-    doc["profileId"] = s.profileID; doc["applianceName"] = s.name;
+    doc["profileId"] = ""; doc["applianceName"] = s.name;
     doc["startedAt"] = s.startEpoch ? s.startEpoch : end - int64_t(s.durationS) * 1000;
     doc["endedAt"] = end; doc["durationS"] = s.durationS; doc["endReason"] = s.reason;
     doc["energyWh"] = s.energyWh; doc["peakCurrentA"] = s.peakCurrent; doc["peakPowerW"] = s.peakPower;
+    // The 7-use learning is done by Supabase (log-session) for confirmed appliances.
     JsonObject learning = doc["learning"].to<JsonObject>();
-    learning["sessionCount"] = s.sessionCount; learning["learned"] = s.learned;
-    learning["baselineS"] = s.baselineS; learning["limitS"] = s.limitS;
-    learning["countsTowardLearning"] = s.counted;
-    if (s.profileID[0]) {
-      JsonObject sig = doc["signature"].to<JsonObject>();
-      sig["power"] = s.sigPower; sig["current"] = s.sigCurrent; sig["powerFactor"] = s.sigPf;
-    }
+    learning["sessionCount"] = 0; learning["learned"] = false; learning["limitS"] = s.limitS;
+    learning["countsTowardLearning"] = false;
     String body; serializeJson(doc, body);
-    int code = supabasePost("log-session", body);
-    if (!supabaseDone(code)) { supabaseRetryAt = monotonicMs() + 30000; return; }
+    if (!supabaseDone(supabasePost("log-session", body))) { sessionRetryAt = monotonicMs() + 30000; break; }
     xQueueReceive(sessionReports, &s, 0);
   }
 }
@@ -1492,8 +1060,7 @@ void networkTask(void*) {
   else startSetup();  // nothing to connect to yet
   configTime(0, 0, "pool.ntp.org", "time.google.com");  // UTC; the app localizes
   static Snapshot latest[2]; bool available[2] = {false, false};
-  uint32_t publishedVersion[2] = {UINT32_MAX, UINT32_MAX};
-  uint64_t lastCommands = 0, lastPublish = 0, lastCatalog = 0, lastConfig = 0, lastLive = 0, lastRegistrations = 0;
+  uint64_t lastCommands = 0, lastPublish = 0, lastConfig = 0, lastLive = 0;
   for (;;) {
     uint64_t now = monotonicMs();
     updateWifi(now);
@@ -1508,26 +1075,17 @@ void networkTask(void*) {
       }
       if (available[0] && available[1] && now - lastPublish >= 1000) {
         lastPublish = now;
-        bool catalog = now - lastCatalog >= 60000 || latest[0].profilesVersion != publishedVersion[0] ||
-                       latest[1].profilesVersion != publishedVersion[1];
         bool live = now - lastLive >= LIVE_TELEMETRY_MS;
         JsonDocument root;
         for (int i = 0; i < 2; ++i) {
-          addOutlet(root, i, latest[i], catalog);
+          addOutlet(root, i, latest[i]);
           if (live) addLiveTelemetry(root, i, latest[i]);
         }
         addStatus(root, latest);
         String body; serializeJson(root, body);
-        if (firebaseRequest("PATCH", "", body) == HTTP_CODE_OK) {
-          if (live) lastLive = now;
-          if (catalog) {
-            lastCatalog = now;
-            for (int i = 0; i < 2; ++i) publishedVersion[i] = latest[i].profilesVersion;
-          }
-        }
+        if (firebaseRequest("PATCH", "", body) == HTTP_CODE_OK && live) lastLive = now;
       }
       if (now - lastConfig >= 10000) { lastConfig = now; checkWifiConfig(); }
-      if (now - lastRegistrations >= 30000 || !lastRegistrations) { lastRegistrations = now; syncRegistrations(); }
       sendNotices();  // safety first
       sendEvents();
     }
@@ -1560,8 +1118,8 @@ void setup() {
 #ifdef SUPABASE_FUNCTIONS_URL
   sessionReports = xQueueCreate(8, sizeof(SessionSummary));
   safetyReports = xQueueCreate(8, sizeof(SafetyReport));
-  featureReports = xQueueCreate(4, sizeof(FeatureReport));
-  cutoffReplies = xQueueCreate(4, sizeof(CutoffReply));
+  recognitionReports = xQueueCreate(4, sizeof(RecognitionReport));
+  recognitionReplies = xQueueCreate(4, sizeof(RecognitionReply));
 #endif
   // The PZEM constructors open these ports before the core is fully started,
   // which is unreliable; open them again here so both meters respond.
@@ -1571,7 +1129,6 @@ void setup() {
   for (int i = 0; i < 2; ++i) {
     auto& ch = outlets[i];
     ch.ns = i == 0 ? "apps_a" : "apps_b"; ch.outlet = i == 0 ? "outlet_A" : "outlet_B";
-    ch.catalog = i == 0 ? "OUTLET_A" : "OUTLET_B"; ch.legacyCatalog = i == 0 ? "OUTLET A" : "OUTLET B";
     ch.relay = i == 0 ? RELAY_A_PIN : RELAY_B_PIN; ch.button = i == 0 ? BUTTON_A_PIN : BUTTON_B_PIN;
     pinMode(ch.button, INPUT_PULLUP);
     ch.rawButton = ch.stableButton = digitalRead(ch.button); ch.buttonChanged = monotonicMs();
@@ -1579,7 +1136,6 @@ void setup() {
     ch.snapshots = xQueueCreate(1, sizeof(Snapshot));
     configASSERT(ch.sensors && ch.commands && ch.snapshots);
     ch.storageOK = ch.prefs.begin(ch.ns, false);
-    if (ch.storageOK) loadProfiles(ch);
     ch.prefs.getBytes("alert", &ch.data.alert, sizeof(AlertRecord));
     ch.data.alert.id[79] = 0; ch.data.alert.type[39] = 0; ch.data.alert.resolution[15] = 0;
     // A reboot during a running session (e.g. power cut) locks out: nothing restarts unattended.
@@ -1599,25 +1155,41 @@ void setup() {
 
 void loop() {
   uint64_t now = monotonicMs();
-  // identify-appliance's cutoff for a run. It may only SHORTEN the limit (an
-  // unconfirmed load gets 30 min), never extend it: the plug's own limit and
-  // the electrical trips stay in charge if the server is wrong or offline.
-  CutoffReply reply;
-  while (cutoffReplies && xQueueReceive(cutoffReplies, &reply, 0) == pdTRUE) {
+  // recognize-appliance's answer for a run (Stage 1 or 2).
+  //  * MATCHED_CONFIRMED: the appliance's own cutoff (it may be longer than the
+  //    default: Supabase, over authenticated HTTPS, has confirmed what it is).
+  //  * any other status: the server's cutoff, but never above DEFAULT_LIMIT_S,
+  //    so an unconfirmed load can never get another appliance's limit even if
+  //    the server were wrong.
+  // A confirmed cutoff already received stays for the rest of the run even if
+  // Wi-Fi drops; a run that never got one keeps the default.
+  RecognitionReply reply;
+  while (recognitionReplies && xQueueReceive(recognitionReplies, &reply, 0) == pdTRUE) {
     auto& ch = outlets[reply.outlet];
-    auto& safety = ch.data.safety;
+    auto& d = ch.data;
+    auto& safety = d.safety;
     if (!ch.sessionOpen || ch.sessionStartMono != reply.startMono || !reply.cutoffS ||
         (safety.state != SocketState::Active && safety.state != SocketState::Sampling)) continue;
-    uint64_t deadline = safety.started + uint64_t(reply.cutoffS) * 1000;
-    if (deadline < safety.deadline) { safety.deadline = deadline; ++safety.revision; }
-    Serial.printf("[%s] Identified %s: cutoff %lu s\n", ch.outlet, reply.outcome, (unsigned long)reply.cutoffS);
+    // A late Stage 1 answer never overrides what Stage 2 or the user decided.
+    if (d.confirmed && strcmp(reply.status, "MATCHED_CONFIRMED") != 0) continue;
+    bool confirmed = strcmp(reply.status, "MATCHED_CONFIRMED") == 0;
+    uint32_t limit = min(reply.cutoffS, confirmed ? MAX_CONFIRMED_LIMIT_S : DEFAULT_LIMIT_S);
+    // Time the user granted with "Yes, Override" is not taken back.
+    if (!safety.overridden) { safety.deadline = safety.started + uint64_t(limit) * 1000; }
+    ++safety.revision;
+    strlcpy(d.recognition, reply.status[0] ? reply.status : "UNKNOWN", sizeof(d.recognition));
+    d.confirmed = confirmed;
+    bool matched = confirmed || strcmp(reply.status, "MATCHED_PROVISIONAL") == 0;
+    strlcpy(d.activeProfileID, matched ? reply.applianceID : "", sizeof(d.activeProfileID));
+    strlcpy(d.activeName, matched ? reply.name : "", sizeof(d.activeName));
+    Serial.printf("[%s] Stage %d: %s%s%s, cutoff %lu s\n", ch.outlet, reply.stage, reply.status,
+                  matched ? " " : "", matched ? reply.name : "", (unsigned long)limit);
   }
   for (auto& ch : outlets) {
     auto& d = ch.data;
     auto& safety = d.safety;
-    auto* running = activeProfile(ch);
-    uint32_t maxRun = warnAfter(running);
-    if (safety.tick(now, maxRun)) {
+    // "Near limit" (runtime_warning) once the run reaches its current cutoff.
+    if (safety.tick(now, currentLimitS(safety))) {
       if (safety.state == SocketState::Warning) beginAlert(ch, "SAFETY_CEILING_EXCEEDED", now); else lock(ch);
     }
     bool raw = digitalRead(ch.button);
@@ -1627,9 +1199,7 @@ void loop() {
       if (!raw && ch.storageOK) {
         if (safety.state == SocketState::Warning) lock(ch);
         else {
-          bool wasActive = safety.state == SocketState::Active;
           safety.physicalPress();
-          if (wasActive && safety.state == SocketState::Disabled) recordSession(ch, now);
           endSession(ch, "TURNED_OFF"); persistSafety(ch);
           logEvent(ch, safety.state == SocketState::Disabled ? "OUTLET_OFF" : "OUTLET_ON", "", "button");
         }
@@ -1650,9 +1220,6 @@ void loop() {
         d.alert.trigger = d.capturedEpoch - int64_t(now - safety.warningStarted);
         d.alert.expiry = d.alert.trigger + 60000; persistSafety(ch);
       }
-      auto* p = activeProfile(ch);
-      strlcpy(d.activeName, p ? p->name : "", sizeof(d.activeName));
-      strlcpy(d.activeProfileID, p ? p->profileID : "", sizeof(d.activeProfileID));
       xQueueOverwrite(ch.snapshots, &d);
     }
   }
