@@ -118,13 +118,8 @@ serve(async (req) => {
   }, { onConflict: "device_id,outlet,started_at", ignoreDuplicates: true }).select("id");
   if (sessionError) throw sessionError;
 
-  // The run is over: free its outlet and instance for identify-appliance. A
-  // newer run already reported on this outlet (uploads can lag) is kept.
-  const { error: endError } = await db.from("active_sessions").delete()
-    .eq("device_id", deviceId).eq("outlet", outlet).lte("started_at", endedAt);
-  if (endError) throw endError;
-
-  // Rule-based recognition: close this run's outlet session. If the user's
+  // Rule-based recognition: close this run's outlet session (a newer run
+  // already reported on this outlet, as uploads can lag, is kept). If the user's
   // appliance was CONFIRMED and the run ended normally (switched off, not a
   // lock-out), it counts as one use for the 7-use learning.
   const { data: open, error: openError } = await db.from("outlet_sessions")

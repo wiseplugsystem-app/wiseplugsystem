@@ -50,6 +50,7 @@ serve(async (req) => {
     status: "MATCHED_CONFIRMED",
     confirmed_by: "user",
     appliance_id: appliance.id,
+    actual_appliance_id: appliance.id,  // ground truth for recognition_evaluation
     profile_id: fit?.profile.id ?? null,
     last_score: fit ? Math.round(fit.score * 1000) / 1000 : null,
     cutoff_s: cutoffS,

@@ -110,6 +110,9 @@ serve(async (req) => {
     profile_id: r.match?.profile.id ?? null,
     status: r.status,
     confirmed_by: r.status === "MATCHED_CONFIRMED" ? "stage2" : null,
+    // The automatic decision, kept for evaluation when the user later answers.
+    predicted_status: r.status,
+    predicted_appliance_id: r.match?.appliance.id ?? null,
     stage,
     started_at: new Date(startedAt).toISOString(),
     last_score: r.match ? Math.round(r.match.score * 1000) / 1000 : null,

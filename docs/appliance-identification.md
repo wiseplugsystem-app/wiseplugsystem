@@ -1,260 +1,251 @@
-# Appliance identification: open-set k-NN with outlet exclusivity
+# Rule-based appliance recognition
 
-How WisePlug decides which appliance is plugged into an outlet, why the old
+How WisePlug decides which appliance is on an outlet, why the old
 wattage-range rule failed, and how the new design is tested and evaluated.
-
-The CNN signature embedding adapted from Matindife et al. (2020) is described
-in [appliance-embedding.md](appliance-embedding.md). It uses the same
-`decide()` step. This k-NN on hand-crafted features is its baseline and its
-fallback.
+There is **no machine learning**: every decision is an explicit rule on
+averages, standard deviations and tolerances, so each one can be checked by
+hand.
 
 | Part | File |
 |---|---|
-| Matcher (pure, tested) | `supabase/functions/_shared/knn.ts`, tests in `supabase/tests/knn.test.ts` |
-| Schema | `supabase/migrations/20261029000000_appliance_instances.sql` |
-| Edge Functions | `identify-appliance` (plug), `confirm-appliance` (app); `log-session` frees the outlet |
-| Firmware | `arduino/wiseplug_esp32/signature_window.h`, `finishSampling()` and `sendSupabase()` in the sketch |
+| Rules (pure, unit-tested) | `supabase/functions/_shared/matching.ts`, tests in `supabase/tests/matching.test.ts` |
+| Scenario table for the thesis | `tool/recognition_table.ts` |
+| Edge Functions | `recognize-appliance` (plug), `register-sample`, `confirm-match`, `manage-appliance` (app), `log-session` (end of run, 7-use learning) |
+| Schema | `supabase/migrations/20261029020000…` to `…050000` |
+| Tunable numbers | table `recognition_config` (one row) |
+| Firmware measurement | `arduino/wiseplug_esp32/recognition_window.h` (tests in `test/recognition_window_test.cpp`) |
+| App | `lib/screens/recognition_prompt.dart`, `register_appliance_screen.dart`, `appliances_panel.dart` |
+| Evaluation | views `recognition_evaluation`, `recognition_confusion`, `recognition_metrics`, `recognition_summary` |
 
-## 1. Root cause of the Fan / Appliance Y failure
+## 1. The failure being fixed
 
-1. **One feature.** A wattage range cannot separate appliances that draw the
-   same power. 57 W of fan motor and 57 W of laptop charger differ in power
-   factor (about 0.9 vs about 0.55) and current, which the range ignored.
-2. **Closed-set decision.** The rule always returned *some* registered
-   appliance whose range contained the reading. There was no "I don't know"
-   outcome, so a new appliance could only ever be mislabelled.
-3. **No physical constraint.** Matching ignored that the registered Fan was
-   *running on Outlet A*. One physical appliance cannot be in two sockets, so
-   the Fan should have been excluded from matching on Outlet B.
-4. **Type and instance conflated.** "Fan" was both the kind of appliance and
-   the single unit, so a second fan could not be registered with its own
-   signature and limit.
+A Fan (55–60 W) runs on Outlet A. A different appliance drawing 55–60 W is
+plugged into Outlet B, and the old system labelled it "Fan". It went wrong for
+four reasons:
 
-The firmware fix for (3) is in `finishSampling()`: a profile running on the
-other outlet is skipped, and a second load that only resembles it is learned
-as a new appliance for the user to name. `MERGE_PROFILE` refuses to merge two
-profiles that are both running.
+1. **Wattage alone** cannot separate same-wattage appliances. Power factor
+   (a fan's motor ≈ 0.9, a laptop charger ≈ 0.55) and the start-up do.
+2. **Closed set:** there was no "I don't know" answer.
+3. **No physical rule:** one appliance cannot be in two sockets.
+4. **Type and unit were mixed up:** "Fan" was both the kind of appliance and
+   the one unit, so a second fan could not be registered.
 
-## 2. Signature features at 1 reading per second
+## 2. What the plug measures
 
-The PZEM-004T v3.0 reports V, I, P, PF, energy and frequency about once per
-second. It gives no waveform, so harmonic and V-I trajectory features
-(used with high-rate data such as PLAID) are out of reach.
-
-| Feature | How it is obtained | Reliability at 1 Hz | Weight |
-|---|---|---|---|
-| Active power P | measured, mean over 30 s | high (0.5 % accuracy, 0.1 W resolution) | 1 |
-| RMS current I | measured, mean over 30 s | high | 1 |
-| Power factor PF | measured, mean over 30 s | high above ~5 W; ignored below `MIN_PF_POWER_W` | 1 |
-| Reactive power Q | derived: S = V x I, Q = sqrt(S^2 - P^2) | medium: a small difference of large numbers when PF is near 1 | 0.5 |
-| Steady variation (CV) | std(P) / mean(P) over the window | medium: needs the full 30 s | 0.5 |
-| Start-up peak ratio | highest P in the first 5 s / steady P | low: the meter averages away most of a millisecond inrush | 0.25 |
-| Standby power | smoothed P while idle | low (noise floor ~0.5 W); stored, not matched | 0 |
-| On/off cycling | duty cycle over many minutes | unavailable at plug-in time; analyse later from `sessions` | 0 |
-
-P and I are strongly correlated (I is about P / (V x PF)), so together they count
-somewhat double. PF and Q add the independent information that separates
-same-wattage appliances.
-
-**Window.** The plug ignores the first 5 s (start-up, used only for the peak),
-then summarises 30 s of steady load (`SignatureWindow`, Welford's running
-mean and variance, one reading counted per second). Runs shorter than that
-are not identified. The plug's own limit and the electrical trips still
-apply to them.
-
-## 3. Data model
+At plug-in (power above 2 W), each outlet runs a small state machine:
 
 ```
-appliance_types (Fan)  1--*  appliance_instances (Fan 1, Fan 2)  1--*  signature_samples (<= 20 per mode)
-outlets (outlet_1, outlet_2)  1--0..1  active_sessions  *--0..1  appliance_instances
+IDLE → STARTUP (first 5 s) → SETTLING → STEADY (30 s) → REPORTED
 ```
 
-* `appliance_instances` has its own `max_runtime_mins`, so Fan 1 and Fan 2
-  can have different safe operating times.
-* `signature_samples.mode` lets one instance have several operating points
-  (fan speed 1 and speed 3). A trigger keeps the newest 20 samples per mode.
-* `active_sessions` enforces the rules in the database:
-  * `unique (device_id, outlet)`: one load per outlet.
-  * `unique (instance_id)`: **an instance is active on at most one outlet.**
-  * an identity is attached only to CONFIDENT or CONFIRMED loads.
-  * an unconfirmed load cannot have a cutoff above 30 min.
+- **Settled** means 5 consecutive readings whose spread is under 2 % of their
+  mean.
+- If the load never settles within 60 s, everything collected so far is used
+  and the run is marked `unstable`.
+- The run ends after 3 s below 1.5 W.
 
-## 4. Matching algorithm
-
-```
-INPUT  x = (P, I, PF, Q, CV, peakRatio) of the new load on outlet o
-FOR each instance j of the device:
-    FOR each mode m of j:
-        mu, sigma  <- mean, std of the mode's samples
-        sigma_f    <- sqrt(std_f^2 + floor_f^2) * sqrt(1 + 1/n)     # meter floor, small-n inflation
-        d(x, s)    <- sqrt( sum_f w_f ((x_f - s_f) / sigma_f)^2 / sum_f w_f )   # per sample s
-        D_jm       <- mean of the k = 3 smallest d(x, s)            # k-NN distance
-        T1_jm, T2_jm <- thresholds of the mode (below)
-    D_j <- min over modes;  keep that mode's T1, T2
-EXCLUDE every j active on another outlet            # outlet exclusivity
-    if an excluded j has D_j <= T2_j: suggest "Register as <type of j> <next number>?"
-SORT the rest by D_j: best b, then the others
-IF no b or D_b > T2_b         -> UNKNOWN    (cutoff = conservative 30 min)
-ELSE IF D_b > T1_b            -> AMBIGUOUS  (pre-select b; cutoff = 30 min)
-ELSE IF another c has D_c <= T1_c and D_c - D_b < 0.5
-                              -> AMBIGUOUS  (identical units: pre-select the one last
-                                             seen on outlet o; cutoff = 30 min)
-ELSE                          -> CONFIDENT  (label b; cutoff = b's own limit)
-```
-
-**Thresholds.** Distances are in standard-deviation units. Until a mode has
-5 samples: T1 = 2.0, T2 = 3.5. For Gaussian features, a genuine reading
-rarely exceeds an RMS z of 2. From 5 samples on, leave-one-out: each sample
-is matched against the others, T1 = the 95th percentile of those genuine
-distances (clamped to 1.0..3.0), and T2 = max(1.75 x T1, T1 + 1).
-
-**Why they tighten.** The `sqrt(1 + 1/n)` inflation shrinks towards 1 as n
-grows, the sample std converges to the appliance's real spread, and the
-percentile replaces the lenient default. In the test data a Fan with 20
-samples calibrates to T1 = 1.0, T2 = 2.0. It then accepts about ±5 % in
-power as CONFIDENT, ±5–9 % as AMBIGUOUS, and beyond that UNKNOWN.
-
-**Continuous learning.** Only user-confirmed runs (`confirm-appliance`)
-append a sample, into the closest mode, or into a new mode when the run is
-beyond that mode's T2. Unconfirmed auto-labels never train the model, so one
-mislabel cannot drift a signature.
-
-**Identical units (honest limitation).** Two units of the same model are
-electrically indistinguishable: their signatures overlap within meter noise.
-The system does not claim otherwise. It uses, in order:
-
-1. Exclusivity: if Fan 1 runs on Outlet A, a fan on Outlet B is Fan 2.
-2. Last-known outlet: pre-selects the likely unit.
-3. The user's one-tap confirmation.
-
-**Safety rule.** AMBIGUOUS and UNKNOWN loads always get the conservative 30
-min cutoff, never a candidate's limit, even a shorter one: it is not that
-appliance's rule until confirmed. The plug applies the server's cutoff only
-if it is *shorter* than its own deadline, so a wrong or unreachable server can
-never extend a run. Overcurrent and power-anomaly trips are always local.
-
-## 5. ESP32 side
-
-1. **Detect.** Every reading, `handleSensor()` compares P with
-   `START_W_THRESHOLD` (3.5 W). Crossing it starts a run, opens the window
-   and records standby power from before the run.
-2. **Collect.** `SignatureWindow::add()` keeps the peak for 5 s, then 30 s of
-   Welford statistics.
-3. **Send.** `queueFeatures()` queues the summary; the `supabase` task POSTs
-   it to `identify-appliance` (event ID = boot session + outlet + start time,
-   so retries are idempotent).
-4. **Apply.** The reply's `cutoffS` goes back through `cutoffReplies` and
-   `loop()` shortens the deadline if needed.
-
-The sketch reads the two meters on **two UARTs** (Serial2 on GPIO 32/33,
-Serial1 on 25/26), which needs no address setup and is the more robust
-wiring. If both modules must share one UART, give each a Modbus address
-first (one module connected at a time), then read both on the same port:
-
-```cpp
-#include <PZEM004Tv30.h>
-// One-time: connect only module A, run pzem.setAddress(0x01); then only B, setAddress(0x02).
-PZEM004Tv30 pzemA(Serial2, 16, 17, 0x01);   // RX, TX, Modbus address
-PZEM004Tv30 pzemB(Serial2, 16, 17, 0x02);   // same bus, different address
-void setup() { Serial.begin(115200); Serial.printf("A=0x%02x B=0x%02x\n", pzemA.readAddress(), pzemB.readAddress()); }
-void loop() {
-  for (auto* m : {&pzemA, &pzemB}) {
-    float v = m->voltage(), i = m->current(), p = m->power(), pf = m->pf();
-    if (isnan(p)) { Serial.println("no reply: check address and wiring"); continue; }
-    float s = v * i, q = sqrt(fmaxf(s * s - p * p, 0));
-    Serial.printf("P=%.1f W I=%.3f A PF=%.2f Q=%.1f var\n", p, i, pf, q);
-  }
-  delay(1000);
-}
-```
-
-On a shared bus the modules' TX outputs are wired together; keep the wires
-short and read the modules one after the other, never at the same time.
-
-## 6. App screens and states
-
-The app listens to `active_sessions` (Supabase Realtime) for its outlets.
-
-| State | Screen | Prompt / actions |
+| Feature | Definition | Sent at |
 |---|---|---|
-| Sampling (0–35 s) | Outlet card: "Recognizing appliance…" with a progress ring | none; the conservative 30 min limit is shown |
-| CONFIDENT | Card shows "Fan 1" and its limit | small "Not Fan 1?" link opens the AMBIGUOUS sheet |
-| AMBIGUOUS | Bottom sheet "Which appliance is on Outlet B?" | up to 3 candidates (the suggested one pre-selected), **Register new appliance**, **Ask me later**; banner: "Using a 30 min safety limit until you choose" |
-| AMBIGUOUS, identical units | Same sheet, text: "Fan 1 and Fan 2 look identical to the plug. It was last on Outlet B, so we chose Fan 2." | one tap to confirm |
-| UNKNOWN | Sheet "New appliance on Outlet B" | type picker (existing types + new), name pre-filled "Fan 2", safe operating time (pre-filled from the type), **Register**; or **Not now** (keeps 30 min) |
-| UNKNOWN with `registerAs` | Sheet headline: "Looks like Fan 1, which is running on Outlet A. Register as Fan 2?" | **Register as Fan 2**, **Something else** |
-| Confirmed | Card shows the name; snackbar "Saved. WisePlug learns Fan 2 better each use." | the app sends the instance limit to the plug (`EDIT_PROFILE`) |
+| `avg_power_w` | mean active power in STEADY | Stage 1 |
+| `avg_pf` | mean power factor in STEADY | Stage 1 |
+| `avg_voltage_v` | mean voltage in STEADY (for voltage correction) | Stage 1 |
+| `startup_peak_ratio` | highest power in the first 5 s / `avg_power_w` | Stage 1 |
+| `settling_time_s` | seconds from plug-in until settled | Stage 1 |
+| `standby_power_w` | smoothed draw before the run, when ≥ 0.5 W (else null) | Stage 1 |
+| `power_variation` | (max − min) / mean power in STEADY | Stage 2 |
+| `cycle_period_s` | mean time between on-cycles, if the load cycled at least twice in the first minute (else null) | Stage 2 |
 
-Registration flow: choose type → name (auto "Type N") → safe operating time
-→ the current run's features become the instance's first sample.
+**Why not current:** I = P / (V × PF). Once power, voltage and PF are known,
+current adds no independent information.
 
-## 7. Test plan
+**When each stage is sent:** Stage 1 goes about 10 s after the load settles;
+Stage 2 at the end of STEADY (about 35–60 s after plug-in).
 
-Automated: `node --test supabase/tests/knn.test.ts` (seeded noise, so the
-results repeat exactly). On hardware, repeat each row 10 times and record
-the outcome.
+**Limits of 1 reading per second:**
+- Millisecond inrush is averaged away, so the peak only reflects slow
+  start-ups (motor spin-up, a charger's soft start).
+- A thermostat usually cycles over minutes, so `cycle_period_s` is mostly
+  null.
 
-| # | Scenario | Expected result | Automated |
-|---|---|---|---|
-| 1 | Fan registered and running on Outlet A; a 55–60 W load plugged into B | B is **UNKNOWN** (never "Fan"); prompt "Register as Fan 2?"; 30 min cutoff. With A idle, the same reading on A is **CONFIDENT Fan**. | test 1 |
-| 2 | 57 W fan (PF ~0.92) and 57 W laptop charger (PF ~0.55) | Each identified as itself; with only the fan registered, the charger is **UNKNOWN** (distance ~11.6 vs T2 = 2) | test 2 |
-| 3a | Two identical fans registered, both idle, one plugged into B | **AMBIGUOUS** "look identical", pre-selects the fan last seen on B, 30 min cutoff | test 3a |
-| 3b | Fan 1 running on A, the other fan plugged into B | **CONFIDENT Fan 2** with Fan 2's own cutoff (exclusivity decides) | test 3b |
-| 4 | Fan learned at speed 1 (40 W), first run at speed 3 (57 W) | Not CONFIDENT; after the user confirms "Fan", speed 3 becomes mode 1; later runs at either speed are **CONFIDENT** | test 4 |
-| 5 | Sensor noise: ±1 % P, ±0.005 PF, ±0.5 % V, 200 runs | ≥ 90 % CONFIDENT and **0 mislabels** (measured: 200/200 correct) | test 5 |
-| 6 | Unconfirmed load near an appliance with an 8 h limit | cutoff stays 30 min | "never inherit" test |
-| 7 | Same instance claimed on both outlets at once (race) | database rejects the second (unique key); that outlet becomes AMBIGUOUS | migration check |
+## 3. Registration
 
-## 8. Evaluation metrics
+The user names the appliance and its type, then plugs it in **3 times**. The
+app guides each plug-in.
 
-Collect a labelled log: for each run, the true appliance (noted by the
-tester) and the system's outcome. Include runs of appliances that are **not
-registered** to measure open-set behaviour (leave-one-appliance-out:
-de-register one appliance, run it, repeat for each).
+- **Where it is stored:** each run becomes a raw sample of the appliance's
+  **mode profile**, for example "Fan – Low" or "Fan – High".
+- **Mean and spread:** the profile stores the mean and standard deviation of
+  every feature, plus the mean voltage at registration.
+- **When it can be matched:** only once the profile has all 3 samples.
+- **Modes:** matching any profile of an appliance counts as matching the
+  appliance.
 
-* **Accuracy** (known appliances): correct CONFIDENT labels / all runs of registered appliances.
-* **Precision, recall, F1 per appliance** from the confusion matrix, treating
-  "UNKNOWN/AMBIGUOUS" as its own column; report macro-F1 too.
-  Precision_j = TP_j / (TP_j + FP_j), Recall_j = TP_j / (TP_j + FN_j), F1 = 2PR / (P + R).
-* **Unknown-detection rate**: runs of unregistered appliances that end
-  UNKNOWN or AMBIGUOUS / all such runs. Its complement is the open-set error
-  (a new appliance mislabelled as a known one).
-* **Coverage / user burden**: share of runs auto-labelled (CONFIDENT) vs runs
-  that needed a prompt.
-* **Safety metric**: number of runs where an unconfirmed load received another
-  appliance's cutoff. The design target is 0, and the database constraint
-  makes anything else impossible.
-* **Learning curve**: accuracy and T1 vs number of confirmed samples (1, 3, 5, 10, 20).
+## 4. The rules
 
-These map onto ISO/IEC 25010 functional correctness (accuracy, F1),
-reliability/fault tolerance (server offline: local limits still apply) and
-safety (the cutoff metric).
+All numbers below come from `recognition_config`.
 
-## 9. References (verify each in Google Scholar)
+1. **Tolerance** of a feature for a profile:
+   `tolerance = max(3 × std_dev, floor)`.
+   - The floors are: power 2 % of the mean, PF 0.02, start-up ratio 0.10,
+     variation 0.02, settling 2 s, cycle 10 % of the mean, standby 0.5 W.
+   - Why a floor: 3 near-identical registration samples (std ≈ 0) must not
+     make an appliance reject its own next run.
+2. **Voltage correction (resistive loads):** for a profile with mean PF ≥ 0.95,
+   `power × (registration V / measured V)²` is compared, because a heater
+   follows P = V²/R. Other loads are compared as measured.
+3. **Pass/fail:** every feature present on both sides must satisfy
+   `|new − mean| ≤ tolerance`.
+   - A feature missing on either side is skipped.
+   - Power is always required, so a profile is never accepted on PF alone.
+   - Any failure means the profile is not a candidate.
+4. **Score:** `Σ wᵢ × |newᵢ − meanᵢ| / toleranceᵢ / Σ wᵢ`.
+   - 0 means identical; 1 means at the edge of the tolerance; lower is better.
+   - Weights: power 0.30, PF 0.30, start-up 0.15, variation 0.10, settling
+     0.10, standby 0.05. Cycle period is pass/fail only.
+   - Each appliance keeps its best-scoring mode.
+5. **Outlet exclusivity:** an appliance in an open run on any outlet of the
+   user's plugs is removed. The database enforces this too, with a unique
+   index on open sessions.
+6. **Decision:**
 
-* Hart, G. W. (1992). Nonintrusive appliance load monitoring. *Proceedings of the IEEE*, 80(12), 1870–1891. (appliance signatures, steady-state P/Q features)
-* Liang, J., Ng, S. K. K., Kendall, G., & Cheng, J. W. M. (2010). Load signature study—Part I: Basic concept, structure, and methodology. *IEEE Transactions on Power Delivery*, 25(2), 551–560.
-* Zeifman, M., & Roth, K. (2011). Nonintrusive appliance load monitoring: Review and outlook. *IEEE Transactions on Consumer Electronics*, 57(1), 76–84. (feature requirements, sampling-rate limits)
-* Ridi, A., Gisler, C., & Hennebert, J. (2014). A survey on intrusive load monitoring for appliance recognition. *22nd International Conference on Pattern Recognition (ICPR)*, 3702–3707. (plug-level identification, k-NN baselines)
-* Gao, J., Giri, S., Kara, E. C., & Bergés, M. (2014). PLAID: A public dataset of high-resolution electrical appliance measurements for load identification research. *ACM BuildSys '14*, 198–199. (high-rate features this hardware cannot provide)
-* Hassan, T., Javed, F., & Arshad, N. (2014). An empirical investigation of V-I trajectory based load signatures for non-intrusive load monitoring. *IEEE Transactions on Smart Grid*, 5(2), 870–878.
-* De Baets, L., Develder, C., Dhaene, T., & Deschrijver, D. (2019). Detection of unidentified appliances in non-intrusive load monitoring using siamese neural networks. *International Journal of Electrical Power & Energy Systems*, 104, 645–653. (open-set / unknown appliances; we use the same idea with distance thresholds instead of a neural network)
-* Cover, T., & Hart, P. (1967). Nearest neighbor pattern classification. *IEEE Transactions on Information Theory*, 13(1), 21–27.
-* Scheirer, W. J., de Rezende Rocha, A., Sapkota, A., & Boult, T. E. (2013). Toward open set recognition. *IEEE Transactions on Pattern Analysis and Machine Intelligence*, 35(7), 1757–1772.
-* Welford, B. P. (1962). Note on a method for calculating corrected sums of squares and products. *Technometrics*, 4(3), 419–420.
-* Sokolova, M., & Lapalme, G. (2009). A systematic analysis of performance measures for classification tasks. *Information Processing & Management*, 45(4), 427–437.
-* ISO/IEC 25010:2011 (revised 2023). Systems and software Quality Requirements and Evaluation (SQuaRE) — product quality model.
+| Situation | Status | User sees |
+|---|---|---|
+| No candidate passes | `UNKNOWN` | "New appliance detected. Register it?" |
+| The only passing candidates were removed by rule 5 | `SAME_TYPE_IN_USE` | "This looks like another Fan. Register as Fan 2?" |
+| One candidate, or the runner-up scores ≥ 1.5 × the best **and** is more than 0.10 worse | `MATCHED_PROVISIONAL` | label marked provisional |
+| Otherwise (a near tie) | `AMBIGUOUS` | "Is this A or B?", with the one last used on this outlet pre-selected |
+| Stage 2 picks the same appliance as Stage 1 | `MATCHED_CONFIRMED` | its own cutoff applies |
 
-## 10. Deploying
+   The tie-margin part of the clear-winner rule matters when both scores are
+   tiny: 0.01 vs 0.02 is "twice as far", but the two are practically identical.
+
+7. **Safety:** every status except `MATCHED_CONFIRMED` gets the conservative
+   default cutoff (30 min), never another appliance's limit. This is enforced
+   three times:
+   - by the rules
+   - by a database trigger on `outlet_sessions`
+   - by the plug, which caps any unconfirmed cutoff at 30 min, and runs on
+     30 min whenever Supabase cannot be reached
+8. **Confirmed cutoff:** the appliance's own safe operating time. After 7
+   confirmed normal uses, its average runtime × 1.5 applies instead: at least
+   5 min, never above its own limit.
+9. **Signature updating:** after a **user-confirmed** run that fits a mode:
+   - The mode's means move by `new = 0.9 × old + 0.1 × run`.
+   - The standard deviation is recomputed from the newest 20 samples.
+   - Unconfirmed runs never update anything.
+
+**Known limitation (stated honestly):**
+- Two units of the same model give near-identical readings. The readings
+  decide the **type**.
+- **Which unit** is decided by:
+  1. outlet exclusivity
+  2. the outlet it was last used on
+  3. the user's confirmation
+- Likewise, an electrically identical appliance of a different type, if it is
+  free, is a valid candidate (scenario 2b in the table).
+
+## 5. Data model
 
 ```
-npx supabase db push                      # applies 20261029000000_appliance_instances.sql
-npx supabase functions deploy identify-appliance confirm-appliance log-session
+appliance_types (Fan) 1─* appliance_instances (Fan 1, Fan 2: owner, cutoff, 7-use learning, last outlet)
+appliance_instances 1─* appliance_profiles (modes: mean/std per feature, registration V, sample count)
+appliance_profiles 1─* signature_samples (raw samples, newest 20 kept)
+outlets (device, outlet_1/outlet_2) 1─* outlet_sessions (one per run: status, cutoff, prediction, truth)
+recognition_config (one row: every tunable number)
 ```
 
-Then upload the sketch. Serial Monitor shows `Signature: …` about 35 s after
-a load starts and `Identified <OUTCOME>: cutoff <s>` when the server answers.
+Appliances belong to the **user** (`devices.owner_uid`), so one Fan can move
+between the user's plugs. Row-level security lets owners read their rows;
+only Edge Functions write.
 
-Not built yet: the Flutter screens in section 6. The backend replies and the
-`active_sessions` rows they read are in place, and `confirm-appliance` is the
-call behind every button.
+## 6. Test plan
+
+**Automated tests:**
+- `node --test supabase/tests/matching.test.ts`: 20 tests, including the 9
+  required scenarios. They also run under `deno test`.
+- `flutter test`: the prompts, guided registration and Appliances tab.
+- The plug's measurement state machine is tested in
+  `test/recognition_window_test.cpp`. It runs with g++ on a PC.
+
+**Scenario table for the thesis:** `node tool/recognition_table.ts` prints
+this table:
+
+| # | Scenario | Expected |
+|---|---|---|
+| 1 | Fan active on A; 58 W charger (PF 0.55) on B | UNKNOWN (PF fails) |
+| 2 | Fan active on A; identical fan (56 W, PF 0.91) on B | SAME_TYPE_IN_USE, "Register as Fan 2?" |
+| 3 | Fan moved from A to B | MATCHED_PROVISIONAL at Stage 1, MATCHED_CONFIRMED at Stage 2 |
+| 4 | Two registered appliances with close scores | AMBIGUOUS |
+| 5 | Fan with Low and High modes, running on one of them | matches Fan in that mode |
+| 6 | 1000 W heater registered at 220 V, measured at 235 V | matches after voltage correction |
+| 7 | Never-seen appliance | UNKNOWN, 30 min cutoff |
+| 8 | Noisy readings within tolerance | still matches |
+| 9 | Unconfirmed load reaches the default cutoff | the plug warns, then cuts power 60 s later (firmware test) |
+
+**On hardware:** repeat each scenario 10 times. For every run, note the
+outcome in Serial Monitor and in `outlet_sessions`.
+
+## 7. Evaluation (thesis numbers)
+
+**What is stored for each run:**
+- `predicted_status` / `predicted_appliance_id`: what WisePlug decided on its
+  own.
+- `actual_appliance_id`: the truth.
+
+**Where the truth comes from:**
+- **Automatically:** "Yes, it is …" in a prompt, or tapping a provisional
+  badge, sets it. So does registering a run.
+- **By hand:** a run auto-confirmed at Stage 2 asks nobody. Use your
+  recording sheet and set its truth in the SQL editor:
+
+```sql
+-- one run
+update outlet_sessions set actual_appliance_id =
+  (select id from appliance_instances where name = 'Fan 1')
+where event_id = '<event id>';
+-- all auto-confirmed runs of a test session you checked were right
+update outlet_sessions set actual_appliance_id = predicted_appliance_id
+where confirmed_by = 'stage2' and actual_appliance_id is null
+  and started_at between '2026-11-02 09:00+08' and '2026-11-02 11:00+08';
+```
+
+**Results:** `select * from recognition_summary;`, `recognition_metrics` and
+`recognition_confusion`. Use *Export → CSV* for the appendix.
+
+**What counts as new:** a run's appliance is "New appliance" when it was
+registered during or after that run. UNKNOWN or SAME_TYPE_IN_USE is then the
+correct answer. Registration plug-ins 2 and 3 are left out.
+
+**The metrics:**
+- **Accuracy (registered appliances):** correct recognitions / runs of
+  registered appliances.
+- **Overall accuracy:** (correct + new correctly flagged) / all runs.
+- **Precision, recall and F1 per appliance:**
+  - P = TP/(TP+FP), R = TP/(TP+FN), F1 = 2PR/(P+R).
+  - A run WisePlug asked about counts as not recognised (FN). The question is
+    safe, but it is not automatic.
+- **Unknown-appliance detection rate:** new appliances flagged UNKNOWN or
+  SAME_TYPE_IN_USE / all new-appliance runs.
+- **Asked the user / wrong appliance / missed known:** counts per outcome.
+- **Safety violations:** unconfirmed runs with more than the default cutoff.
+  The trigger makes this 0.
+
+**ISO/IEC 25010:**
+- *functional correctness*: accuracy, F1
+- *functional completeness*: the 9 scenarios
+- *fault tolerance*: offline → default cutoff
+- *time behaviour*: Stage 1 at about 15 s, Stage 2 at about 35–60 s
+- *safety*: the safety-violation count and scenario 9
+
+## 8. Deploying (order matters)
+
+```powershell
+npx supabase functions deploy recognize-appliance register-sample confirm-match manage-appliance log-session
+npx supabase db push
+npx supabase functions delete identify-appliance
+npx supabase functions delete confirm-appliance
+```
+
+1. **Deploy the functions first:** the new `log-session` no longer uses
+   `active_sessions`, which the last migration drops.
+2. **Delete the old functions last:** they belong to the removed k-NN design.

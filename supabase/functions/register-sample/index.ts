@@ -95,8 +95,12 @@ serve(async (req) => {
   const stats = await recomputeProfile(profileId);
   profile = { id: profileId, modeName: profile?.modeName ?? modeName, ...stats };
 
-  // The user has just said what this load is: it is confirmed.
+  // The user has just said what this load is: it is confirmed, and it is the
+  // ground truth of this run for recognition_evaluation (even if it ended).
   const cutoffS = confirmedCutoffS(appliance, config);
+  const { error: truthError } = await db.from("outlet_sessions")
+    .update({ actual_appliance_id: appliance.id }).eq("id", session.id);
+  if (truthError) throw truthError;
   if (!session.ended_at) {
     const { error } = await db.from("outlet_sessions").update({
       status: "MATCHED_CONFIRMED",
