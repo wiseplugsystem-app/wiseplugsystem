@@ -1,7 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:wiseplug/models/telemetry.dart';
-import 'package:wiseplug/services/esp32_service.dart';
-import 'package:wiseplug/services/outlet_recognizer.dart';
 import 'package:wiseplug/services/supabase_backend.dart';
 
 final t0 = DateTime.utc(2026, 10, 22, 8);
@@ -133,75 +131,4 @@ void main() {
       );
     });
   });
-
-  group('OutletRecognizer', () {
-    late FakeBackend backend;
-    late OutletRecognizer recognizer;
-    final seen = <SignatureMatch>[];
-
-    setUp(() {
-      backend = FakeBackend();
-      recognizer = OutletRecognizer(NoLiveService(), backend);
-      seen.clear();
-      recognizer.matches.listen(seen.add);
-    });
-
-    TelemetryReading reading(OutletChannel c, String state, double power) =>
-        TelemetryReading.fromMap(c, {
-          ...live(power: power),
-          'outlet': c.key,
-          'state': state,
-          'timestamp_ms': DateTime.now().toUtc().millisecondsSinceEpoch,
-        });
-
-    test('each outlet is identified once per run, independently', () async {
-      for (var i = 0; i < 4; i++) {
-        recognizer.handle(reading(OutletChannel.outlet1, 'ACTIVE', 55));
-        recognizer.handle(reading(OutletChannel.outlet2, 'ACTIVE', 600));
-      }
-      await pumpEventQueue();
-      expect(backend.asked.map((r) => r.channel), [
-        OutletChannel.outlet1,
-        OutletChannel.outlet2,
-      ]);
-      expect(seen.map((m) => m.outlet), [
-        OutletChannel.outlet1,
-        OutletChannel.outlet2,
-      ]);
-      expect(recognizer.current(OutletChannel.outlet2)!.applianceName, 'x600');
-    });
-
-    test('sampling is skipped and a new run is identified again', () async {
-      recognizer.handle(reading(OutletChannel.outlet1, 'SAMPLING', 55));
-      recognizer.handle(reading(OutletChannel.outlet1, 'SAMPLING', 55));
-      await pumpEventQueue();
-      expect(backend.asked, isEmpty, reason: 'still recognizing on the plug');
-      recognizer.handle(reading(OutletChannel.outlet1, 'ACTIVE', 55));
-      recognizer.handle(reading(OutletChannel.outlet1, 'ACTIVE', 55));
-      recognizer.handle(reading(OutletChannel.outlet1, 'IDLE', 0));
-      recognizer.handle(reading(OutletChannel.outlet1, 'ACTIVE', 1100));
-      recognizer.handle(reading(OutletChannel.outlet1, 'ACTIVE', 1100));
-      await pumpEventQueue();
-      expect(backend.asked.map((r) => r.power), [55, 1100]);
-      expect(recognizer.current(OutletChannel.outlet1)!.applianceName, 'x1100');
-    });
-  });
 }
-
-/// Answers like match-signature, naming the "appliance" after its wattage.
-class FakeBackend extends Fake implements SupabaseBackend {
-  final asked = <TelemetryReading>[];
-  @override
-  Future<SignatureMatch> matchSignature(TelemetryReading reading) async {
-    asked.add(reading);
-    return SignatureMatch.fromJson({
-      'status': 'matched',
-      'outlet': reading.channel.key,
-      'confidence': 95.0,
-      'appliance': {'name': 'x${reading.power!.round()}'},
-    });
-  }
-}
-
-/// Not listened to: the tests feed readings with handle().
-class NoLiveService extends Fake implements Esp32Service {}

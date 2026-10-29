@@ -188,36 +188,9 @@ void main() {
       device.gadget.add(online(654));
       await tester.pumpAndSettle();
       expect(find.text('654 W'), findsOneWidget);
-      await tester.tap(find.text('Profiles'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Idle').first);
-      await tester.pumpAndSettle();
-      expect(find.text('Stored fan'), findsOneWidget);
-      expect(find.text('Live appliance'), findsNothing);
-      await tester.tap(find.text('All'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Live appliance'));
-      await tester.pumpAndSettle();
+      // The name is the one the plug publishes (recognised by Supabase).
+      expect(find.text('Live appliance'), findsWidgets);
       expect(find.text('p1'), findsNothing); // the internal ID stays hidden
-      expect(find.text('Saved name'), findsOneWidget);
-      expect(find.text('7'), findsOneWidget);
-      expect(find.text('500.0 W'), findsNothing);
-      expect(find.text('Peak power'), findsNothing);
-      device.profiles.add([
-        LearnedAppliance.fromMap('A', 'p1', {
-          'name': 'Renamed by device',
-          'safetyCeilingDuration': 14400,
-          // Learned: typical use 20 min, so the limit is 30 min (x1.5).
-          'isLearningComplete': true,
-          'baselineAverage': 1200,
-          'learnedLimit': 1800,
-        }),
-      ]);
-      await tester.pumpAndSettle();
-      expect(find.text('Renamed by device'), findsWidgets);
-      expect(find.text('30 min'), findsOneWidget);
-      expect(find.text('20 min'), findsOneWidget); // typical use
-      expect(find.text('Not available'), findsWidgets);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
       await device.close();
@@ -394,19 +367,14 @@ void main() {
     );
     await tester.pump();
     final now = DateTime.now().millisecondsSinceEpoch;
-    device.profiles.add([
-      LearnedAppliance.fromMap('B', 'sig-1', {
-        'name': 'Desk fan',
-        'registered': true,
-      }),
-    ]);
+    // The plug publishes the name Supabase recognised, with its appliance id.
     device.readings.add({
       'B': OutletReading.fromMap('B', {
         'currentState': 'ACTIVE',
         'status': 'Active',
         'sessionID': 'boot',
-        'profileID': 'sig-1',
-        'appliance': 'UNNAMED_DEVICE_1',
+        'profileID': '0f6c2a4e-1111-2222-3333-444455556666',
+        'appliance': 'Desk fan',
         'power_W': 45,
         'last_updated_ms': now,
       }),
@@ -417,9 +385,9 @@ void main() {
       200,
       scrollable: find.byType(Scrollable).first,
     );
-    // Summary card and Power Control row both use the registered name.
+    // Summary card and Power Control row both use the recognised name.
     expect(find.text('Desk fan'), findsNWidgets(2));
-    expect(find.text('UNNAMED_DEVICE_1'), findsNothing);
+    expect(find.textContaining('0f6c2a4e'), findsNothing);
     await tester.pumpWidget(const SizedBox());
     await device.close();
   });
@@ -472,52 +440,6 @@ void main() {
     await tester.pumpAndSettle();
     expect(device.commands, ['B:RESET_SAFETY']);
     expect(find.text('Outlet B is back on.'), findsOneWidget);
-    await tester.pumpWidget(const SizedBox());
-    await device.close();
-  });
-
-  testWidgets('idle appliances show no fixed outlet and can be deleted', (
-    tester,
-  ) async {
-    await tester.binding.setSurfaceSize(const Size(420, 920));
-    addTearDown(() => tester.binding.setSurfaceSize(null));
-    final device = TestDevice();
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Esp32Dashboard(
-          service: device,
-          darkMode: false,
-          onDarkModeChanged: (_) {},
-        ),
-      ),
-    );
-    await tester.pump();
-    final now = DateTime.now().millisecondsSinceEpoch;
-    device.profiles.add([
-      LearnedAppliance.fromMap('A', 'kettle', {
-        'name': 'Old kettle',
-        'registered': true,
-      }),
-    ]);
-    device.readings.add({
-      'A': OutletReading.fromMap('A', {
-        'currentState': 'IDLE',
-        'status': 'Idle',
-        'sessionID': 'boot',
-        'last_updated_ms': now,
-      }),
-    });
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Profiles'));
-    await tester.pumpAndSettle();
-    expect(find.text('Old kettle'), findsOneWidget);
-    expect(find.textContaining('Outlet A'), findsNothing);
-    await tester.tap(find.byTooltip('Delete appliance'));
-    await tester.pumpAndSettle();
-    expect(find.text('Delete appliance?'), findsOneWidget);
-    await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
-    await tester.pumpAndSettle();
-    expect(device.deleted, ['kettle']);
     await tester.pumpWidget(const SizedBox());
     await device.close();
   });

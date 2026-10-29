@@ -5,13 +5,18 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:wiseplug/models/activity_event.dart';
 import 'package:wiseplug/models/esp32_data.dart';
 import 'package:wiseplug/models/gadget_status.dart';
+import 'package:wiseplug/models/recognition.dart';
 import 'package:wiseplug/screens/activity_screen.dart';
 import 'package:wiseplug/screens/auth_gate.dart';
 import 'package:wiseplug/screens/esp32_dashboard.dart';
+import 'package:wiseplug/screens/recognition_prompt.dart';
+import 'package:wiseplug/screens/register_appliance_screen.dart';
 import 'package:wiseplug/screens/wifi_config_screen.dart';
 import 'package:wiseplug/services/esp32_service.dart';
 import 'package:wiseplug/services/safety_alarm_manager.dart';
 import 'package:wiseplug/widgets/safety_alert_listener.dart';
+
+import 'fake_recognition.dart';
 
 class SilentAlarm implements SafetyAlarmManager {
   @override
@@ -139,26 +144,55 @@ Future<void> noOverflow(
 }
 
 void main() {
-  Widget dashboard(SmallScreenDevice device) => Esp32Dashboard(
-    service: device,
-    darkMode: false,
-    onDarkModeChanged: (_) {},
-  );
+  Widget dashboard(SmallScreenDevice device, [FakeRecognition? recognition]) =>
+      Esp32Dashboard(
+        service: device,
+        recognition: recognition ?? FakeRecognition(),
+        darkMode: false,
+        onDarkModeChanged: (_) {},
+      );
 
-  testWidgets('home, profiles and settings fit a small phone', (tester) async {
+  testWidgets('home, appliances and settings fit a small phone', (
+    tester,
+  ) async {
+    final recognition = FakeRecognition()
+      ..list = [
+        RegisteredAppliance.fromRow(
+          {
+            'id': 'kettle',
+            'name': 'Electric kettle in the kitchen corner',
+            'max_runtime_mins': 95,
+            'last_outlet': 'outlet_1',
+            'appliance_types': {'name': 'Kettle'},
+          },
+          modes: [
+            ApplianceMode.fromRow({
+              'id': 'm',
+              'mode_name': 'Keep warm',
+              'sample_count': 1,
+            }),
+          ],
+          runningOn: 'outlet_1',
+        ),
+      ];
     await noOverflow(tester, () async {
-      await show(tester, dashboard(SmallScreenDevice()));
+      await show(tester, dashboard(SmallScreenDevice(), recognition));
+      recognition.sessions.add({
+        'A': session(
+          status: 'MATCHED_PROVISIONAL',
+          applianceId: 'kettle',
+          applianceName: 'Electric kettle in the kitchen corner',
+        ),
+      });
+      await tester.pump(const Duration(milliseconds: 500));
       await tester.drag(find.byType(Scrollable).first, const Offset(0, -2000));
       await tester.pump();
-      await tester.tap(find.text('Profiles'));
+      await tester.tap(find.text('Appliances'));
       await tester.pump(const Duration(milliseconds: 500));
-      await tester.tap(find.text('Electric kettle in the kitchen corner'));
-      await tester.pump(const Duration(milliseconds: 500));
-      await tester.drag(find.byType(Scrollable).last, const Offset(0, -2000));
+      await tester.drag(find.byType(Scrollable).first, const Offset(0, -2000));
       await tester.pump();
-      await tester.tapAt(const Offset(5, 5));
-      await tester.pump(const Duration(milliseconds: 500));
     });
+    await tester.pumpWidget(const SizedBox());
   });
 
   testWidgets('offline banner and settings fit a small phone', (tester) async {
@@ -207,23 +241,44 @@ void main() {
   testWidgets('registration form and Wi-Fi progress dialogs fit', (
     tester,
   ) async {
-    final device = SmallScreenDevice();
-    final profile = LearnedAppliance.fromMap(
-      'A',
-      'UNNAMED_DEVICE_1792049550000_0a1b2c3d',
-      {},
-    );
-    final reading = OutletReading.fromMap('A', {});
     await noOverflow(tester, () async {
-      for (final registration in [true, false]) {
+      await show(tester, RegisterApplianceScreen(service: FakeRecognition()));
+      for (final status in [
+        'UNKNOWN',
+        'SAME_TYPE_IN_USE',
+        'AMBIGUOUS',
+        'MATCHED_PROVISIONAL',
+      ]) {
         await show(
           tester,
           Scaffold(
-            body: Esp32ProfileEditor(
-              service: device,
-              reading: reading,
-              profile: profile,
-              registration: registration,
+            body: SingleChildScrollView(
+              child: RecognitionPromptSheet(
+                session: session(
+                  status: status,
+                  applianceId: 'f',
+                  applianceName: 'Bedroom ceiling fan',
+                  promptText: 'This looks like another Bedroom ceiling fan. Register as Bedroom ceiling fan 2?',
+                  registerAs: {
+                    'typeName': 'Bedroom ceiling fan',
+                    'name': 'Bedroom ceiling fan 2',
+                    'resembles': 'Bedroom ceiling fan 1',
+                  },
+                  candidates: [
+                    {
+                      'applianceId': 'f',
+                      'name': 'Bedroom ceiling fan 1',
+                      'modeName': 'High speed',
+                    },
+                    {
+                      'applianceId': 'g',
+                      'name': 'Bedroom ceiling fan 2',
+                      'modeName': 'Normal',
+                    },
+                  ],
+                  reason: 'Bedroom ceiling fan 1 and Bedroom ceiling fan 2 give near-identical readings.',
+                ),
+              ),
             ),
           ),
         );

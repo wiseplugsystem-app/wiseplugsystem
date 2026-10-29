@@ -6,6 +6,8 @@ import 'package:flutter/material.dart';
 import '../models/esp32_data.dart';
 import '../services/device_binding.dart';
 import '../services/esp32_service.dart';
+import '../services/recognition_service.dart';
+import '../services/supabase_backend.dart';
 import '../widgets/safety_alert_listener.dart';
 
 String measurement(double? value, String unit, [int digits = 1]) =>
@@ -17,11 +19,13 @@ class Esp32Dashboard extends StatefulWidget {
   final bool darkMode;
   final ValueChanged<bool> onDarkModeChanged;
   final Esp32Service? service;
+  final RecognitionService? recognition;
   const Esp32Dashboard({
     super.key,
     required this.darkMode,
     required this.onDarkModeChanged,
     this.service,
+    this.recognition,
   });
   @override
   State<Esp32Dashboard> createState() => _Esp32DashboardState();
@@ -29,6 +33,10 @@ class Esp32Dashboard extends StatefulWidget {
 
 class _Esp32DashboardState extends State<Esp32Dashboard> {
   late final Esp32Service _service = widget.service ?? Esp32Service();
+  // Appliance recognition lives in Supabase (rule-based, recognize-appliance).
+  late final RecognitionService? _recognition =
+      widget.recognition ??
+      (SupabaseBackend.configured ? RecognitionService() : null);
   // Claim before any listener starts: the database rules only let the
   // owner read the device, and a denied listener does not retry.
   late Future<bool> _claim = _service.claimDevice();
@@ -45,6 +53,7 @@ class _Esp32DashboardState extends State<Esp32Dashboard> {
           service: _service,
           child: Esp32LiveView(
             service: _service,
+            recognition: _recognition,
             darkMode: widget.darkMode,
             onDarkModeChanged: widget.onDarkModeChanged,
             onSignOut: () => FirebaseAuth.instance.signOut(),
@@ -272,228 +281,4 @@ class _OutletControlsState extends State<_OutletControls> {
       ],
     );
   }
-}
-
-class Esp32ProfileEditor extends StatefulWidget {
-  final bool registration;
-  final Esp32Service service;
-  final OutletReading reading;
-  final LearnedAppliance profile;
-
-  /// Lower-cased names of the user's other appliances; reused names are refused.
-  final Set<String> takenNames;
-
-  /// Registered appliances this new reading may really be (e.g. a charger
-  /// drawing more or less than when it was saved). Picking one merges.
-  final List<LearnedAppliance> existing;
-  const Esp32ProfileEditor({
-    super.key,
-    required this.service,
-    required this.reading,
-    required this.profile,
-    this.registration = false,
-    this.takenNames = const {},
-    this.existing = const [],
-  });
-  @override
-  State<Esp32ProfileEditor> createState() => Esp32ProfileEditorState();
-}
-
-class Esp32ProfileEditorState extends State<Esp32ProfileEditor> {
-  late final _name = TextEditingController(
-    text: widget.registration ? '' : widget.profile.name,
-  );
-  late final _runtime = TextEditingController(
-    text: widget.profile.hasRuntimeLimit ? '${widget.profile.maxRunTime}' : '',
-  );
-  late final _ceiling = TextEditingController(
-    text: widget.profile.hasSafetyLimit
-        ? '${widget.profile.safetyCeilingDuration}'
-        : '',
-  );
-  bool _busy = false;
-  String? _error;
-  LearnedAppliance? _sameAs; // registration: "it's one of my appliances"
-
-  Future<void> _merge() async {
-    final target = _sameAs;
-    if (target == null) return;
-    setState(() {
-      _busy = true;
-      _error = null;
-    });
-    try {
-      await widget.service.mergeProfile(widget.reading, widget.profile, target);
-      if (mounted) _closeSelf(true);
-    } catch (error) {
-      if (mounted) setState(() => _error = '$error');
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  @override
-  void dispose() {
-    _name.dispose();
-    _runtime.dispose();
-    _ceiling.dispose();
-    super.dispose();
-  }
-
-  /// Closes this editor even if a safety alert was pushed above it; a plain
-  /// pop would dismiss that alert instead.
-  void _closeSelf(bool result) {
-    final route = ModalRoute.of(context);
-    if (route == null || !route.isActive) return;
-    if (route.isCurrent) {
-      Navigator.pop(context, result);
-    } else {
-      Navigator.removeRoute(context, route, result);
-    }
-  }
-
-  Future<void> _save() async {
-    if (widget.takenNames.contains(_name.text.trim().toLowerCase())) {
-      setState(
-        () => _error = 'An appliance with this name already exists. Please choose a unique name.',
-      );
-      return;
-    }
-    setState(() {
-      _busy = true;
-      _error = null;
-    });
-    try {
-      if (!widget.registration) {
-        await widget.service.editProfile(
-          widget.reading,
-          widget.profile,
-          _name.text,
-          int.tryParse(_runtime.text) ?? 0,
-          int.tryParse(_ceiling.text) ?? 0,
-        );
-      }
-      await widget.service.registerProfile(widget.profile, _name.text);
-      if (mounted) _closeSelf(true);
-    } catch (error) {
-      if (mounted) setState(() => _error = '$error');
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) => AlertDialog(
-    title: Text(
-      widget.registration ? 'Appliance Registration' : 'Edit Appliance Profile',
-    ),
-    content: SingleChildScrollView(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // Users see the saved name; the firmware ID stays internal.
-          if (widget.registration)
-            Text(
-              'New appliance detected on Outlet ${widget.reading.outlet}. '
-              'Give it a name you will recognize.',
-            )
-          else ...[
-            const Text('Saved as'),
-            Text(
-              widget.profile.needsRegistration
-                  ? 'Unregistered appliance'
-                  : widget.profile.name,
-              style: const TextStyle(
-                color: Colors.blue,
-                fontSize: 18,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-          ],
-          const SizedBox(height: 20),
-          TextField(
-            controller: _name,
-            enabled: !_busy,
-            decoration: const InputDecoration(
-              labelText: 'Appliance Name',
-              border: OutlineInputBorder(),
-            ),
-          ),
-          // A charger or similar may draw differently than when it was saved:
-          // let the user say which appliance it is instead of saving a copy.
-          if (widget.registration && widget.existing.isNotEmpty) ...[
-            const SizedBox(height: 20),
-            const Text('Or is it one of your saved appliances?'),
-            const SizedBox(height: 8),
-            DropdownButtonFormField<LearnedAppliance>(
-              initialValue: _sameAs,
-              isExpanded: true,
-              decoration: const InputDecoration(
-                labelText: 'Saved appliance',
-                border: OutlineInputBorder(),
-              ),
-              items: [
-                for (final p in widget.existing)
-                  DropdownMenuItem(value: p, child: Text(p.name)),
-              ],
-              onChanged: _busy ? null : (p) => setState(() => _sameAs = p),
-            ),
-            const SizedBox(height: 8),
-            OutlinedButton(
-              onPressed: _busy || _sameAs == null ? null : _merge,
-              child: Text(
-                _sameAs == null
-                    ? 'Same appliance'
-                    : 'Yes, it is ${_sameAs!.name}',
-              ),
-            ),
-            const Text(
-              'WisePlug will recognize it at this power level from now on.',
-              style: TextStyle(color: Colors.grey, fontSize: 12),
-            ),
-          ],
-          if (!widget.registration) ...[
-            const SizedBox(height: 16),
-            Text(
-              widget.profile.isLearningComplete
-                  ? 'WisePlug learned how long this appliance is usually used and '
-                        'warns at 1.5x that. The limits below are the most it will '
-                        'ever allow.'
-                  : 'WisePlug is learning how long this appliance is usually used '
-                        '(${widget.profile.sessionCount} of '
-                        '${LearnedAppliance.learningSessions} uses). Until then only '
-                        'the hard limit below applies.',
-              style: const TextStyle(color: Colors.grey, fontSize: 12),
-            ),
-            TextField(
-              controller: _runtime,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(
-                labelText: 'Near-limit notice after (seconds)',
-              ),
-            ),
-            TextField(
-              controller: _ceiling,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(
-                labelText: 'Hard limit (seconds)',
-              ),
-            ),
-          ],
-          if (_error != null)
-            Text(_error!, style: const TextStyle(color: Colors.red)),
-        ],
-      ),
-    ),
-    actions: [
-      TextButton(
-        onPressed: _busy ? null : () => Navigator.pop(context),
-        child: const Text('Cancel'),
-      ),
-      FilledButton(
-        onPressed: _busy ? null : _save,
-        child: Text(_busy ? 'Saving…' : 'Save Profile'),
-      ),
-    ],
-  );
 }

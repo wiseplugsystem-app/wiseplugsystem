@@ -23,3 +23,6 @@ verify_jwt = false
 
 [functions.confirm-match]
 verify_jwt = false
+
+[functions.manage-appliance]
+verify_jwt = false
