@@ -11,10 +11,14 @@
 import { deviceIdOf, requireDevice } from "../_shared/auth.ts";
 import { db } from "../_shared/db.ts";
 import { HttpError, json, outletOf, readJson, serve } from "../_shared/http.ts";
+import { recordUse } from "../_shared/matching.ts";
+import { loadConfig } from "../_shared/recognition_db.ts";
 import { LEARNING_SESSIONS } from "../_shared/safety.ts";
 import { boundsFromBaseline, signatureColumns } from "../_shared/signature.ts";
 
 const END_REASONS = ["APPLIANCE_OFF", "TURNED_OFF", "LOCKED_OUT", "RESET", "ENDED"];
+/** Typical use: the appliance or the user switched it off (a lock-out is not). */
+const NORMAL_ENDS = ["APPLIANCE_OFF", "TURNED_OFF"];
 
 function num(v: unknown, name: string, max: number): number {
   if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > max) {
@@ -119,6 +123,35 @@ serve(async (req) => {
   const { error: endError } = await db.from("active_sessions").delete()
     .eq("device_id", deviceId).eq("outlet", outlet).lte("started_at", endedAt);
   if (endError) throw endError;
+
+  // Rule-based recognition: close this run's outlet session. If the user's
+  // appliance was CONFIRMED and the run ended normally (switched off, not a
+  // lock-out), it counts as one use for the 7-use learning.
+  const { data: open, error: openError } = await db.from("outlet_sessions")
+    .select("id, appliance_id, status").eq("device_id", deviceId).eq("outlet", outlet)
+    .is("ended_at", null).lte("started_at", endedAt).order("started_at", { ascending: false }).limit(1).maybeSingle();
+  if (openError) throw openError;
+  if (open) {
+    const { error } = await db.from("outlet_sessions").update({ ended_at: endedAt, end_reason: endReason }).eq("id", open.id);
+    if (error) throw error;
+    if (open.status === "MATCHED_CONFIRMED" && open.appliance_id && NORMAL_ENDS.includes(endReason)) {
+      const config = await loadConfig();
+      const { data: a, error: aError } = await db.from("appliance_instances")
+        .select("use_count, recent_runtimes_s, is_learned, baseline_runtime_s").eq("id", open.appliance_id).single();
+      if (aError) throw aError;
+      const l = recordUse({
+        useCount: Number(a.use_count),
+        recentRuntimesS: (a.recent_runtimes_s as number[]) ?? [],
+        isLearned: a.is_learned === true,
+        baselineRuntimeS: a.baseline_runtime_s == null ? null : Number(a.baseline_runtime_s),
+      }, Number(body.durationS), config);
+      const { error: learnError } = await db.from("appliance_instances").update({
+        use_count: l.useCount, recent_runtimes_s: l.recentRuntimesS,
+        is_learned: l.isLearned, baseline_runtime_s: l.baselineRuntimeS,
+      }).eq("id", open.appliance_id);
+      if (learnError) throw learnError;
+    }
+  }
 
   return json({ ok: true, sessionId: inserted[0]?.id ?? null, duplicate: inserted.length === 0 });
 });

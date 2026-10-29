@@ -15,8 +15,11 @@ verify_jwt = false
 [functions.link-account]
 verify_jwt = false
 
-[functions.identify-appliance]
+[functions.recognize-appliance]
 verify_jwt = false
 
-[functions.confirm-appliance]
+[functions.register-sample]
+verify_jwt = false
+
+[functions.confirm-match]
 verify_jwt = false
