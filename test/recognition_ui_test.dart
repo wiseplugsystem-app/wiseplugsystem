@@ -424,7 +424,11 @@ void main() {
       expect(find.text('Appliance Profiles'), findsOneWidget);
       expect(find.text('All'), findsOneWidget);
       expect(find.text('Learning · 5 more uses to learn'), findsOneWidget);
-      expect(find.text('Running on Outlet B'), findsOneWidget);
+      // Where it runs, and for exactly how long (it started a minute ago).
+      expect(
+        find.textContaining(RegExp(r'^Running on Outlet B · 1:0[0-2]$')),
+        findsOneWidget,
+      );
       expect(find.text('Registering'), findsOneWidget);
       // A running appliance cannot be deleted; an idle one can.
       expect(find.byTooltip('Delete appliance'), findsOneWidget);
@@ -432,7 +436,12 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Appliance\nProfile'), findsOneWidget);
       expect(find.text('57.0 W · PF 0.92'), findsOneWidget);
-      expect(find.text('4 h'), findsOneWidget); // safety limit, set by WisePlug
+      // Safety limit (set by WisePlug) and the usage sessions, as in the
+      // 19th commit: 2 of the 7 learning uses so far.
+      expect(find.text('Learning · 2 of 7 uses (max 4 h)'), findsOneWidget);
+      expect(find.text('Usage sessions'), findsOneWidget);
+      expect(find.text('2 of 7 uses'), findsOneWidget);
+      expect(find.text('Total sessions'), findsOneWidget);
       await tester.tap(find.text('Edit'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField).last, 'Desk fan');
@@ -470,6 +479,29 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Continue registering Lamp'), findsOneWidget);
     expect(find.widgetWithText(FilledButton, 'Continue'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('the outlet card shows the exact running time, counting up', (
+    tester,
+  ) async {
+    final (device, _) = await mountLive(tester);
+    device.readings.add({
+      'A': OutletReading.fromMap('A', {
+        'status': 'Active',
+        'currentState': 'ACTIVE',
+        'sessionID': 'boot',
+        'appliance': 'Fan',
+        'sensor_valid': true,
+        'last_updated_ms': DateTime.now().millisecondsSinceEpoch,
+        'start_time': DateTime.now()
+            .subtract(const Duration(hours: 1, minutes: 2, seconds: 15))
+            .millisecondsSinceEpoch,
+      }),
+    });
+    await tester.pump();
+    expect(find.text('Running time'), findsWidgets);
+    expect(find.textContaining(RegExp(r'^1:02:1[5-7]$')), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
   });
 }

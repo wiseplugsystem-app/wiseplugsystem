@@ -231,11 +231,13 @@ void main() {
       );
       expect(find.text('— / 2'), findsOneWidget);
       expect(find.text('847 W'), findsNothing);
+      // The switches sit just below the Power Control heading.
       await tester.scrollUntilVisible(
-        find.byType(Switch).first,
+        find.text('Power Control'),
         200,
         scrollable: find.byType(Scrollable).first,
       );
+      await tester.ensureVisible(find.byType(Switch).first);
       expect(find.byType(Switch), findsNWidgets(2));
       expect(find.text('Measurements'), findsNothing);
       await tester.pumpAndSettle();

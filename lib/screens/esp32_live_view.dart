@@ -23,6 +23,14 @@ const _amber = Color(0xFFF5B800);
 const _safetyNote =
     'Disabled and locked outlets are switched off by their relay. Inspect the appliance before resetting a locked outlet with Reset Safety in Power Control or its physical button.';
 
+/// How long a run has lasted, exact to the second: "4:07" or "1:02:15".
+String _runningTime(Duration d) {
+  final s = d.isNegative ? 0 : d.inSeconds; // plug and phone clocks may differ
+  String two(int v) => v.toString().padLeft(2, '0');
+  final h = s ~/ 3600, m = s % 3600 ~/ 60, sec = s % 60;
+  return h > 0 ? '$h:${two(m)}:${two(sec)}' : '$m:${two(sec)}';
+}
+
 String _duration(int? seconds) {
   if (seconds == null) return 'Not available';
   if (seconds <= 0) return '0 s';
@@ -687,6 +695,11 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                 ? '—'
                 : '${start.hour.toString().padLeft(2, '0')}:${start.minute.toString().padLeft(2, '0')}',
           ),
+          // Counts up every second (the screen refreshes each second).
+          _Pair(
+            'Running time',
+            start == null ? '—' : _runningTime(now.difference(start)),
+          ),
           _Pair(
             'Safety limit',
             cutoff == null
@@ -762,6 +775,15 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
     ),
   );
 
+  /// " · 12:34" while the run on [outlet] has a start time, else "".
+  String _runningFor(String outlet, DateTime now) {
+    final reading = _readings[outlet];
+    final start = reading != null && reading.hasConnectedAppliance(now)
+        ? reading.startTime
+        : null;
+    return start == null ? '' : ' · ${_runningTime(now.difference(start))}';
+  }
+
   /// The outlet ('A' / 'B') [a] is running on now, or null.
   String? _outletOf(RegisteredAppliance a) =>
       a.runningOn == null ? null : outletLetter(a.runningOn!);
@@ -783,6 +805,21 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
         ? 0
         : a.modes.map((m) => m.sampleCount).reduce((x, y) => x < y ? x : y);
     return 'Registering · $done of $required plug-ins. Plug it in again to continue.';
+  }
+
+  /// As in the 19th commit: the learned limit once the typical use is known,
+  /// "Learning · n of 7 uses" until then (the type's limit still applies).
+  String _limitText(RegisteredAppliance a) => a.isLearned
+      ? _duration(a.cutoffMinutes * 60)
+      : 'Learning · ${_sessionsText(a)} (max ${_duration(a.cutoffMinutes * 60)})';
+
+  /// Usage sessions counted by the 7-use learning: "2 of 7 uses", then
+  /// "Learned from 7 uses".
+  String _sessionsText(RegisteredAppliance a) {
+    final total = _recognitionSettings.learningUses;
+    return a.isLearned
+        ? 'Learned from $total uses'
+        : '${a.useCount.clamp(0, total)} of $total uses';
   }
 
   String _usageText(RegisteredAppliance a) {
@@ -882,7 +919,8 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                   subtitle: Text(
                     _outletOf(a) == null
                         ? _usageText(a)
-                        : 'Running on Outlet ${_outletOf(a)}',
+                        : 'Running on Outlet ${_outletOf(a)}'
+                              '${_runningFor(_outletOf(a)!, now)}',
                   ),
                   trailing: Row(
                     mainAxisSize: MainAxisSize.min,
@@ -1004,18 +1042,16 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                             ),
                             // Set by WisePlug: the type's default, then the
                             // learned typical use x 1.5.
-                            _Pair(
-                              'Safety limit',
-                              _duration(a.cutoffMinutes * 60),
-                              color: _green,
-                            ),
+                            _Pair('Safety limit', _limitText(a), color: _green),
+                            // The 7-use learning: uses recorded so far.
+                            _Pair('Usage sessions', _sessionsText(a)),
                             if (a.isLearned && a.baselineRuntimeSeconds != null)
                               _Pair(
                                 'Typical use',
                                 _duration(a.baselineRuntimeSeconds),
                               ),
                             _Pair('Status', _applianceStatus(a, now)),
-                            _Pair('Total uses', '${a.useCount}'),
+                            _Pair('Total sessions', '${a.useCount}'),
                             // The power signature WisePlug recognises, per mode.
                             for (final m in a.modes)
                               _Pair(
