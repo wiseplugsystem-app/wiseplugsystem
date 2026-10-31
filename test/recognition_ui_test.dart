@@ -276,13 +276,19 @@ void main() {
       ),
     });
     await tester.pumpAndSettle();
-    // Not a question by itself: no sheet opens, the card shows the badge.
-    expect(find.text('Is this Fan?'), findsNothing);
-    await tester.tap(find.text('Provisional · tap to confirm'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Yes, it is Fan'));
+    // No pop-up: the outlet card itself asks, with a big confirm button.
+    expect(find.byType(BottomSheet), findsNothing);
+    expect(find.text('Is this Fan?'), findsOneWidget);
+    final yes = find.widgetWithText(FilledButton, 'Yes, it is Fan');
+    expect(yes, findsOneWidget);
+    await tester.tap(yes);
     await tester.pumpAndSettle();
     expect(recognition.calls, ['confirm e-prov fan-1']);
+    expect(find.textContaining('Confirmed: Fan'), findsOneWidget);
+    // "No" still opens the question with the other answers.
+    await tester.tap(find.text('No, it is something else'));
+    await tester.pumpAndSettle();
+    expect(find.text('No, register a new appliance'), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
   });
 

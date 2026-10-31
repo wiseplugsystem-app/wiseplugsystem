@@ -584,38 +584,97 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
   /// and, when the user has to answer, a button that opens the prompt.
   Widget? _recognitionBadge(OutletSession? session, bool connected) {
     if (!connected || session == null) return null;
+    // Provisional: ask plainly, with a big button. One tap confirms, so the
+    // appliance gets its own limit and the run counts as a usage session.
+    if (session.status == RecognitionStatus.provisional &&
+        widget.recognition != null &&
+        session.applianceId != null) {
+      final name = session.applianceName ?? 'this appliance';
+      return Container(
+        margin: const EdgeInsets.only(top: 10),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: _amber.withValues(alpha: .14),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: _amber),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'Is this $name?',
+              style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15),
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'Confirm it so WisePlug uses its own safety limit and counts this use.',
+              style: TextStyle(fontSize: 12),
+            ),
+            const SizedBox(height: 10),
+            FilledButton.icon(
+              style: FilledButton.styleFrom(
+                backgroundColor: _green,
+                padding: const EdgeInsets.symmetric(vertical: 14),
+              ),
+              onPressed: () => _confirmProvisional(session),
+              icon: const Icon(Icons.check_circle),
+              label: Text('Yes, it is $name'),
+            ),
+            TextButton(
+              onPressed: () => _openPrompt(session),
+              child: const Text('No, it is something else'),
+            ),
+          ],
+        ),
+      );
+    }
+    // A question waiting for the user: a clear button that opens it.
+    if (session.status.needsAnswer && widget.recognition != null) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 10),
+        child: FilledButton.icon(
+          style: FilledButton.styleFrom(backgroundColor: _amber),
+          onPressed: () => _openPrompt(session),
+          icon: const Icon(Icons.help_outline),
+          label: const Text('Needs your answer'),
+        ),
+      );
+    }
     final (text, color) = switch (session.status) {
       RecognitionStatus.confirmed => ('Confirmed', _green),
-      RecognitionStatus.provisional => ('Provisional · tap to confirm', _amber),
       RecognitionStatus.recognizing => ('Recognizing…', Colors.grey),
-      _ => ('Needs your answer', _amber),
+      _ => ('Provisional', _amber),
     };
-    final tappable =
-        widget.recognition != null &&
-        (session.status.needsAnswer ||
-            session.status == RecognitionStatus.provisional);
     return Padding(
       padding: const EdgeInsets.only(top: 8),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(20),
-        onTap: tappable ? () => _openPrompt(session) : null,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-          decoration: BoxDecoration(
-            color: color.withValues(alpha: .14),
-            borderRadius: BorderRadius.circular(20),
-          ),
-          child: Text(
-            text,
-            style: TextStyle(
-              color: color,
-              fontWeight: FontWeight.w700,
-              fontSize: 12,
-            ),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: .14),
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Text(
+          text,
+          style: TextStyle(
+            color: color,
+            fontWeight: FontWeight.w700,
+            fontSize: 12,
           ),
         ),
       ),
     );
+  }
+
+  /// "Yes, it is Fan" on a provisional label: confirms it in one tap.
+  Future<void> _confirmProvisional(OutletSession session) async {
+    try {
+      await widget.recognition!.confirm(session.eventId, session.applianceId!);
+      _notify(
+        'Confirmed: ${session.applianceName}. Its own safety limit applies now.',
+      );
+    } catch (error) {
+      _notify('$error'.replaceFirst('Bad state: ', ''));
+    }
   }
 
   Widget _summary(String key, DateTime now) {
