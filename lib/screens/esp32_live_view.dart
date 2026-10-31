@@ -24,6 +24,15 @@ const _safetyNote =
     'Disabled and locked outlets are switched off by their relay. Inspect the appliance before resetting a locked outlet with Reset Safety in Power Control or its physical button.';
 
 /// How long a run has lasted, exact to the second: "4:07" or "1:02:15".
+/// The outlet card's timer, in words: "45 s", "12 min 34 s", "1 h 02 min".
+String _onFor(Duration d) {
+  final s = d.isNegative ? 0 : d.inSeconds; // plug and phone clocks may differ
+  final h = s ~/ 3600, m = s % 3600 ~/ 60, sec = s % 60;
+  if (h > 0) return '$h h ${m.toString().padLeft(2, '0')} min';
+  if (m > 0) return '$m min $sec s';
+  return '$sec s';
+}
+
 String _runningTime(Duration d) {
   final s = d.isNegative ? 0 : d.inSeconds; // plug and phone clocks may differ
   String two(int v) => v.toString().padLeft(2, '0');
@@ -729,6 +738,33 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
           ),
           const SizedBox(height: 5),
           Text(status, style: TextStyle(color: color)),
+          // How long the appliance has been on: a timer that counts up every
+          // second (the screen refreshes each second).
+          if (start != null)
+            Container(
+              margin: const EdgeInsets.only(top: 10),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: _blue.withValues(alpha: .10),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.timer_outlined, color: _blue, size: 22),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'On for ${_onFor(now.difference(start))}',
+                      style: const TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.w800,
+                        color: _blue,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ?_recognitionBadge(session, connected),
           const SizedBox(height: 20),
           _Pair(
@@ -753,11 +789,6 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
             start == null
                 ? '—'
                 : '${start.hour.toString().padLeft(2, '0')}:${start.minute.toString().padLeft(2, '0')}',
-          ),
-          // Counts up every second (the screen refreshes each second).
-          _Pair(
-            'Running time',
-            start == null ? '—' : _runningTime(now.difference(start)),
           ),
           _Pair(
             'Safety limit',

@@ -506,8 +506,29 @@ void main() {
       }),
     });
     await tester.pump();
-    expect(find.text('Running time'), findsWidgets);
-    expect(find.textContaining(RegExp(r'^1:02:1[5-7]$')), findsOneWidget);
+    // The card's timer: how long the appliance has been on.
+    expect(find.text('On for 1 h 02 min'), findsOneWidget);
+    expect(find.byIcon(Icons.timer_outlined), findsOneWidget);
+
+    // Under an hour it counts minutes and seconds.
+    device.readings.add({
+      'A': OutletReading.fromMap('A', {
+        'status': 'Active',
+        'currentState': 'ACTIVE',
+        'sessionID': 'boot',
+        'appliance': 'Fan',
+        'sensor_valid': true,
+        'last_updated_ms': DateTime.now().millisecondsSinceEpoch,
+        'start_time': DateTime.now()
+            .subtract(const Duration(minutes: 12, seconds: 34))
+            .millisecondsSinceEpoch,
+      }),
+    });
+    await tester.pump();
+    expect(
+      find.textContaining(RegExp(r'^On for 12 min 3[4-6] s')),
+      findsOneWidget,
+    );
     await tester.pumpWidget(const SizedBox());
   });
 }

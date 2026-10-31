@@ -102,7 +102,7 @@ void main() {
   testWidgets(
     'live dashboard updates, filters and profile details use device data',
     (tester) async {
-      await tester.binding.setSurfaceSize(const Size(420, 920));
+      await tester.binding.setSurfaceSize(const Size(420, 1400));
       addTearDown(() => tester.binding.setSurfaceSize(null));
       final device = TestDevice();
       final capture = GlobalKey();
