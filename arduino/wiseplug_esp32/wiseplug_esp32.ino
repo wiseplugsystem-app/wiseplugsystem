@@ -43,16 +43,16 @@
 // ==========================================
 constexpr const char* DEVICE_ID = "gadget-1";  // must match the app's DeviceBinding
 
-// Outlet switches. Outlet A: a solid-state relay (SSR "DA", DC input) on
-// GPIO 13: + to GPIO 13, - to GND. An SSR conducts while its input is HIGH.
-// GPIO 13 is not a boot-strapping pin and stays LOW at power-up, so the
-// outlet stays off while the ESP32 starts. (12 would stop the ESP32 booting
-// if pulled high, 14 flickers at boot, 34 and 35 are input-only.)
-// Outlet B: the original active-low relay module on GPIO 19 (a LOW pin
-// closes it; confirmed: "relay off" passed 68 W, "relay on" passed 0 W).
-// Set RELAY_B_ON to HIGH when Outlet B gets an SSR too.
-constexpr int RELAY_A_PIN = 13, RELAY_B_PIN = 19;
-constexpr uint8_t RELAY_A_ON = HIGH, RELAY_B_ON = LOW;
+// Outlet switches: one solid-state relay (SSR "DA", DC input) per outlet,
+// + to the GPIO, - to GND. An SSR conducts while its input is HIGH, and both
+// pins are LOW while the ESP32 starts, so the outlets stay off at power-up.
+//   Outlet A: GPIO 13 (no boot function).
+//   Outlet B: GPIO 12. It is a boot-strapping pin: it must NOT be pulled
+//             HIGH at power-up or the ESP32 will not boot. An SSR input pulls
+//             it towards GND, which is safe; never add a pull-up to it.
+// (14 pulses during boot, 34 and 35 are input-only.)
+constexpr int RELAY_A_PIN = 13, RELAY_B_PIN = 12;
+constexpr uint8_t RELAY_A_ON = HIGH, RELAY_B_ON = HIGH;
 
 constexpr int PZEM_A_RX = 32, PZEM_A_TX = 33, PZEM_B_RX = 25, PZEM_B_TX = 26;
 constexpr int BUTTON_A_PIN = 4, BUTTON_B_PIN = 5;  // optional reset buttons to GND
