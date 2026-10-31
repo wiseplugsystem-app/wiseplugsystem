@@ -9,14 +9,14 @@
 // to the mode profile it fits and that profile's means move by the EMA
 // (new = 0.9 x old + 0.1 x run). This needs the Stage 2 summary; if the user
 // answers earlier, recognize-appliance does it when Stage 2 arrives. A run that
-// fits none of the appliance's modes teaches nothing; the reply suggests
-// registering it as a new mode instead.
+// fits none of the appliance's modes starts a new mode (set by the system,
+// never by the user), recognised once it has its registration samples.
 //
 // "Register new" in a dialog calls register-sample instead.
 //
 // Body: { deviceId, eventId, applianceId }
 // Auth: Authorization: Bearer <Firebase ID token> of the plug's owner.
-// Reply: { status, applianceId, applianceName, cutoffS, learned, fitsProfile, hint }
+// Reply: { status, applianceId, applianceName, cutoffS, learned, newMode, hint }
 import { deviceIdOf, firebaseUser, requireOwner } from "../_shared/auth.ts";
 import { db } from "../_shared/db.ts";
 import { HttpError, json, readJson, serve } from "../_shared/http.ts";
@@ -70,22 +70,24 @@ serve(async (req) => {
 
   // EMA update now if Stage 2 is in; otherwise recognize-appliance does it at Stage 2.
   let learned = false;
+  let newMode: string | null = null;
   if (stage === 2 && !session.sample_recorded) {
     const r = await learnFromConfirmed(appliance, features, session.event_id, config);
     learned = r != null;
+    if (r?.newMode) newMode = r.modeName;
     const { error } = await db.from("outlet_sessions")
       .update({ sample_recorded: learned, profile_id: r?.profileId ?? fit?.profile.id ?? null }).eq("id", session.id);
     if (error) throw error;
   }
-  const fitsProfile = fit?.pass === true;
   return json({
     status: "MATCHED_CONFIRMED",
     applianceId: appliance.id,
     applianceName: appliance.name,
     cutoffS,
     learned,
-    fitsProfile,
-    hint: fitsProfile || !fit ? null
-      : `This run does not fit any mode of ${appliance.name}. Register it as a new mode (e.g. "High") to recognise it next time.`,
+    newMode,
+    hint: newMode
+      ? `${appliance.name} ran differently from before, so WisePlug started learning a new mode for it.`
+      : null,
   });
 });

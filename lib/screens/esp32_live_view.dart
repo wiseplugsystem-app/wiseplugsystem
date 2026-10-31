@@ -11,7 +11,6 @@ import '../services/esp32_service.dart';
 import '../services/recognition_service.dart';
 import '../widgets/wiseplug_logo.dart';
 import 'activity_screen.dart';
-import 'appliances_panel.dart';
 import 'esp32_dashboard.dart';
 import 'recognition_prompt.dart';
 import 'register_appliance_screen.dart';
@@ -94,7 +93,7 @@ const _overrideNote =
 
 Color _statusColor(String status) => switch (status) {
   'Active' => _green,
-  'Near limit' || 'Recognizing' => _amber,
+  'Near limit' || 'Recognizing' || 'Registering' => _amber,
   'Locked out' || 'Safety warning' => Colors.red,
   _ => Colors.grey,
 };
@@ -124,10 +123,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
   final _updates = ValueNotifier<int>(0);
   final _subscriptions = <StreamSubscription<dynamic>>[];
   Map<String, OutletReading> _readings = {};
-  Map<String, dynamic> _preferences = {};
   bool _readError = false, _loading = true;
-  bool _preferencesReady = false, _saving = false;
-  String? _settingsError;
   String? _telemetryFailure;
   String _version = 'Loading…';
   int _tab = 0;
@@ -141,12 +137,18 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
   final _promptedEvents = <String>{};
   bool _promptOpen = false;
 
+  /// The Profiles tab: the user's registered appliances (Supabase).
+  List<RegisteredAppliance> _appliances = [];
+  bool _appliancesLoaded = false;
+  String? _appliancesError;
+  String _filter = 'All';
+  String _sessionsKey = '';
+
   // Safety warnings are raised app-wide by SafetyAlertListener. A run that
   // needs the user's answer (UNKNOWN, AMBIGUOUS, SAME_TYPE_IN_USE) opens its
   // prompt once, when nothing more urgent is on screen.
   void _checkPopups() {
     if (!mounted || _loading || _readError || _promptOpen) return;
-    if (!_enabled('deviceAlerts') || !_enabled('newDevices')) return;
     final now = DateTime.now();
     if (_readings.values.any((r) => r.isWarning)) return;
     for (final entry in _sessions.entries) {
@@ -168,10 +170,19 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
     if (recognition == null || _promptOpen) return;
     _promptOpen = true;
     try {
+      final required = _recognitionSettings.registrationSamples;
       final choice = await showRecognitionPrompt(
         context,
         session,
         defaultCutoffMinutes: _recognitionSettings.defaultCutoffMinutes,
+        // A new load may be an appliance whose registration was left unfinished.
+        unfinished: session.status == RecognitionStatus.unknown
+            ? [
+                for (final a in _appliances)
+                  if (!a.isReady(required)) a,
+              ]
+            : const [],
+        requiredSamples: required,
       );
       if (!mounted) return;
       switch (choice) {
@@ -196,6 +207,19 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
               ),
             ),
           );
+          _loadAppliances();
+        case ContinueChoice(:final appliance):
+          await Navigator.of(context).push(
+            MaterialPageRoute<bool>(
+              builder: (_) => RegisterApplianceScreen(
+                service: recognition,
+                appliance: appliance,
+                fromSession: session,
+                settings: _recognitionSettings,
+              ),
+            ),
+          );
+          _loadAppliances();
         case null:
           break;
       }
@@ -204,7 +228,22 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
     }
   }
 
-  bool _enabled(String key) => _preferences[key] != false;
+  /// Re-reads the registered appliances (Profiles tab, unfinished registrations).
+  Future<void> _loadAppliances() async {
+    final recognition = widget.recognition;
+    if (recognition == null) return;
+    try {
+      _appliances = await recognition.appliances();
+      _appliancesError = null;
+      for (final a in _appliances) {
+        _appliancesNamed[a.id] = a.name;
+      }
+    } catch (error) {
+      _appliancesError = '$error';
+    }
+    _appliancesLoaded = true;
+    _refresh();
+  }
 
   void _refresh() {
     if (!mounted) return;
@@ -219,22 +258,16 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
     _subscriptions.add(
       widget.service.streamOutlets().listen(
         (value) {
-          if (!_loading &&
-              !_readError &&
-              _preferencesReady &&
-              _enabled('deviceAlerts')) {
+          if (!_loading && !_readError) {
             for (final entry in value.entries) {
               final old = _readings[entry.key];
               final next = entry.value;
               if (old != null &&
                   next.isFresh(DateTime.now()) &&
                   old.currentState != next.currentState) {
-                final safety = next.isWarning || next.isLockedOut;
-                if (_enabled(safety ? 'safetyWarnings' : 'statusChanges')) {
-                  _notify(
-                    'Outlet ${entry.key}: ${_status(next, DateTime.now())}',
-                  );
-                }
+                _notify(
+                  'Outlet ${entry.key}: ${_status(next, DateTime.now())}',
+                );
               }
             }
           }
@@ -263,6 +296,14 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                 _appliancesNamed[s.applianceId!] = s.applianceName!;
               }
             }
+            // A run started, ended or was decided: the profiles change too.
+            final key = value.values
+                .map((s) => '${s.eventId}/${s.status.wire}/${s.applianceId}')
+                .join(',');
+            if (key != _sessionsKey) {
+              _sessionsKey = key;
+              _loadAppliances();
+            }
             _refresh();
           },
           // Offline for a moment: keep the last known runs; the next poll retries.
@@ -273,22 +314,8 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
         _recognitionSettings = s;
         _refresh();
       }, onError: (Object _) {});
+      _loadAppliances();
     }
-    _subscriptions.add(
-      widget.service.streamPreferences().listen(
-        (value) {
-          _preferences = value;
-          _preferencesReady = true;
-          _settingsError = null;
-          _refresh();
-        },
-        onError: (Object error) {
-          _preferencesReady = false;
-          _settingsError = 'Cannot load alert settings. Check your connection and account permissions.';
-          _refresh();
-        },
-      ),
-    );
     _subscriptions.add(
       widget.service.streamGadgetStatus().listen(
         (value) {
@@ -324,21 +351,6 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
     if (!mounted) return;
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text(message)));
-  }
-
-  Future<void> _save(Map<String, bool> values) async {
-    if (_saving) return;
-    setState(() => _saving = true);
-    try {
-      await widget.service.savePreferences(values);
-      _preferences = {..._preferences, ...values};
-      _settingsError = null;
-    } catch (_) {
-      _settingsError = 'Settings were not saved. Check your connection and account permissions.';
-    } finally {
-      _saving = false;
-      _refresh();
-    }
   }
 
   @override
@@ -387,7 +399,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                                 child: WisePlugLogo(fontSize: 34),
                               )
                             : Text(
-                                _tab == 1 ? 'Appliances' : 'Settings',
+                                _tab == 1 ? 'Appliance Profiles' : 'Settings',
                                 style: const TextStyle(
                                   fontSize: 30,
                                   fontWeight: FontWeight.w800,
@@ -412,24 +424,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                       ),
                     ),
                   if (_tab == 0) ..._home(now),
-                  if (_tab == 1)
-                    widget.recognition == null
-                        ? const _Panel(
-                            child: Text(
-                              'Appliance registration needs WisePlug\'s Supabase backend, which is not configured in this build.',
-                            ),
-                          )
-                        : AppliancesPanel(
-                            service: widget.recognition!,
-                            settings: _recognitionSettings,
-                            // Re-read when a run starts, ends or is decided.
-                            refreshKey: _sessions.values
-                                .map(
-                                  (s) =>
-                                      '${s.eventId}/${s.status.wire}/${s.applianceId}',
-                                )
-                                .join(','),
-                          ),
+                  if (_tab == 1) ..._profileList(now),
                   if (_tab == 2) ..._settings(now),
                 ],
               ),
@@ -447,9 +442,9 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
               label: 'Home',
             ),
             NavigationDestination(
-              icon: Icon(Icons.devices_other_outlined),
-              selectedIcon: Icon(Icons.devices_other, color: _blue),
-              label: 'Appliances',
+              icon: Icon(Icons.person_outline),
+              selectedIcon: Icon(Icons.person, color: _blue),
+              label: 'Profiles',
             ),
             NavigationDestination(
               icon: Icon(Icons.settings_outlined),
@@ -770,6 +765,408 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
     ),
   );
 
+  /// The outlet ('A' / 'B') [a] is running on now, or null.
+  String? _outletOf(RegisteredAppliance a) =>
+      a.runningOn == null ? null : outletLetter(a.runningOn!);
+
+  /// Status shown for a profile: the live status of the outlet it is on,
+  /// "Registering" until its plug-ins are done, else "Idle".
+  String _applianceStatus(RegisteredAppliance a, DateTime now) {
+    if (!a.isReady(_recognitionSettings.registrationSamples)) {
+      return 'Registering';
+    }
+    final outlet = _outletOf(a);
+    if (outlet == null) return 'Idle';
+    return _readError ? 'Offline' : _status(_readings[outlet], now);
+  }
+
+  String _registrationText(RegisteredAppliance a) {
+    final required = _recognitionSettings.registrationSamples;
+    final done = a.modes.isEmpty
+        ? 0
+        : a.modes.map((m) => m.sampleCount).reduce((x, y) => x < y ? x : y);
+    return 'Registering · $done of $required plug-ins. Plug it in again to continue.';
+  }
+
+  String _usageText(RegisteredAppliance a) {
+    if (!a.isReady(_recognitionSettings.registrationSamples)) {
+      return _registrationText(a);
+    }
+    if (a.isLearned && a.baselineRuntimeSeconds != null) {
+      return 'Typical use ${_duration(a.baselineRuntimeSeconds)}';
+    }
+    final left = (_recognitionSettings.learningUses - a.useCount).clamp(0, 99);
+    return 'Learning · $left more ${left == 1 ? 'use' : 'uses'} to learn';
+  }
+
+  List<Widget> _profileList(DateTime now) {
+    if (widget.recognition == null) {
+      return const [
+        _Panel(
+          child: Text(
+            'Appliance profiles need WisePlug\'s Supabase backend, which is not configured in this build.',
+          ),
+        ),
+      ];
+    }
+    final profiles = _appliances.where((a) {
+      final status = _applianceStatus(a, now);
+      return _filter == 'All' ||
+          (_filter == 'Active'
+              ? [
+                  'Active',
+                  'Near limit',
+                  'Safety warning',
+                  'Recognizing',
+                ].contains(status)
+              : status == 'Idle' || status == 'Registering');
+    }).toList();
+    return [
+      Wrap(
+        spacing: 12,
+        children: [
+          for (final filter in ['All', 'Active', 'Idle'])
+            ChoiceChip(
+              label: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 7,
+                ),
+                child: Text(filter),
+              ),
+              selected: _filter == filter,
+              selectedColor: _blue,
+              labelStyle: TextStyle(
+                color: _filter == filter ? Colors.white : null,
+                fontWeight: FontWeight.bold,
+              ),
+              showCheckmark: false,
+              onSelected: (_) => setState(() => _filter = filter),
+            ),
+        ],
+      ),
+      const SizedBox(height: 20),
+      if (!_appliancesLoaded) const LinearProgressIndicator(),
+      if (_appliancesError != null)
+        _Panel(
+          child: Text('Cannot load appliance profiles. $_appliancesError'),
+        ),
+      if (profiles.isEmpty && _appliancesLoaded && _appliancesError == null)
+        _Panel(
+          child: Text(
+            _appliances.isEmpty
+                ? 'No appliances registered yet. Plug one in: WisePlug will ask you to register it.'
+                : 'No appliances match this filter.',
+          ),
+        ),
+      if (profiles.isNotEmpty)
+        _Panel(
+          padding: 0,
+          child: Column(
+            children: [
+              for (final a in profiles) ...[
+                if (a != profiles.first)
+                  const Divider(height: 1, indent: 18, endIndent: 18),
+                ListTile(
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 8,
+                  ),
+                  leading: _ApplianceIcon(
+                    type: '${a.typeName} ${a.name}',
+                    compact: true,
+                    color: _statusColor(_applianceStatus(a, now)),
+                  ),
+                  title: Text(
+                    a.name,
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                  // Appliances are portable: show an outlet only while running.
+                  subtitle: Text(
+                    _outletOf(a) == null
+                        ? _usageText(a)
+                        : 'Running on Outlet ${_outletOf(a)}',
+                  ),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (a.runningOn == null)
+                        IconButton(
+                          tooltip: 'Delete appliance',
+                          icon: const Icon(
+                            Icons.delete_outline,
+                            color: Colors.red,
+                          ),
+                          onPressed: () => _deleteAppliance(context, a),
+                        ),
+                      _Badge(_applianceStatus(a, now)),
+                      const Icon(Icons.chevron_right, color: Colors.grey),
+                    ],
+                  ),
+                  onTap: () => _showProfile(a),
+                ),
+              ],
+            ],
+          ),
+        ),
+    ];
+  }
+
+  void _showProfile(RegisteredAppliance selected) {
+    showDialog<void>(
+      context: context,
+      builder: (_) => AnimatedBuilder(
+        animation: _updates,
+        builder: (context, _) {
+          final match = _appliances.where((a) => a.id == selected.id);
+          if (match.isEmpty) {
+            return AlertDialog(
+              title: const Text('Profile removed'),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Close'),
+                ),
+              ],
+            );
+          }
+          final a = match.single;
+          final now = DateTime.now();
+          final outlet = _outletOf(a);
+          final ready = a.isReady(_recognitionSettings.registrationSamples);
+          return Dialog(
+            insetPadding: const EdgeInsets.all(20),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(28),
+            ),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 480),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(22),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        IconButton(
+                          onPressed: () => Navigator.pop(context),
+                          icon: const Icon(Icons.chevron_left, color: _blue),
+                        ),
+                        const Expanded(
+                          child: Text(
+                            'Appliance\nProfile',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 23,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 48),
+                      ],
+                    ),
+                    const SizedBox(height: 20),
+                    _Panel(
+                      child: Row(
+                        children: [
+                          _ApplianceIcon(type: '${a.typeName} ${a.name}'),
+                          const SizedBox(width: 14),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  a.name,
+                                  style: const TextStyle(
+                                    fontSize: 21,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                                Text(
+                                  'Type of Appliance: ${a.typeName}',
+                                  style: const TextStyle(color: Colors.grey),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    _Panel(
+                      child: _PairLayout(
+                        labelWidth: 150,
+                        child: Column(
+                          children: [
+                            _Pair('Saved name', a.name, color: _blue),
+                            _Pair(
+                              'Plugged into',
+                              outlet == null ? 'Not running' : 'Outlet $outlet',
+                            ),
+                            // Set by WisePlug: the type's default, then the
+                            // learned typical use x 1.5.
+                            _Pair(
+                              'Safety limit',
+                              _duration(a.cutoffMinutes * 60),
+                              color: _green,
+                            ),
+                            if (a.isLearned && a.baselineRuntimeSeconds != null)
+                              _Pair(
+                                'Typical use',
+                                _duration(a.baselineRuntimeSeconds),
+                              ),
+                            _Pair('Status', _applianceStatus(a, now)),
+                            _Pair('Total uses', '${a.useCount}'),
+                            // The power signature WisePlug recognises, per mode.
+                            for (final m in a.modes)
+                              _Pair(
+                                a.modes.length == 1 ? 'Signature' : m.name,
+                                m.sampleCount <
+                                        _recognitionSettings.registrationSamples
+                                    ? 'Learning (${m.sampleCount} of ${_recognitionSettings.registrationSamples})'
+                                    : '${m.meanPowerW?.toStringAsFixed(1) ?? '—'} W · PF ${m.meanPf?.toStringAsFixed(2) ?? '—'}',
+                              ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    if (!ready)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 10),
+                        child: Text(
+                          _registrationText(a),
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey,
+                          ),
+                        ),
+                      ),
+                    const SizedBox(height: 18),
+                    _Panel(
+                      border: _amber,
+                      child: const Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(Icons.shield_outlined, color: _amber),
+                          SizedBox(width: 12),
+                          Expanded(
+                            child: Text(
+                              'WisePlug sets the safety limit itself and learns this '
+                              'appliance\'s typical use. $_safetyNote',
+                              style: TextStyle(fontSize: 12),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: outlet == null
+                                ? () => _deleteAppliance(context, a)
+                                : null,
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: Colors.red,
+                            ),
+                            child: const Text('Delete'),
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        Expanded(
+                          child: FilledButton(
+                            onPressed: () => _renameAppliance(context, a),
+                            child: const Text('Edit'),
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (outlet != null)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 8),
+                        child: Text(
+                          'Switch off or unplug this appliance to delete it.',
+                          style: TextStyle(fontSize: 12, color: Colors.grey),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  /// Edit: the name only (the safety limit and modes are set by WisePlug).
+  Future<void> _renameAppliance(
+    BuildContext dialogContext,
+    RegisteredAppliance a,
+  ) async {
+    final name = await showDialog<String>(
+      context: dialogContext,
+      builder: (_) => _RenameDialog(initial: a.name),
+    );
+    if (name == null || name.isEmpty || name == a.name || !mounted) return;
+    if (_appliances.any(
+      (x) => x.id != a.id && x.name.toLowerCase() == name.toLowerCase(),
+    )) {
+      _notify(
+        'An appliance with this name already exists. Please choose a unique name.',
+      );
+      return;
+    }
+    try {
+      await widget.recognition!.rename(a.id, name);
+      _notify('Saved as $name.');
+    } catch (error) {
+      _notify('$error'.replaceFirst('Bad state: ', ''));
+    }
+    await _loadAppliances();
+  }
+
+  Future<void> _deleteAppliance(
+    BuildContext dialogContext,
+    RegisteredAppliance a,
+  ) async {
+    final confirmed = await showDialog<bool>(
+      context: dialogContext,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete appliance?'),
+        content: Text(
+          'Remove ${a.name} from your account? WisePlug forgets its power '
+          'signature and will treat it as a new appliance if it is plugged in again.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    try {
+      await widget.recognition!.deleteAppliance(a.id);
+      if (dialogContext != context && dialogContext.mounted) {
+        Navigator.pop(dialogContext);
+      }
+      _notify('Appliance deleted.');
+    } catch (error) {
+      _notify('$error'.replaceFirst('Bad state: ', ''));
+    }
+    await _loadAppliances();
+  }
+
   List<Widget> _settings(DateTime now) {
     final connected = _gadget?.isOnline(now) == true;
     return [
@@ -807,29 +1204,6 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
               onChanged: widget.onDarkModeChanged,
             ),
             const Divider(height: 1),
-            SwitchListTile(
-              title: const Text('Device Alerts'),
-              subtitle: const Text('Get notified about device changes'),
-              value: _enabled('deviceAlerts'),
-              onChanged: _preferencesReady && !_saving
-                  ? (value) => _save({'deviceAlerts': value})
-                  : null,
-            ),
-            const Divider(height: 1),
-            ListTile(
-              leading: const Icon(Icons.notifications_active_outlined),
-              title: const Text('Alert Types'),
-              subtitle: Text(
-                [
-                  if (_enabled('statusChanges')) 'Device changes',
-                  if (_enabled('newDevices')) 'New devices',
-                  if (_enabled('safetyWarnings')) 'Safety warnings',
-                ].join(', '),
-              ),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: _preferencesReady && !_saving ? _alertTypes : null,
-            ),
-            const Divider(height: 1),
             ListTile(
               leading: const Icon(Icons.wifi),
               title: const Text('Connected Device'),
@@ -852,15 +1226,6 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
           ],
         ),
       ),
-      if (_saving) const LinearProgressIndicator(),
-      if (_settingsError != null)
-        Padding(
-          padding: const EdgeInsets.only(top: 12),
-          child: Text(
-            _settingsError!,
-            style: const TextStyle(color: Colors.red),
-          ),
-        ),
       const Padding(
         padding: EdgeInsets.only(top: 16),
         child: Text(
@@ -880,66 +1245,6 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
         label: const Text('Sign out'),
       ),
     ];
-  }
-
-  Future<void> _alertTypes() async {
-    final selection = {
-      for (final key in ['statusChanges', 'newDevices', 'safetyWarnings'])
-        key: _enabled(key),
-    };
-    final result = await showDialog<Map<String, bool>>(
-      context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, update) => AlertDialog(
-          title: const Text('Alert Types'),
-          content: SizedBox(
-            width: 400,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                for (final item in [
-                  (
-                    'statusChanges',
-                    'Device status changes',
-                    'When a device changes state',
-                  ),
-                  (
-                    'newDevices',
-                    'New devices',
-                    'When a new device is detected',
-                  ),
-                  (
-                    'safetyWarnings',
-                    'Safety warnings',
-                    'When a device approaches its limit',
-                  ),
-                ])
-                  CheckboxListTile(
-                    contentPadding: EdgeInsets.zero,
-                    controlAffinity: ListTileControlAffinity.leading,
-                    title: Text(item.$2),
-                    subtitle: Text(item.$3),
-                    value: selection[item.$1],
-                    onChanged: (value) =>
-                        update(() => selection[item.$1] = value!),
-                  ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.pop(context, selection),
-              child: const Text('Done'),
-            ),
-          ],
-        ),
-      ),
-    );
-    if (result != null && mounted) await _save(result);
   }
 
   // Live alerts are raised app-wide by SafetyAlertListener; the bell opens
@@ -1095,10 +1400,74 @@ class _Pair extends StatelessWidget {
   }
 }
 
+/// "Edit Appliance Profile": the name only. Owns its text controller, so it
+/// is disposed after the dialog's closing animation, not during it.
+class _RenameDialog extends StatefulWidget {
+  final String initial;
+  const _RenameDialog({required this.initial});
+  @override
+  State<_RenameDialog> createState() => _RenameDialogState();
+}
+
+class _RenameDialogState extends State<_RenameDialog> {
+  late final _name = TextEditingController(text: widget.initial);
+
+  @override
+  void dispose() {
+    _name.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Edit Appliance Profile'),
+    content: TextField(
+      controller: _name,
+      autofocus: true,
+      decoration: const InputDecoration(
+        labelText: 'Appliance Name',
+        border: OutlineInputBorder(),
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(
+        onPressed: () => Navigator.pop(context, _name.text.trim()),
+        child: const Text('Save Profile'),
+      ),
+    ],
+  );
+}
+
+class _Badge extends StatelessWidget {
+  final String status;
+  const _Badge(this.status);
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 7),
+    decoration: BoxDecoration(
+      color: _statusColor(status).withValues(alpha: .16),
+      borderRadius: BorderRadius.circular(24),
+    ),
+    child: Text(
+      status,
+      style: TextStyle(
+        color: _statusColor(status),
+        fontWeight: FontWeight.bold,
+      ),
+    ),
+  );
+}
+
 class _ApplianceIcon extends StatelessWidget {
   /// Type or name; the icon is guessed from keywords in it.
   final String? type;
-  const _ApplianceIcon({this.type});
+  final Color color;
+  final bool compact;
+  const _ApplianceIcon({this.type, this.color = _blue, this.compact = false});
   @override
   Widget build(BuildContext context) {
     final normalized = type?.toLowerCase() ?? '';
@@ -1114,12 +1483,12 @@ class _ApplianceIcon extends StatelessWidget {
         ? Icons.lightbulb_outline
         : Icons.power;
     return Container(
-      padding: const EdgeInsets.all(13),
+      padding: EdgeInsets.all(compact ? 9 : 13),
       decoration: BoxDecoration(
-        color: _blue.withValues(alpha: .12),
-        borderRadius: BorderRadius.circular(18),
+        color: color.withValues(alpha: .12),
+        borderRadius: BorderRadius.circular(compact ? 14 : 18),
       ),
-      child: Icon(icon, color: _blue, size: 27),
+      child: Icon(icon, color: color, size: compact ? 22 : 27),
     );
   }
 }

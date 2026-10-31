@@ -1,5 +1,5 @@
 // The app side of rule-based recognition: the registration state machine,
-// the recognition prompts, the guided registration and the Appliances tab.
+// the recognition prompts, the guided registration and the Profiles tab.
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -7,7 +7,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:wiseplug/models/esp32_data.dart';
 import 'package:wiseplug/models/gadget_status.dart';
 import 'package:wiseplug/models/recognition.dart';
-import 'package:wiseplug/screens/appliances_panel.dart';
 import 'package:wiseplug/screens/esp32_live_view.dart';
 import 'package:wiseplug/screens/register_appliance_screen.dart';
 import 'package:wiseplug/services/esp32_service.dart';
@@ -40,11 +39,14 @@ OutletReading running(
       .millisecondsSinceEpoch,
 });
 
-Future<(Device, FakeRecognition)> mountLive(WidgetTester tester) async {
+Future<(Device, FakeRecognition)> mountLive(
+  WidgetTester tester, {
+  List<RegisteredAppliance> appliances = const [],
+}) async {
   await tester.binding.setSurfaceSize(const Size(430, 1400));
   addTearDown(() => tester.binding.setSurfaceSize(null));
   final device = Device();
-  final recognition = FakeRecognition();
+  final recognition = FakeRecognition()..list = [...appliances];
   await tester.pumpWidget(
     MaterialApp(
       home: Esp32LiveView(
@@ -316,9 +318,22 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+    // Only the type and the name: no mode, no safety limit (set by WisePlug).
+    expect(find.textContaining('Mode'), findsNothing);
+    expect(find.textContaining('Safe operating time'), findsNothing);
     await tester.enterText(
       find.widgetWithText(TextFormField, 'Type of appliance'),
       'Fan',
+    );
+    // The name is required.
+    await tester.ensureVisible(find.text('Start'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Start'));
+    await tester.pumpAndSettle();
+    expect(find.text('Give it a name you will recognise'), findsOneWidget);
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Name'),
+      'Bedroom fan',
     );
     await tester.ensureVisible(find.text('Start'));
     await tester.pumpAndSettle();
@@ -327,7 +342,7 @@ void main() {
       await tester.pump(const Duration(milliseconds: 60));
     }
     expect(recognition.calls, [
-      'register r1 new Fan',
+      'register r1 new Fan Bedroom fan',
       'register r2 new-1',
       'register r3 new-1',
     ]);
@@ -336,70 +351,105 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
+  RegisteredAppliance fan1() => RegisteredAppliance.fromRow(
+    {
+      'id': 'fan-1',
+      'name': 'Fan 1',
+      'max_runtime_mins': 240,
+      'use_count': 2,
+      'last_outlet': 'outlet_1',
+      'appliance_types': {'name': 'Fan'},
+    },
+    modes: [
+      ApplianceMode.fromRow({
+        'id': 'm1',
+        'mode_name': 'Normal',
+        'sample_count': 3,
+        'avg_power_w_mean': 57,
+        'avg_pf_mean': 0.92,
+      }),
+    ],
+  );
+  RegisteredAppliance lamp({String? runningOn}) => RegisteredAppliance.fromRow(
+    {
+      'id': 'lamp',
+      'name': 'Lamp',
+      'max_runtime_mins': 30,
+      'appliance_types': {'name': 'Lamp'},
+    },
+    modes: [
+      ApplianceMode.fromRow({
+        'id': 'm2',
+        'mode_name': 'Normal',
+        'sample_count': 1,
+      }),
+    ],
+    runningOn: runningOn,
+  );
+
   testWidgets(
-    'Appliances shows the outlet, unfinished registration and deletes',
+    'Profiles lists appliances, opens a profile, renames and deletes',
     (tester) async {
-      final recognition = FakeRecognition()
-        ..list = [
-          RegisteredAppliance.fromRow(
-            {
-              'id': 'fan-1',
-              'name': 'Fan 1',
-              'max_runtime_mins': 240,
-              'use_count': 2,
-              'last_outlet': 'outlet_1',
-              'appliance_types': {'name': 'Fan'},
-            },
-            modes: [
-              ApplianceMode.fromRow({
-                'id': 'm1',
-                'mode_name': 'Normal',
-                'sample_count': 3,
-                'avg_power_w_mean': 57,
-              }),
-            ],
-          ),
-          RegisteredAppliance.fromRow(
-            {
-              'id': 'lamp',
-              'name': 'Lamp',
-              'max_runtime_mins': 30,
-              'appliance_types': {'name': 'Lamp'},
-            },
-            modes: [
-              ApplianceMode.fromRow({
-                'id': 'm2',
-                'mode_name': 'Normal',
-                'sample_count': 1,
-              }),
-            ],
-            runningOn: 'outlet_2',
-          ),
-        ];
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: SingleChildScrollView(
-              child: AppliancesPanel(service: recognition),
-            ),
-          ),
-        ),
+      final (device, recognition) = await mountLive(
+        tester,
+        appliances: [
+          fan1(),
+          lamp(runningOn: 'outlet_2'),
+        ],
       );
+      device.readings.add({'B': running('B', appliance: 'Lamp')});
       await tester.pumpAndSettle();
-      expect(find.text('Fan · Last used on Outlet A'), findsOneWidget);
-      expect(find.text('Lamp · On Outlet B now'), findsOneWidget);
-      expect(find.text('Normal · 57.0 W'), findsOneWidget);
-      expect(find.text('Normal: 1 of 3 samples · continue'), findsOneWidget);
-      expect(find.textContaining('Not recognised yet'), findsOneWidget);
-      expect(find.text('Safe operating time: 4 h'), findsOneWidget);
-      await tester.tap(find.byTooltip('Manage Fan 1'));
+      await tester.tap(find.text('Profiles'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Delete'));
+      expect(find.text('Appliance Profiles'), findsOneWidget);
+      expect(find.text('All'), findsOneWidget);
+      expect(find.text('Learning · 5 more uses to learn'), findsOneWidget);
+      expect(find.text('Running on Outlet B'), findsOneWidget);
+      expect(find.text('Registering'), findsOneWidget);
+      // A running appliance cannot be deleted; an idle one can.
+      expect(find.byTooltip('Delete appliance'), findsOneWidget);
+      await tester.tap(find.text('Fan 1'));
       await tester.pumpAndSettle();
-      expect(find.text('Delete Fan 1?'), findsOneWidget);
+      expect(find.text('Appliance\nProfile'), findsOneWidget);
+      expect(find.text('57.0 W · PF 0.92'), findsOneWidget);
+      expect(find.text('4 h'), findsOneWidget); // safety limit, set by WisePlug
+      await tester.tap(find.text('Edit'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField).last, 'Desk fan');
+      await tester.tap(find.text('Save Profile'));
+      await tester.pumpAndSettle();
+      expect(recognition.calls, ['rename fan-1 Desk fan']);
+      await tester.tap(find.widgetWithText(OutlinedButton, 'Delete'));
+      await tester.pumpAndSettle();
       await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
       await tester.pumpAndSettle();
-      expect(recognition.calls, ['delete fan-1']);
+      expect(recognition.calls.last, 'delete fan-1');
+      await tester.pumpWidget(const SizedBox());
     },
   );
+
+  testWidgets('the pop-up offers to continue an unfinished registration', (
+    tester,
+  ) async {
+    final (device, recognition) = await mountLive(
+      tester,
+      appliances: [fan1(), lamp()],
+    );
+    device.readings.add({'A': running('A')});
+    recognition.sessions.add({
+      'A': session(promptText: 'New appliance detected. Register it?'),
+    });
+    await tester.pumpAndSettle();
+    // Only the unfinished one is offered, never Fan 1 (fully registered).
+    expect(
+      find.textContaining('It is Lamp: continue registering (1 of 3)'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('It is Fan 1'), findsNothing);
+    await tester.tap(find.textContaining('It is Lamp'));
+    await tester.pumpAndSettle();
+    expect(find.text('Continue registering'), findsOneWidget);
+    expect(find.text('Lamp'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
 }

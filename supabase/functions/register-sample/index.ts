@@ -2,10 +2,13 @@
 //
 // Guided registration: the user names the appliance and plugs it in
 // registration_samples times (3). Each run is one call:
-//   first run:   { deviceId, eventId, typeName, name?, cutoffMinutes?, modeName? }
-//                creates the appliance ("Fan 2" if no name is given) and its profile
-//   next runs:   { deviceId, eventId, applianceId, modeName? }
-//   a new mode:  { deviceId, eventId, applianceId, modeName: "High" }
+//   first run:   { deviceId, eventId, typeName, name }  creates the appliance
+//                and its first mode profile ("Normal")
+//   next runs:   { deviceId, eventId, applianceId }      the profile still
+//                collecting samples (the first, or a mode WisePlug started)
+// The user sets only the type and the name. The safe operating time and the
+// modes are set by the system: the type's default limit (then the 7-use
+// learning), and a new mode when a confirmed run fits none (confirm-match).
 // The run's Stage 2 summary becomes a sample, and the profile is recomputed as
 // the plain mean and standard deviation of its samples (registration voltage
 // = their mean voltage). The profile is used for matching only once it has
@@ -20,11 +23,10 @@
 import { deviceIdOf, firebaseUser, requireOwner } from "../_shared/auth.ts";
 import { db } from "../_shared/db.ts";
 import { HttpError, json, readJson, serve } from "../_shared/http.ts";
-import { type Appliance, confirmedCutoffS, nextInstanceName } from "../_shared/matching.ts";
+import { type Appliance, confirmedCutoffS } from "../_shared/matching.ts";
 import {
   insertSample,
   loadAppliance,
-  loadAppliances,
   loadConfig,
   recomputeProfile,
   sessionFeatures,
@@ -46,9 +48,7 @@ serve(async (req) => {
   // A registration sample needs the full measurement (power variation, cycling).
   if (session.stage < 2) throw new HttpError(409, "Keep it running: WisePlug finishes measuring about 60 s after switch-on.");
   const features = sessionFeatures(session);
-  const modeName = text(body.modeName, 40) ?? "Normal";
-
-  // The appliance: an existing one (next plug-in, or a new mode), or a new one.
+  // The appliance: an existing one (its next plug-in), or a new one.
   let appliance: Appliance;
   if (body.applianceId) {
     appliance = await loadAppliance(uid, body.applianceId);
@@ -65,13 +65,10 @@ serve(async (req) => {
       if (error) throw error;
       type = data;
     }
-    const minutes = body.cutoffMinutes == null ? Number(type.default_max_runtime_mins) : Number(body.cutoffMinutes);
-    if (!Number.isInteger(minutes) || minutes < 1 || minutes > 10080) {
-      throw new HttpError(400, "cutoffMinutes must be a whole number from 1 to 10080");
-    }
-    const all = await loadAppliances(uid);
-    const name = text(body.name, 63) ??
-      nextInstanceName(type.name, all.map((a) => a.name), all.filter((a) => a.typeId === type.id).length);
+    const name = text(body.name, 63);
+    if (!name) throw new HttpError(400, "name is required, e.g. Fan 2");
+    // The system sets the safe operating time: the type's default.
+    const minutes = Number(type.default_max_runtime_mins);
     const { data: created, error } = await db.from("appliance_instances")
       .insert({ device_id: deviceId, owner_uid: uid, type_id: type.id, name, max_runtime_mins: minutes })
       .select("id").single();
@@ -80,15 +77,19 @@ serve(async (req) => {
     appliance = await loadAppliance(uid, created.id);
   }
 
-  // The mode profile ("Normal", "Low", "High"), created on its first sample.
-  let profile = appliance.profiles.find((p) => p.modeName.toLowerCase() === modeName.toLowerCase());
+  // The profile still collecting samples; a new appliance starts with "Normal".
+  let profile = appliance.profiles.find((p) => p.sampleCount < config.registrationSamples);
   let profileId = profile?.id;
   if (!profileId) {
+    if (appliance.profiles.length) {
+      throw new HttpError(409, `${appliance.name} is already fully registered.`);
+    }
     const { data, error } = await db.from("appliance_profiles")
-      .insert({ appliance_id: appliance.id, mode_name: modeName }).select("id").single();
+      .insert({ appliance_id: appliance.id, mode_name: "Normal" }).select("id").single();
     if (error) throw error;
     profileId = data.id as string;
   }
+  const modeName = profile?.modeName ?? "Normal";
   if (!(await insertSample(profileId, features, "registration", session.event_id))) {
     throw new HttpError(409, "This run is already recorded for that appliance; unplug it and plug it in again.");
   }

@@ -106,25 +106,21 @@ class RecognitionService {
     {'eventId': eventId, 'applianceId': applianceId},
   );
 
-  /// Records the run [eventId] as a registration sample. The first sample of a
-  /// new appliance gives [typeName] (and optionally [name], [cutoffMinutes]);
-  /// later samples, or a new mode, give [applianceId].
+  /// Records the run [eventId] as a registration sample. The first sample of
+  /// a new appliance gives its [typeName] and [name] (both required); later
+  /// samples give [applianceId]. The safe operating time and the modes are set
+  /// by the system, never here.
   Future<RegistrationProgress> registerSample({
     required String eventId,
     String? applianceId,
     String? typeName,
     String? name,
-    int? cutoffMinutes,
-    String? modeName,
   }) async => RegistrationProgress.fromJson(
     await _invoke('register-sample', {
       'eventId': eventId,
       'applianceId': ?applianceId,
       'typeName': ?typeName,
-      if (name != null && name.trim().isNotEmpty) 'name': name.trim(),
-      'cutoffMinutes': ?cutoffMinutes,
-      if (modeName != null && modeName.trim().isNotEmpty)
-        'modeName': modeName.trim(),
+      'name': ?name,
     }),
   );
 
@@ -132,20 +128,6 @@ class RecognitionService {
     'manage-appliance',
     {'action': 'rename', 'applianceId': applianceId, 'name': name},
   );
-
-  Future<void> setCutoff(String applianceId, int minutes) =>
-      _invoke('manage-appliance', {
-        'action': 'setCutoff',
-        'applianceId': applianceId,
-        'cutoffMinutes': minutes,
-      });
-
-  Future<void> deleteMode(String applianceId, String profileId) =>
-      _invoke('manage-appliance', {
-        'action': 'deleteMode',
-        'applianceId': applianceId,
-        'profileId': profileId,
-      });
 
   Future<void> deleteAppliance(String applianceId) => _invoke(
     'manage-appliance',

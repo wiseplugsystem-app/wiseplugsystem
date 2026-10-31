@@ -14,7 +14,7 @@ hand.
 | Schema | `supabase/migrations/20261029020000…` to `…050000` |
 | Tunable numbers | table `recognition_config` (one row) |
 | Firmware measurement | `arduino/wiseplug_esp32/recognition_window.h` (tests in `test/recognition_window_test.cpp`) |
-| App | `lib/screens/recognition_prompt.dart`, `register_appliance_screen.dart`, `appliances_panel.dart` |
+| App | `lib/screens/recognition_prompt.dart` (pop-ups), `register_appliance_screen.dart` (3 plug-ins), Profiles tab in `esp32_live_view.dart` |
 | Evaluation | views `recognition_evaluation`, `recognition_confusion`, `recognition_metrics`, `recognition_summary` |
 
 ## 1. The failure being fixed
@@ -69,8 +69,19 @@ Stage 2 at the end of STEADY (about 35–60 s after plug-in).
 
 ## 3. Registration
 
-The user names the appliance and its type, then plugs it in **3 times**. The
-app guides each plug-in.
+Registration starts **only from the pop-up** WisePlug shows for a new
+appliance. There is no other register button and there are no preset profiles.
+
+- **What the user sets:** the type and the name, both required. The app then
+  guides **3 plug-ins**.
+- **What the system sets:** the **safety limit** (the type's default, then
+  the 7-use learning) and the **modes**. The user cannot change either one,
+  in the app or through the server.
+- **Unfinished registrations:** if a registration is left unfinished, the next
+  "New appliance" pop-up offers "It is <name>: continue registering".
+- **Profiles tab:** lists every appliance with an All / Active / Idle filter,
+  where it is plugged in, and its status. A profile can be renamed (Edit) or
+  deleted, but not given a limit or a mode.
 
 - **Where it is stored:** each run becomes a raw sample of the appliance's
   **mode profile**, for example "Fan – Low" or "Fan – High".
@@ -129,9 +140,14 @@ All numbers below come from `recognition_config`.
 8. **Confirmed cutoff:** the appliance's own safe operating time. After 7
    confirmed normal uses, its average runtime × 1.5 applies instead: at least
    5 min, never above its own limit.
-9. **Signature updating:** after a **user-confirmed** run that fits a mode:
-   - The mode's means move by `new = 0.9 × old + 0.1 × run`.
-   - The standard deviation is recomputed from the newest 20 samples.
+9. **Signature updating:** after a **user-confirmed** run:
+   - **It fits a complete mode:** the mode's means move by
+     `new = 0.9 × old + 0.1 × run`, and the standard deviation is recomputed
+     from the newest 20 samples.
+   - **It fits a mode still being learned:** that mode becomes the mean and
+     standard deviation of its samples.
+   - **It fits no mode** (e.g. a fan speed never seen): **the system starts a
+     new mode** ("Mode 2") with this run. It is matched once it has 3 samples.
    - Unconfirmed runs never update anything.
 
 **Known limitation (stated honestly):**

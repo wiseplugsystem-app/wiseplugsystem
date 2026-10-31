@@ -127,26 +127,42 @@ export async function recomputeProfile(profileId: string) {
 }
 
 /**
- * Signature updating after a USER-confirmed match: the run is added to the
- * mode profile it fits, and that profile's means move by the EMA. A run that
- * fits none of the appliance's modes updates nothing (it would drag e.g. the
- * Low profile towards High); the reply then suggests adding a mode.
- * Returns the profile updated, or null.
+ * Signature updating after a USER-confirmed match (never an unconfirmed one).
+ * The modes are set by the system, not the user:
+ *   - the run fits a complete mode: that mode's means move by the EMA
+ *   - it fits a mode still collecting samples: the sample is added and that
+ *     mode is the plain mean / std of its samples (as at registration)
+ *   - it fits none (e.g. fan speed 3 never seen): WisePlug starts a new mode
+ *     "Mode N" with this run; like any mode it is matched once it has
+ *     registration_samples samples
+ * Returns the profile updated.
  */
 export async function learnFromConfirmed(
   appliance: Appliance,
   x: Features,
   eventId: string,
   config: Config,
-): Promise<{ profileId: string; modeName: string } | null> {
+): Promise<{ profileId: string; modeName: string; newMode: boolean } | null> {
   const fit = closestProfile(x, appliance, 2, config);
-  if (!fit || !fit.pass) return null;
+  if (!fit || !fit.pass) {
+    const modeName = `Mode ${appliance.profiles.length + 1}`;
+    const { data, error } = await db.from("appliance_profiles")
+      .insert({ appliance_id: appliance.id, mode_name: modeName }).select("id").single();
+    if (error) throw error;
+    if (!(await insertSample(data.id, x, "confirmed_match", eventId))) return null;
+    await recomputeProfile(data.id);
+    return { profileId: data.id, modeName, newMode: true };
+  }
   if (!(await insertSample(fit.profile.id, x, "confirmed_match", eventId))) return null;
-  const updated = emaUpdate(fit.profile, x, await recentSamples(fit.profile.id), config);
-  const { error } = await db.from("appliance_profiles")
-    .update({ ...profileColumns(updated), sample_count: updated.sampleCount }).eq("id", fit.profile.id);
-  if (error) throw error;
-  return { profileId: fit.profile.id, modeName: fit.profile.modeName };
+  if (fit.profile.sampleCount + 1 <= config.registrationSamples) {
+    await recomputeProfile(fit.profile.id);
+  } else {
+    const updated = emaUpdate(fit.profile, x, await recentSamples(fit.profile.id), config);
+    const { error } = await db.from("appliance_profiles")
+      .update({ ...profileColumns(updated), sample_count: updated.sampleCount }).eq("id", fit.profile.id);
+    if (error) throw error;
+  }
+  return { profileId: fit.profile.id, modeName: fit.profile.modeName, newMode: false };
 }
 
 /** The stored features of an outlet session. */

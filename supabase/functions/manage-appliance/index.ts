@@ -1,14 +1,13 @@
 // POST /functions/v1/manage-appliance   (called by the app)
 //
 // Changes one of the user's registered appliances:
-//   { action: "rename",     applianceId, name }            "Fan 2" -> "Bedroom fan"
-//   { action: "setCutoff",  applianceId, cutoffMinutes }   its safe operating time
-//   { action: "deleteMode", applianceId, profileId }       forget one mode ("High")
-//   { action: "delete",     applianceId }                  forget the appliance
-// Adding a mode is a registration: register-sample with a new modeName.
+//   { action: "rename", applianceId, name }   "Fan 2" -> "Bedroom fan"
+//   { action: "delete", applianceId }         forget the appliance
+// The safe operating time and the modes are set by the system only (the
+// type's default, the 7-use learning, and modes added by confirm-match).
 //
-// An appliance that is running now (an open outlet session) cannot be deleted,
-// and neither can its last mode: switch it off first.
+// An appliance that is running now (an open outlet session) cannot be
+// deleted: switch it off first.
 //
 // Body: { deviceId, action, applianceId, ... }
 // Auth: Authorization: Bearer <Firebase ID token> of the plug's owner, who must
@@ -47,27 +46,6 @@ serve(async (req) => {
       if (e) throw e;
       break;
     }
-    case "setCutoff": {
-      const minutes = Number(body.cutoffMinutes);
-      if (!Number.isInteger(minutes) || minutes < 1 || minutes > 10080) {
-        throw new HttpError(400, "cutoffMinutes must be a whole number from 1 to 10080");
-      }
-      // Applies from its next confirmed run; a run in progress keeps its cutoff.
-      const { error: e } = await db.from("appliance_instances").update({ max_runtime_mins: minutes }).eq("id", appliance.id);
-      if (e) throw e;
-      break;
-    }
-    case "deleteMode": {
-      if (running) busy();
-      const { data: modes, error: e } = await db.from("appliance_profiles")
-        .select("id").eq("appliance_id", appliance.id);
-      if (e) throw e;
-      if (!modes.some((m) => m.id === body.profileId)) throw new HttpError(404, "Unknown mode");
-      if (modes.length === 1) throw new HttpError(409, "This is its only mode; delete the appliance instead.");
-      const { error: d } = await db.from("appliance_profiles").delete().eq("id", body.profileId);
-      if (d) throw d;
-      break;
-    }
     case "delete": {
       if (running) busy();
       // Its modes and samples go with it (on delete cascade).
@@ -76,7 +54,7 @@ serve(async (req) => {
       break;
     }
     default:
-      throw new HttpError(400, 'action must be "rename", "setCutoff", "deleteMode" or "delete"');
+      throw new HttpError(400, 'action must be "rename" or "delete"');
   }
   return json({ ok: true });
 });

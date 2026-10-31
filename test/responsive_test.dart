@@ -152,9 +152,7 @@ void main() {
         onDarkModeChanged: (_) {},
       );
 
-  testWidgets('home, appliances and settings fit a small phone', (
-    tester,
-  ) async {
+  testWidgets('home, profiles and settings fit a small phone', (tester) async {
     final recognition = FakeRecognition()
       ..list = [
         RegisteredAppliance.fromRow(
@@ -187,7 +185,7 @@ void main() {
       await tester.pump(const Duration(milliseconds: 500));
       await tester.drag(find.byType(Scrollable).first, const Offset(0, -2000));
       await tester.pump();
-      await tester.tap(find.text('Appliances'));
+      await tester.tap(find.text('Profiles'));
       await tester.pump(const Duration(milliseconds: 500));
       await tester.drag(find.byType(Scrollable).first, const Offset(0, -2000));
       await tester.pump();

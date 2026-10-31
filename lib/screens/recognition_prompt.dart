@@ -14,6 +14,12 @@ class ConfirmChoice extends PromptChoice {
 }
 
 /// "Register it": a new appliance, optionally pre-filled ("Fan", "Fan 2").
+/// "It is the one I started registering": its next plug-in.
+class ContinueChoice extends PromptChoice {
+  final RegisteredAppliance appliance;
+  const ContinueChoice(this.appliance);
+}
+
 class RegisterChoice extends PromptChoice {
   final String? typeName, name;
   const RegisterChoice({this.typeName, this.name});
@@ -32,6 +38,8 @@ Future<PromptChoice?> showRecognitionPrompt(
   BuildContext context,
   OutletSession session, {
   int defaultCutoffMinutes = 30,
+  List<RegisteredAppliance> unfinished = const [],
+  int requiredSamples = 3,
 }) => showModalBottomSheet<PromptChoice>(
   context: context,
   isScrollControlled: true,
@@ -39,16 +47,25 @@ Future<PromptChoice?> showRecognitionPrompt(
   builder: (_) => RecognitionPromptSheet(
     session: session,
     defaultCutoffMinutes: defaultCutoffMinutes,
+    unfinished: unfinished,
+    requiredSamples: requiredSamples,
   ),
 );
 
 class RecognitionPromptSheet extends StatefulWidget {
   final OutletSession session;
   final int defaultCutoffMinutes;
+
+  /// Appliances whose registration is not finished: an UNKNOWN load may be
+  /// one of them (registration happens only from this pop-up).
+  final List<RegisteredAppliance> unfinished;
+  final int requiredSamples;
   const RecognitionPromptSheet({
     super.key,
     required this.session,
     this.defaultCutoffMinutes = 30,
+    this.unfinished = const [],
+    this.requiredSamples = 3,
   });
 
   @override
@@ -231,6 +248,14 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
             onPressed: () => pop(const RegisterChoice()),
             child: const Text('Register'),
           ),
+          for (final a in widget.unfinished)
+            OutlinedButton(
+              onPressed: () => pop(ContinueChoice(a)),
+              child: Text(
+                'It is ${a.name}: continue registering '
+                '(${a.modes.isEmpty ? 0 : a.modes.map((m) => m.sampleCount).reduce((x, y) => x < y ? x : y)} of ${widget.requiredSamples})',
+              ),
+            ),
           notNow,
         ];
     }

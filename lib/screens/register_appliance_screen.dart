@@ -80,18 +80,20 @@ class RegistrationTracker {
   void skip(String eventId) => _used.add(eventId);
 }
 
-/// Guided registration of a new appliance, of another sample of one being
-/// registered, or of a new mode ("High") of an existing one.
+/// Guided registration, opened from the recognition pop-up: a new appliance
+/// (the user gives its type and name), or the remaining plug-ins of one
+/// being registered. The safe operating time and the modes are set by the
+/// system, never here.
 class RegisterApplianceScreen extends StatefulWidget {
   final RecognitionService service;
 
-  /// Continue an appliance (more samples, or a new mode); null for a new one.
+  /// Continue an appliance still collecting samples; null for a new one.
   final RegisteredAppliance? appliance;
 
   /// The outlet ('A' / 'B') and the run that led here, if any.
   final String outlet;
   final OutletSession? fromSession;
-  final String? typeName, name, modeName;
+  final String? typeName, name;
   final RecognitionSettings settings;
   final Duration pollEvery;
 
@@ -103,7 +105,6 @@ class RegisterApplianceScreen extends StatefulWidget {
     this.fromSession,
     this.typeName,
     this.name,
-    this.modeName,
     this.settings = const RecognitionSettings(),
     this.pollEvery = const Duration(seconds: 2),
   });
@@ -117,8 +118,6 @@ class _RegisterApplianceScreenState extends State<RegisterApplianceScreen> {
   final _form = GlobalKey<FormState>();
   late final _type = TextEditingController(text: widget.typeName ?? '');
   late final _name = TextEditingController(text: widget.name ?? '');
-  late final _mode = TextEditingController(text: widget.modeName ?? '');
-  final _minutes = TextEditingController();
   late String _outlet = widget.fromSession?.outletName ?? widget.outlet;
   List<String> _types = [];
 
@@ -133,9 +132,6 @@ class _RegisterApplianceScreenState extends State<RegisterApplianceScreen> {
   Timer? _timer;
 
   bool get _newAppliance => widget.appliance == null;
-
-  /// An existing appliance without a given mode: the user names a new one.
-  bool get _addingMode => !_newAppliance && widget.modeName == null;
   int get _required => widget.settings.registrationSamples;
 
   @override
@@ -153,7 +149,7 @@ class _RegisterApplianceScreenState extends State<RegisterApplianceScreen> {
   @override
   void dispose() {
     _timer?.cancel();
-    for (final c in [_type, _name, _mode, _minutes]) {
+    for (final c in [_type, _name]) {
       c.dispose();
     }
     super.dispose();
@@ -168,9 +164,7 @@ class _RegisterApplianceScreenState extends State<RegisterApplianceScreen> {
             ? widget.fromSession?.eventId
             : null,
       );
-      if (_newAppliance && _name.text.trim().isNotEmpty) {
-        _applianceName = _name.text.trim();
-      }
+      if (_newAppliance) _applianceName = _name.text.trim();
     });
     _poll();
     _timer = Timer.periodic(widget.pollEvery, (_) => _poll());
@@ -198,14 +192,11 @@ class _RegisterApplianceScreenState extends State<RegisterApplianceScreen> {
   Future<void> _record(RegistrationTracker tracker, OutletSession run) async {
     try {
       final first = _applianceId == null;
-      final minutes = int.tryParse(_minutes.text.trim());
       final progress = await widget.service.registerSample(
         eventId: run.eventId,
         applianceId: _applianceId,
         typeName: first ? _type.text.trim() : null,
         name: first ? _name.text.trim() : null,
-        cutoffMinutes: first ? minutes : null,
-        modeName: _mode.text.trim().isEmpty ? null : _mode.text.trim(),
       );
       tracker.recorded(run.eventId);
       if (!mounted) return;
@@ -228,11 +219,7 @@ class _RegisterApplianceScreenState extends State<RegisterApplianceScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final title = _newAppliance
-        ? 'Register appliance'
-        : _addingMode
-        ? 'Add a mode'
-        : 'Continue registering';
+    final title = _newAppliance ? 'Register appliance' : 'Continue registering';
     return Scaffold(
       appBar: AppBar(title: Text(title)),
       body: Center(
@@ -283,27 +270,13 @@ class _RegisterApplianceScreenState extends State<RegisterApplianceScreen> {
             TextFormField(
               controller: _name,
               decoration: const InputDecoration(
-                labelText: 'Name (optional)',
-                hintText: 'Left empty: "Fan 2" style',
+                labelText: 'Name',
+                hintText: 'e.g. Bedroom fan',
                 border: OutlineInputBorder(),
               ),
-            ),
-            const SizedBox(height: 14),
-            TextFormField(
-              controller: _minutes,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(
-                labelText: 'Safe operating time (minutes, optional)',
-                hintText: 'Left empty: the type\'s default',
-                border: OutlineInputBorder(),
-              ),
-              validator: (v) {
-                if ((v ?? '').trim().isEmpty) return null;
-                final m = int.tryParse(v!.trim());
-                return m == null || m < 1 || m > 10080
-                    ? 'A whole number from 1 to 10080'
-                    : null;
-              },
+              validator: (v) => (v ?? '').trim().isEmpty
+                  ? 'Give it a name you will recognise'
+                  : null,
             ),
             const SizedBox(height: 14),
           ] else
@@ -317,25 +290,6 @@ class _RegisterApplianceScreenState extends State<RegisterApplianceScreen> {
                 ),
               ),
             ),
-          TextFormField(
-            controller: _mode,
-            readOnly: !_newAppliance && !_addingMode, // continuing a known mode
-            decoration: InputDecoration(
-              labelText: _addingMode ? 'New mode' : 'Mode (optional)',
-              hintText: 'e.g. Low, High; left empty: Normal',
-              border: const OutlineInputBorder(),
-            ),
-            validator: (v) {
-              final mode = (v ?? '').trim().toLowerCase();
-              if (!_addingMode) return null;
-              if (mode.isEmpty) return 'Name the mode, e.g. High';
-              return widget.appliance!.modes.any(
-                    (m) => m.name.toLowerCase() == mode,
-                  )
-                  ? 'It already has this mode'
-                  : null;
-            },
-          ),
           const SizedBox(height: 18),
           const Text('Which outlet will you use?'),
           const SizedBox(height: 8),
@@ -453,8 +407,8 @@ class _RegisterApplianceScreenState extends State<RegisterApplianceScreen> {
         ),
       if (!_complete && _collected > 0)
         const Text(
-          'You can continue later from Appliances. Until all samples are '
-          'saved, WisePlug cannot recognise it yet.',
+          'To continue later, plug it in again and choose it in the pop-up. '
+          'Until all samples are saved, WisePlug cannot recognise it yet.',
           textAlign: TextAlign.center,
           style: TextStyle(fontSize: 12, color: Colors.grey),
         ),

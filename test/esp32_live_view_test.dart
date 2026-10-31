@@ -268,12 +268,9 @@ void main() {
       await tester.tap(find.text('Settings').last);
       await tester.pumpAndSettle();
       expect(find.text('gadget-1 · Offline'), findsOneWidget);
-      await tester.tap(find.text('Alert Types'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('New devices').last);
-      await tester.tap(find.text('Done'));
-      await tester.pumpAndSettle();
-      expect(device.saved?['newDevices'], false);
+      // Alert settings are gone: device and safety alerts are always on.
+      expect(find.text('Alert Types'), findsNothing);
+      expect(find.text('Device Alerts'), findsNothing);
       await tester.pumpWidget(const SizedBox());
       await device.close();
     },

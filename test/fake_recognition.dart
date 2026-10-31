@@ -43,8 +43,6 @@ class FakeRecognition extends Fake implements RecognitionService {
     String? applianceId,
     String? typeName,
     String? name,
-    int? cutoffMinutes,
-    String? modeName,
   }) async {
     calls.add(
       'register $eventId ${applianceId ?? 'new'} ${typeName ?? ''} ${name ?? ''}'
@@ -53,7 +51,7 @@ class FakeRecognition extends Fake implements RecognitionService {
     collected++;
     return RegistrationProgress.fromJson({
       'appliance': {'id': 'new-1', 'name': name ?? 'Fan 2'},
-      'profile': {'id': 'p-1', 'modeName': modeName ?? 'Normal'},
+      'profile': {'id': 'p-1', 'modeName': 'Normal'},
       'samplesCollected': collected,
       'samplesRequired': 3,
       'complete': collected >= 3,
@@ -63,14 +61,6 @@ class FakeRecognition extends Fake implements RecognitionService {
   @override
   Future<void> rename(String applianceId, String name) async =>
       calls.add('rename $applianceId $name');
-
-  @override
-  Future<void> setCutoff(String applianceId, int minutes) async =>
-      calls.add('cutoff $applianceId $minutes');
-
-  @override
-  Future<void> deleteMode(String applianceId, String profileId) async =>
-      calls.add('deleteMode $applianceId $profileId');
 
   @override
   Future<void> deleteAppliance(String applianceId) async =>
