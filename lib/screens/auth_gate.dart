@@ -314,10 +314,18 @@ class _NotificationSessionState extends State<_NotificationSession> {
         sound: true,
         badge: true,
       );
+      // Deliberately the FCM registration token. Its replacement,
+      // register() / onRegistered, yields a Firebase Installation ID for
+      // "direct send", which the senders here do not accept: both the Supabase
+      // evaluate-safety-alert function (FCM HTTP v1, message.token) and the
+      // Firebase function (sendEachForMulticast) need registration tokens.
+      // Switching would silently stop safety push notifications.
+      // ignore: deprecated_member_use
       final token = await messaging.getToken();
       if (!mounted) return;
       if (token != null) await _saveToken(token);
       if (!mounted) return;
+      // ignore: deprecated_member_use
       _tokens = messaging.onTokenRefresh.listen((token) async {
         try {
           await _saveToken(token);
