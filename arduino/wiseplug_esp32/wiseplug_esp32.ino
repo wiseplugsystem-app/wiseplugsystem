@@ -43,13 +43,18 @@
 // ==========================================
 constexpr const char* DEVICE_ID = "gadget-1";  // must match the app's DeviceBinding
 
-// Relay polarity. This board is active-low: a LOW pin closes the relay
-// (confirmed: "relay off" passed 68 W, "relay on" passed 0 W).
-#define RELAY_ON  LOW
-#define RELAY_OFF HIGH
+// Outlet switches. Outlet A: a solid-state relay (SSR "DA", DC input) on
+// GPIO 13: + to GPIO 13, - to GND. An SSR conducts while its input is HIGH.
+// GPIO 13 is not a boot-strapping pin and stays LOW at power-up, so the
+// outlet stays off while the ESP32 starts. (12 would stop the ESP32 booting
+// if pulled high, 14 flickers at boot, 34 and 35 are input-only.)
+// Outlet B: the original active-low relay module on GPIO 19 (a LOW pin
+// closes it; confirmed: "relay off" passed 68 W, "relay on" passed 0 W).
+// Set RELAY_B_ON to HIGH when Outlet B gets an SSR too.
+constexpr int RELAY_A_PIN = 13, RELAY_B_PIN = 19;
+constexpr uint8_t RELAY_A_ON = HIGH, RELAY_B_ON = LOW;
 
 constexpr int PZEM_A_RX = 32, PZEM_A_TX = 33, PZEM_B_RX = 25, PZEM_B_TX = 26;
-constexpr int RELAY_A_PIN = 18, RELAY_B_PIN = 19;
 constexpr int BUTTON_A_PIN = 4, BUTTON_B_PIN = 5;  // optional reset buttons to GND
 
 // Plug-in: power above START_W_THRESHOLD. Unplug / switched off: power below
@@ -123,6 +128,7 @@ struct SocketChannel {
   Preferences prefs;
   const char *ns, *outlet;
   int relay, button;
+  uint8_t relayOn;  // pin level that switches the outlet on (SSR: HIGH)
   Snapshot data;
   uint32_t anomalySamples = 0;
   uint64_t buttonChanged = 0, lastSnapshot = 0;
@@ -218,7 +224,7 @@ String timestamp(int64_t ms) {
 // ==========================================
 bool relayEnergized(SocketState s) { return s != SocketState::Disabled && s != SocketState::LockedOut; }
 void applyRelay(SocketChannel& ch) {
-  digitalWrite(ch.relay, relayEnergized(ch.data.safety.state) ? RELAY_ON : RELAY_OFF);
+  digitalWrite(ch.relay, relayEnergized(ch.data.safety.state) ? ch.relayOn : !ch.relayOn);
 }
 bool persistSafety(SocketChannel& ch) {
   auto state = ch.data.safety.state;
@@ -352,7 +358,7 @@ void beginAlert(SocketChannel& ch, const char* type, uint64_t now) {
 // Electrical fault: power off first, then lock out (persisted, so a reboot
 // stays locked) and queue the notification. Works with or without Wi-Fi.
 void trip(SocketChannel& ch, const char* reason, const SensorSample& s, uint64_t now) {
-  digitalWrite(ch.relay, RELAY_OFF);
+  digitalWrite(ch.relay, !ch.relayOn);
   Notice n;
   strlcpy(n.reason, reason, sizeof(n.reason));
   strlcpy(n.appliance, activeName(ch), sizeof(n.appliance));
@@ -1119,7 +1125,8 @@ void supabaseTask(void*) {
 // ==========================================
 void setup() {
   // Relays stay off until the persisted safety state is known.
-  for (int pin : {RELAY_A_PIN, RELAY_B_PIN}) { digitalWrite(pin, RELAY_OFF); pinMode(pin, OUTPUT); }
+  digitalWrite(RELAY_A_PIN, !RELAY_A_ON); pinMode(RELAY_A_PIN, OUTPUT);
+  digitalWrite(RELAY_B_PIN, !RELAY_B_ON); pinMode(RELAY_B_PIN, OUTPUT);
   Serial.begin(115200);
   events = xQueueCreate(16, sizeof(Event));
   notices = xQueueCreate(8, sizeof(Notice));
@@ -1137,7 +1144,8 @@ void setup() {
   for (int i = 0; i < 2; ++i) {
     auto& ch = outlets[i];
     ch.ns = i == 0 ? "apps_a" : "apps_b"; ch.outlet = i == 0 ? "outlet_A" : "outlet_B";
-    ch.relay = i == 0 ? RELAY_A_PIN : RELAY_B_PIN; ch.button = i == 0 ? BUTTON_A_PIN : BUTTON_B_PIN;
+    ch.relay = i == 0 ? RELAY_A_PIN : RELAY_B_PIN; ch.relayOn = i == 0 ? RELAY_A_ON : RELAY_B_ON;
+    ch.button = i == 0 ? BUTTON_A_PIN : BUTTON_B_PIN;
     pinMode(ch.button, INPUT_PULLUP);
     ch.rawButton = ch.stableButton = digitalRead(ch.button); ch.buttonChanged = monotonicMs();
     ch.sensors = xQueueCreate(1, sizeof(SensorSample)); ch.commands = xQueueCreate(4, sizeof(Command));
