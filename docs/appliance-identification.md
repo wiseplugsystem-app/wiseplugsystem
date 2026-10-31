@@ -14,7 +14,7 @@ hand.
 | Schema | `supabase/migrations/20261029020000…` to `…050000` |
 | Tunable numbers | table `recognition_config` (one row) |
 | Firmware measurement | `arduino/wiseplug_esp32/recognition_window.h` (tests in `test/recognition_window_test.cpp`) |
-| App | `lib/screens/recognition_prompt.dart` (pop-ups), `register_appliance_screen.dart` (3 plug-ins), Profiles tab in `esp32_live_view.dart` |
+| App | `lib/screens/recognition_prompt.dart` (pop-ups), `registration_dialog.dart` (registration pop-up, 3 plug-ins), Profiles tab in `esp32_live_view.dart` |
 | Evaluation | views `recognition_evaluation`, `recognition_confusion`, `recognition_metrics`, `recognition_summary` |
 
 ## 1. The failure being fixed
@@ -69,8 +69,9 @@ Stage 2 at the end of STEADY (about 35–60 s after plug-in).
 
 ## 3. Registration
 
-Registration starts **only from the pop-up** WisePlug shows for a new
-appliance. There is no other register button and there are no preset profiles.
+Registration is **a pop-up** that appears **only when a new appliance is
+detected** (it is not a separate screen). The run that opened it is the
+first of the 3 plug-ins. There is no other register button and there are no preset profiles.
 
 - **What the user sets:** the type and the name, both required. The app then
   guides **3 plug-ins**, on **either outlet**: appliances are portable, so

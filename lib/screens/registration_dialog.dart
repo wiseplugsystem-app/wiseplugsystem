@@ -5,8 +5,8 @@ import 'package:flutter/material.dart';
 import '../models/recognition.dart';
 import '../services/recognition_service.dart';
 
-/// What the registration screen asks the user to do next, decided from the
-/// latest run on the chosen outlet.
+/// What the registration pop-up asks the user to do next, decided from the
+/// newest run on either outlet.
 enum RegistrationStep {
   /// Plug in or switch on the appliance.
   plugIn,
@@ -82,46 +82,79 @@ class RegistrationTracker {
   void skip(String eventId) => _used.add(eventId);
 }
 
-/// Guided registration, opened from the recognition pop-up: a new appliance
-/// (the user gives its type and name), or the remaining plug-ins of one
-/// being registered. The safe operating time and the modes are set by the
-/// system, never here.
-class RegisterApplianceScreen extends StatefulWidget {
+/// Shows the registration pop-up for the run [fromSession]: WisePlug detected
+/// a new appliance. Registration only ever starts here. Returns true when at
+/// least one sample was saved.
+Future<bool?> showRegistrationDialog(
+  BuildContext context, {
+  required RecognitionService service,
+  OutletSession? fromSession,
+  RegisteredAppliance? appliance,
+  String? typeName,
+  String? name,
+  List<RegisteredAppliance> unfinished = const [],
+  RecognitionSettings settings = const RecognitionSettings(),
+}) => showDialog<bool>(
+  context: context,
+  barrierDismissible: false,
+  builder: (_) => RegistrationDialog(
+    service: service,
+    fromSession: fromSession,
+    appliance: appliance,
+    typeName: typeName,
+    name: name,
+    unfinished: unfinished,
+    settings: settings,
+  ),
+);
+
+/// The registration pop-up: "New appliance detected", the type and name
+/// (both required), then the guided plug-ins (3 in all; the run that opened
+/// the pop-up is the first). It can also continue an appliance whose
+/// registration was left unfinished. The safe operating time and the modes
+/// are set by the system, never here.
+class RegistrationDialog extends StatefulWidget {
   final RecognitionService service;
 
-  /// Continue an appliance still collecting samples; null for a new one.
+  /// Continue this appliance (still collecting samples); null for a new one.
   final RegisteredAppliance? appliance;
 
   /// The run that opened the pop-up, if any. Either outlet can be used:
   /// appliances are portable, so registration watches both.
   final OutletSession? fromSession;
   final String? typeName, name;
+
+  /// Appliances whose registration is unfinished: the new load may be one.
+  final List<RegisteredAppliance> unfinished;
   final RecognitionSettings settings;
   final Duration pollEvery;
 
-  const RegisterApplianceScreen({
+  const RegistrationDialog({
     super.key,
     required this.service,
     this.appliance,
     this.fromSession,
     this.typeName,
     this.name,
+    this.unfinished = const [],
     this.settings = const RecognitionSettings(),
     this.pollEvery = const Duration(seconds: 2),
   });
 
   @override
-  State<RegisterApplianceScreen> createState() =>
-      _RegisterApplianceScreenState();
+  State<RegistrationDialog> createState() => _RegistrationDialogState();
 }
 
-class _RegisterApplianceScreenState extends State<RegisterApplianceScreen> {
+class _RegistrationDialogState extends State<RegistrationDialog> {
   final _form = GlobalKey<FormState>();
   late final _type = TextEditingController(text: widget.typeName ?? '');
   late final _name = TextEditingController(text: widget.name ?? '');
   List<String> _types = [];
 
-  /// Set once the form is filled in: the samples are being collected.
+  /// The appliance being continued (from the widget, or chosen here).
+  late RegisteredAppliance? _appliance = widget.appliance;
+
+  /// Set once Register is pressed: the samples are being collected.
   RegistrationTracker? _tracker;
   RegistrationStep _step = RegistrationStep.plugIn;
   String? _applianceId;
@@ -131,38 +164,39 @@ class _RegisterApplianceScreenState extends State<RegisterApplianceScreen> {
   String? _error;
   Timer? _timer;
 
-  bool get _newAppliance => widget.appliance == null;
+  bool get _newAppliance => _appliance == null;
   int get _required => widget.settings.registrationSamples;
 
   @override
   void initState() {
     super.initState();
-    _applianceId = widget.appliance?.id;
-    _applianceName = widget.appliance?.name ?? '';
-    if (_newAppliance) {
-      widget.service.types().then((t) {
-        if (mounted) setState(() => _types = t);
-      }, onError: (_) {});
-    }
+    widget.service.types().then((t) {
+      if (mounted) setState(() => _types = t);
+    }, onError: (_) {});
   }
 
   @override
   void dispose() {
     _timer?.cancel();
-    for (final c in [_type, _name]) {
-      c.dispose();
-    }
+    _type.dispose();
+    _name.dispose();
     super.dispose();
   }
 
   void _start() {
-    if (!_form.currentState!.validate()) return;
+    if (_newAppliance && !_form.currentState!.validate()) return;
     setState(() {
+      _applianceId = _appliance?.id;
+      _applianceName = _appliance?.name ?? _name.text.trim();
+      _collected = _appliance == null
+          ? 0
+          : _appliance!.modes
+                .map((m) => m.sampleCount)
+                .fold(_required, (a, b) => a < b ? a : b);
       _tracker = RegistrationTracker(
         startedAt: DateTime.now().toUtc(),
         initialEventId: widget.fromSession?.eventId,
       );
-      if (_newAppliance) _applianceName = _name.text.trim();
     });
     _poll();
     _timer = Timer.periodic(widget.pollEvery, (_) => _poll());
@@ -173,8 +207,8 @@ class _RegisterApplianceScreenState extends State<RegisterApplianceScreen> {
     if (tracker == null || _busy || _complete) return;
     _busy = true;
     try {
-      // Both outlets: the newest run that started after Start (runs already
-      // going on the other outlet belong to other appliances).
+      // Both outlets: the newest run that started after Register (runs
+      // already going on the other outlet belong to other appliances).
       final runs = await Future.wait([
         widget.service.latestSession('A'),
         widget.service.latestSession('B'),
@@ -227,15 +261,44 @@ class _RegisterApplianceScreenState extends State<RegisterApplianceScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final title = _newAppliance ? 'Register appliance' : 'Continue registering';
-    return Scaffold(
-      appBar: AppBar(title: Text(title)),
-      body: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 520),
-          child: ListView(
-            padding: const EdgeInsets.all(22),
-            children: _tracker == null ? _formFields() : _progress(),
+    final outlet = widget.fromSession == null
+        ? ''
+        : ' on Outlet ${widget.fromSession!.outletName}';
+    final title = _newAppliance
+        ? 'New appliance detected$outlet'
+        : 'Continue registering ${_appliance!.name}';
+    return Dialog(
+      insetPadding: const EdgeInsets.all(20),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 480),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(22),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    Icons.new_releases_outlined,
+                    color: Theme.of(context).colorScheme.primary,
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      title,
+                      style: const TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              ...(_tracker == null ? _formFields() : _progress()),
+            ],
           ),
         ),
       ),
@@ -243,12 +306,26 @@ class _RegisterApplianceScreenState extends State<RegisterApplianceScreen> {
   }
 
   List<Widget> _formFields() => [
-    Form(
-      key: _form,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          if (_newAppliance) ...[
+    if (_newAppliance) ...[
+      const Text('Register it so WisePlug recognises it next time.'),
+      // The new load may be an appliance whose registration was left unfinished.
+      for (final a in widget.unfinished)
+        Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: OutlinedButton(
+            onPressed: () => setState(() => _appliance = a),
+            child: Text(
+              'It is ${a.name}: continue registering '
+              '(${a.modes.map((m) => m.sampleCount).fold(_required, (x, y) => x < y ? x : y)} of $_required)',
+            ),
+          ),
+        ),
+      const SizedBox(height: 16),
+      Form(
+        key: _form,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
             TextFormField(
               controller: _type,
               decoration: const InputDecoration(
@@ -286,29 +363,39 @@ class _RegisterApplianceScreenState extends State<RegisterApplianceScreen> {
                   ? 'Give it a name you will recognise'
                   : null,
             ),
-            const SizedBox(height: 14),
-          ] else
-            Padding(
-              padding: const EdgeInsets.only(bottom: 14),
-              child: Text(
-                widget.appliance!.name,
-                style: const TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-            ),
-          const SizedBox(height: 18),
-          Text(
-            'WisePlug learns an appliance by measuring it $_required times. '
-            'You will plug it into either outlet (or switch it on), let it '
-            'run for about a minute, then switch it off, $_required times.',
-            style: const TextStyle(color: Colors.grey),
-          ),
-          const SizedBox(height: 18),
-          FilledButton(onPressed: _start, child: const Text('Start')),
-        ],
+          ],
+        ),
       ),
+    ] else
+      Text(
+        '${_appliance!.name} still needs '
+        '${_required - _appliance!.modes.map((m) => m.sampleCount).fold(_required, (x, y) => x < y ? x : y)} '
+        'more plug-ins before WisePlug can recognise it.',
+      ),
+    const SizedBox(height: 14),
+    Text(
+      'WisePlug learns an appliance by measuring it $_required times: '
+      'this run, then you switch it off and on again (either outlet). '
+      'Until then it runs on the '
+      '${widget.settings.defaultCutoffMinutes}-minute safety limit.',
+      style: const TextStyle(color: Colors.grey, fontSize: 13),
+    ),
+    const SizedBox(height: 18),
+    // Side by side when they fit, stacked on a narrow phone.
+    OverflowBar(
+      alignment: MainAxisAlignment.end,
+      overflowAlignment: OverflowBarAlignment.end,
+      spacing: 8,
+      children: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('Not now'),
+        ),
+        FilledButton(
+          onPressed: _start,
+          child: Text(_newAppliance ? 'Register' : 'Continue'),
+        ),
+      ],
     ),
   ];
 
@@ -372,27 +459,27 @@ class _RegisterApplianceScreenState extends State<RegisterApplianceScreen> {
         textAlign: TextAlign.center,
         style: const TextStyle(color: Colors.grey),
       ),
-      const SizedBox(height: 32),
-      Icon(icon, size: 56, color: Theme.of(context).colorScheme.primary),
-      const SizedBox(height: 16),
+      const SizedBox(height: 24),
+      Icon(icon, size: 48, color: Theme.of(context).colorScheme.primary),
+      const SizedBox(height: 12),
       Text(
         text,
         textAlign: TextAlign.center,
-        style: const TextStyle(fontSize: 17),
+        style: const TextStyle(fontSize: 16),
       ),
       if (!_complete && _step == RegistrationStep.measuring) ...[
-        const SizedBox(height: 20),
+        const SizedBox(height: 16),
         const LinearProgressIndicator(),
       ],
       if (_error != null) ...[
-        const SizedBox(height: 16),
+        const SizedBox(height: 12),
         Text(
           _error!,
           textAlign: TextAlign.center,
           style: const TextStyle(color: Colors.red),
         ),
       ],
-      const SizedBox(height: 28),
+      const SizedBox(height: 20),
       if (_complete)
         FilledButton(
           onPressed: () => Navigator.pop(context, true),
@@ -405,7 +492,7 @@ class _RegisterApplianceScreenState extends State<RegisterApplianceScreen> {
         ),
       if (!_complete && _collected > 0)
         const Text(
-          'To continue later, plug it in again and choose it in the pop-up. '
+          'To continue later, plug it in again: the pop-up will offer it. '
           'Until all samples are saved, WisePlug cannot recognise it yet.',
           textAlign: TextAlign.center,
           style: TextStyle(fontSize: 12, color: Colors.grey),

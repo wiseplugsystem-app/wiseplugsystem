@@ -10,7 +10,7 @@ import 'package:wiseplug/screens/activity_screen.dart';
 import 'package:wiseplug/screens/auth_gate.dart';
 import 'package:wiseplug/screens/esp32_dashboard.dart';
 import 'package:wiseplug/screens/recognition_prompt.dart';
-import 'package:wiseplug/screens/register_appliance_screen.dart';
+import 'package:wiseplug/screens/registration_dialog.dart';
 import 'package:wiseplug/screens/wifi_config_screen.dart';
 import 'package:wiseplug/services/esp32_service.dart';
 import 'package:wiseplug/services/safety_alarm_manager.dart';
@@ -240,7 +240,10 @@ void main() {
     tester,
   ) async {
     await noOverflow(tester, () async {
-      await show(tester, RegisterApplianceScreen(service: FakeRecognition()));
+      await show(
+        tester,
+        Scaffold(body: RegistrationDialog(service: FakeRecognition())),
+      );
       for (final status in [
         'UNKNOWN',
         'SAME_TYPE_IN_USE',

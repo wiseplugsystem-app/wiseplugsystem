@@ -8,7 +8,7 @@ import 'package:wiseplug/models/esp32_data.dart';
 import 'package:wiseplug/models/gadget_status.dart';
 import 'package:wiseplug/models/recognition.dart';
 import 'package:wiseplug/screens/esp32_live_view.dart';
-import 'package:wiseplug/screens/register_appliance_screen.dart';
+import 'package:wiseplug/screens/registration_dialog.dart';
 import 'package:wiseplug/services/esp32_service.dart';
 
 import 'fake_recognition.dart';
@@ -173,15 +173,17 @@ void main() {
       'A': session(promptText: 'New appliance detected. Register it?'),
     });
     await tester.pumpAndSettle();
-    expect(find.text('New appliance on Outlet A'), findsOneWidget);
-    expect(find.text('New appliance detected. Register it?'), findsOneWidget);
+    // Registration is a pop-up, opened by the new appliance itself.
+    expect(find.byType(RegistrationDialog), findsOneWidget);
+    expect(find.text('New appliance detected on Outlet A'), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, 'Register'), findsOneWidget);
     expect(find.textContaining('30-minute safety limit'), findsOneWidget);
     await tester.tap(find.text('Not now'));
     await tester.pumpAndSettle();
     // The same run does not ask again; the card still offers the answer.
     recognition.sessions.add({'A': session()});
     await tester.pumpAndSettle();
-    expect(find.text('New appliance on Outlet A'), findsNothing);
+    expect(find.text('New appliance detected on Outlet A'), findsNothing);
     expect(find.text('Needs your answer'), findsOneWidget);
     expect(find.text('30 min (safe default)'), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
@@ -254,7 +256,7 @@ void main() {
     );
     await tester.tap(find.text('Register as Fan 2'));
     await tester.pumpAndSettle();
-    expect(find.byType(RegisterApplianceScreen), findsOneWidget);
+    expect(find.byType(RegistrationDialog), findsOneWidget);
     expect(find.widgetWithText(TextFormField, 'Fan'), findsOneWidget);
     expect(find.widgetWithText(TextFormField, 'Fan 2'), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
@@ -328,7 +330,7 @@ void main() {
     ];
     await tester.pumpWidget(
       MaterialApp(
-        home: RegisterApplianceScreen(
+        home: RegistrationDialog(
           service: recognition,
           pollEvery: const Duration(milliseconds: 50),
         ),
@@ -344,18 +346,18 @@ void main() {
       'Fan',
     );
     // The name is required.
-    await tester.ensureVisible(find.text('Start'));
+    await tester.ensureVisible(find.text('Register'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Start'));
+    await tester.tap(find.text('Register'));
     await tester.pumpAndSettle();
     expect(find.text('Give it a name you will recognise'), findsOneWidget);
     await tester.enterText(
       find.widgetWithText(TextFormField, 'Name'),
       'Bedroom fan',
     );
-    await tester.ensureVisible(find.text('Start'));
+    await tester.ensureVisible(find.text('Register'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Start'));
+    await tester.tap(find.text('Register'));
     for (var i = 0; i < 20; i++) {
       await tester.pump(const Duration(milliseconds: 60));
     }
@@ -466,8 +468,8 @@ void main() {
     expect(find.textContaining('It is Fan 1'), findsNothing);
     await tester.tap(find.textContaining('It is Lamp'));
     await tester.pumpAndSettle();
-    expect(find.text('Continue registering'), findsOneWidget);
-    expect(find.text('Lamp'), findsOneWidget);
+    expect(find.text('Continue registering Lamp'), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, 'Continue'), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
   });
 }

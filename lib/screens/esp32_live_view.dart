@@ -13,7 +13,7 @@ import '../widgets/wiseplug_logo.dart';
 import 'activity_screen.dart';
 import 'esp32_dashboard.dart';
 import 'recognition_prompt.dart';
-import 'register_appliance_screen.dart';
+import 'registration_dialog.dart';
 import 'user_profile_screen.dart';
 import 'wifi_config_screen.dart';
 
@@ -171,18 +171,38 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
     _promptOpen = true;
     try {
       final required = _recognitionSettings.registrationSamples;
+      // Registration is a pop-up that appears only for a new appliance.
+      Future<void> register({
+        String? typeName,
+        String? name,
+        List<RegisteredAppliance> unfinished = const [],
+      }) async {
+        await showRegistrationDialog(
+          context,
+          service: recognition,
+          fromSession: session,
+          typeName: typeName,
+          name: name,
+          unfinished: unfinished,
+          settings: _recognitionSettings,
+        );
+        _loadAppliances();
+      }
+
+      if (session.status == RecognitionStatus.unknown) {
+        // A new load may be an appliance whose registration was left unfinished.
+        await register(
+          unfinished: [
+            for (final a in _appliances)
+              if (!a.isReady(required)) a,
+          ],
+        );
+        return;
+      }
       final choice = await showRecognitionPrompt(
         context,
         session,
         defaultCutoffMinutes: _recognitionSettings.defaultCutoffMinutes,
-        // A new load may be an appliance whose registration was left unfinished.
-        unfinished: session.status == RecognitionStatus.unknown
-            ? [
-                for (final a in _appliances)
-                  if (!a.isReady(required)) a,
-              ]
-            : const [],
-        requiredSamples: required,
       );
       if (!mounted) return;
       switch (choice) {
@@ -196,30 +216,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
             _notify('$error'.replaceFirst('Bad state: ', ''));
           }
         case RegisterChoice(:final typeName, :final name):
-          await Navigator.of(context).push(
-            MaterialPageRoute<bool>(
-              builder: (_) => RegisterApplianceScreen(
-                service: recognition,
-                fromSession: session,
-                typeName: typeName,
-                name: name,
-                settings: _recognitionSettings,
-              ),
-            ),
-          );
-          _loadAppliances();
-        case ContinueChoice(:final appliance):
-          await Navigator.of(context).push(
-            MaterialPageRoute<bool>(
-              builder: (_) => RegisterApplianceScreen(
-                service: recognition,
-                appliance: appliance,
-                fromSession: session,
-                settings: _recognitionSettings,
-              ),
-            ),
-          );
-          _loadAppliances();
+          await register(typeName: typeName, name: name);
         case null:
           break;
       }
