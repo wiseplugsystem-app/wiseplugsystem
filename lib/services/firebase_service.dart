@@ -143,7 +143,7 @@ class FirebaseBackendService {
       await _db.collection('anomalyAlerts').doc(override.alertID).update({
         'resolution': 'Extended by User (${override.extensionDuration} mins)',
       });
-      
+
       // Stop the alarm when override is requested
       await SafetyAlarmManager().stopAlarm();
 
@@ -161,7 +161,7 @@ class FirebaseBackendService {
       await _db.collection('anomalyAlerts').doc(alertID).update({
         'resolution': 'Acknowledged Shutdown',
       });
-      
+
       // Stop the alarm when shutdown is acknowledged
       await SafetyAlarmManager().stopAlarm();
 
@@ -203,7 +203,9 @@ class FirebaseBackendService {
         'register_name': applianceName,
         'timestamp': FieldValue.serverTimestamp(),
       });
-      debugPrint("✅ [Firestore] Sent register command to $nodeName: $applianceName");
+      debugPrint(
+        "✅ [Firestore] Sent register command to $nodeName: $applianceName",
+      );
     } catch (e) {
       debugPrint("❌ [Firestore Error] Failed to send register command: $e");
       rethrow;

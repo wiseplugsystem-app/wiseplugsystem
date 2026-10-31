@@ -91,7 +91,9 @@ class _WiseplugDeviceDashboardState extends State<WiseplugDeviceDashboard> {
   int _currentIndex = 0;
 
   Future<void> _openRegistration(DetectedAppliance pattern) async {
-    final effectiveDeviceID = pattern.deviceID.isEmpty ? widget.deviceID : pattern.deviceID;
+    final effectiveDeviceID = pattern.deviceID.isEmpty
+        ? widget.deviceID
+        : pattern.deviceID;
     final normalizedPattern = DetectedAppliance(
       deviceID: effectiveDeviceID,
       outlet: pattern.outlet,
@@ -122,8 +124,8 @@ class _WiseplugDeviceDashboardState extends State<WiseplugDeviceDashboard> {
           builder: (context, telemetrySnapshot) {
             final telemetry = telemetrySnapshot.data;
             final double activePower = telemetry?.activePower ?? 0.0;
-            final telemetryLoading = telemetrySnapshot.connectionState ==
-                ConnectionState.waiting;
+            final telemetryLoading =
+                telemetrySnapshot.connectionState == ConnectionState.waiting;
             final telemetryHasError = telemetrySnapshot.hasError;
 
             return Scaffold(

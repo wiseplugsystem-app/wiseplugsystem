@@ -12,15 +12,15 @@ class SafetyAlarmManager {
   /// Starts playing a looping warning/safety alarm
   Future<void> playSafetyAlarm() async {
     if (_isPlayingAlarm) return; // Prevent overlapping triggers
-    
+
     try {
       _isPlayingAlarm = true;
       // Set to loop mode so it keeps beeping/alarming until resolved
       await _audioPlayer.setReleaseMode(ReleaseMode.loop);
-      
+
       // Option A: Play from asset bundle
       await _audioPlayer.play(AssetSource('sounds/alarm_beep.mp3'));
-      
+
       // Option B: If using URL stream or default behavior
       // await _audioPlayer.play(UrlSource('https://...'));
     } catch (e) {
@@ -32,7 +32,7 @@ class SafetyAlarmManager {
   /// Stops the active alarm sound
   Future<void> stopAlarm() async {
     if (!_isPlayingAlarm) return;
-    
+
     try {
       await _audioPlayer.stop();
     } catch (e) {

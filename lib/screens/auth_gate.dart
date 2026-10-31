@@ -157,7 +157,9 @@ class _SignInState extends State<SignInScreen> {
             shrinkWrap: true,
             padding: const EdgeInsets.all(24),
             children: [
-              const Center(child: WisePlugLogo(fontSize: 30, showTagline: true)),
+              const Center(
+                child: WisePlugLogo(fontSize: 30, showTagline: true),
+              ),
               const SizedBox(height: 28),
               Text(
                 _creatingAccount

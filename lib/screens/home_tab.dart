@@ -58,7 +58,9 @@ class _HomeTabState extends State<HomeTab> {
 
   ApplianceProfile? _profileForOutlet(String outlet) {
     final matches = widget.profiles
-        .where((p) => p.outlet.trim().toUpperCase() == outlet.trim().toUpperCase())
+        .where(
+          (p) => p.outlet.trim().toUpperCase() == outlet.trim().toUpperCase(),
+        )
         .toList();
     if (matches.isEmpty) return null;
     final activeMatches = matches.where((p) => p.isOn).toList();
@@ -78,9 +80,14 @@ class _HomeTabState extends State<HomeTab> {
     if (profile == null || !profile.isOn) return 0.0;
     final onProfiles = widget.profiles.where((p) => p.isOn).toList();
     if (onProfiles.length == 1) return widget.activePower;
-    final totalBaseline = onProfiles.fold<double>(0, (s, p) => s + (p.baselineWattage > 0 ? p.baselineWattage : 1));
+    final totalBaseline = onProfiles.fold<double>(
+      0,
+      (s, p) => s + (p.baselineWattage > 0 ? p.baselineWattage : 1),
+    );
     if (totalBaseline == 0) return widget.activePower / onProfiles.length;
-    final profileBase = profile.baselineWattage > 0 ? profile.baselineWattage : 1;
+    final profileBase = profile.baselineWattage > 0
+        ? profile.baselineWattage
+        : 1;
     return widget.activePower * (profileBase / totalBaseline);
   }
 
@@ -246,8 +253,8 @@ class _HomeTabState extends State<HomeTab> {
                   final voltage = widget.telemetry?.voltage;
                   final current = profile != null && profile.isOn
                       ? (voltage != null && voltage > 0 && outletPower > 0
-                          ? outletPower / voltage
-                          : null)
+                            ? outletPower / voltage
+                            : null)
                       : null;
                   return Expanded(
                     child: Padding(
@@ -270,7 +277,9 @@ class _HomeTabState extends State<HomeTab> {
                         current: current,
                         safetyCeilingLabel: profile == null
                             ? '—'
-                            : _formatDurationTotal(profile.safetyCeilingDuration),
+                            : _formatDurationTotal(
+                                profile.safetyCeilingDuration,
+                              ),
                       ),
                     ),
                   );
@@ -420,7 +429,9 @@ class _HomeTabState extends State<HomeTab> {
                       }
                     } finally {
                       if (mounted) {
-                        setState(() => _pendingToggles.remove(profile.profileID));
+                        setState(
+                          () => _pendingToggles.remove(profile.profileID),
+                        );
                       }
                     }
                   },
@@ -481,7 +492,8 @@ class _HomeTabState extends State<HomeTab> {
                     '~${pattern.estimatedWattage.toStringAsFixed(0)} W',
                   ),
                   _detailRow('Signature:', pattern.signature, chip: true),
-                  if (pattern.suggestedType != null && pattern.suggestedType!.isNotEmpty)
+                  if (pattern.suggestedType != null &&
+                      pattern.suggestedType!.isNotEmpty)
                     _detailRow('Suggested:', pattern.suggestedType!),
                 ],
               ),
@@ -705,20 +717,26 @@ class _OutletCard extends StatelessWidget {
                       child: Text(
                         '${voltage!.toStringAsFixed(0)} V',
                         textAlign: TextAlign.center,
-                        style:
-                            const TextStyle(fontSize: 11, color: Colors.grey),
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: Colors.grey,
+                        ),
                       ),
                     ),
                   if (voltage != null && current != null)
-                    const Text(' · ',
-                        style: TextStyle(fontSize: 11, color: Colors.grey)),
+                    const Text(
+                      ' · ',
+                      style: TextStyle(fontSize: 11, color: Colors.grey),
+                    ),
                   if (current != null)
                     Expanded(
                       child: Text(
                         '${current!.toStringAsFixed(2)} A',
                         textAlign: TextAlign.center,
-                        style:
-                            const TextStyle(fontSize: 11, color: Colors.grey),
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: Colors.grey,
+                        ),
                       ),
                     ),
                 ],

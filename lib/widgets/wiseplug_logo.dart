@@ -109,10 +109,7 @@ class WisePlugMarkPainter extends CustomPainter {
     final scale = math.min(size.width / _w, size.height / _h);
     canvas
       ..save()
-      ..translate(
-        (size.width - _w * scale) / 2,
-        (size.height - _h * scale) / 2,
-      )
+      ..translate((size.width - _w * scale) / 2, (size.height - _h * scale) / 2)
       ..scale(scale);
 
     final stroke = Paint()
