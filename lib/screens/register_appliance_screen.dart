@@ -45,6 +45,11 @@ class RegistrationTracker {
 
   RegistrationTracker({required this.startedAt, this.initialEventId});
 
+  /// [s] started after registration began (or is the run from the pop-up).
+  bool isFresh(OutletSession s) =>
+      s.eventId == initialEventId ||
+      !s.startedAt.isBefore(startedAt.subtract(const Duration(seconds: 5)));
+
   RegistrationStep next(OutletSession? latest) {
     if (_waitingForOff) {
       // Still the run just recorded, still running: wait for it to stop.
@@ -55,10 +60,7 @@ class RegistrationTracker {
     }
     final s = latest;
     if (s == null || _used.contains(s.eventId)) return RegistrationStep.plugIn;
-    final fresh =
-        s.eventId == initialEventId ||
-        !s.startedAt.isBefore(startedAt.subtract(const Duration(seconds: 5)));
-    if (!fresh) {
+    if (!isFresh(s)) {
       return s.isOpen ? RegistrationStep.restart : RegistrationStep.plugIn;
     }
     if (s.measured) return RegistrationStep.record;
@@ -90,8 +92,8 @@ class RegisterApplianceScreen extends StatefulWidget {
   /// Continue an appliance still collecting samples; null for a new one.
   final RegisteredAppliance? appliance;
 
-  /// The outlet ('A' / 'B') and the run that led here, if any.
-  final String outlet;
+  /// The run that opened the pop-up, if any. Either outlet can be used:
+  /// appliances are portable, so registration watches both.
   final OutletSession? fromSession;
   final String? typeName, name;
   final RecognitionSettings settings;
@@ -101,7 +103,6 @@ class RegisterApplianceScreen extends StatefulWidget {
     super.key,
     required this.service,
     this.appliance,
-    this.outlet = 'A',
     this.fromSession,
     this.typeName,
     this.name,
@@ -118,7 +119,6 @@ class _RegisterApplianceScreenState extends State<RegisterApplianceScreen> {
   final _form = GlobalKey<FormState>();
   late final _type = TextEditingController(text: widget.typeName ?? '');
   late final _name = TextEditingController(text: widget.name ?? '');
-  late String _outlet = widget.fromSession?.outletName ?? widget.outlet;
   List<String> _types = [];
 
   /// Set once the form is filled in: the samples are being collected.
@@ -160,9 +160,7 @@ class _RegisterApplianceScreenState extends State<RegisterApplianceScreen> {
     setState(() {
       _tracker = RegistrationTracker(
         startedAt: DateTime.now().toUtc(),
-        initialEventId: widget.fromSession?.outletName == _outlet
-            ? widget.fromSession?.eventId
-            : null,
+        initialEventId: widget.fromSession?.eventId,
       );
       if (_newAppliance) _applianceName = _name.text.trim();
     });
@@ -175,7 +173,17 @@ class _RegisterApplianceScreenState extends State<RegisterApplianceScreen> {
     if (tracker == null || _busy || _complete) return;
     _busy = true;
     try {
-      final latest = await widget.service.latestSession(_outlet);
+      // Both outlets: the newest run that started after Start (runs already
+      // going on the other outlet belong to other appliances).
+      final runs = await Future.wait([
+        widget.service.latestSession('A'),
+        widget.service.latestSession('B'),
+      ]);
+      final fresh = [
+        for (final r in runs)
+          if (r != null && tracker.isFresh(r)) r,
+      ]..sort((a, b) => b.startedAt.compareTo(a.startedAt));
+      final latest = fresh.isEmpty ? null : fresh.first;
       final step = tracker.next(latest);
       if (step == RegistrationStep.record && latest != null) {
         await _record(tracker, latest);
@@ -291,21 +299,10 @@ class _RegisterApplianceScreenState extends State<RegisterApplianceScreen> {
               ),
             ),
           const SizedBox(height: 18),
-          const Text('Which outlet will you use?'),
-          const SizedBox(height: 8),
-          SegmentedButton<String>(
-            segments: const [
-              ButtonSegment(value: 'A', label: Text('Outlet A')),
-              ButtonSegment(value: 'B', label: Text('Outlet B')),
-            ],
-            selected: {_outlet},
-            onSelectionChanged: (s) => setState(() => _outlet = s.first),
-          ),
-          const SizedBox(height: 18),
           Text(
             'WisePlug learns an appliance by measuring it $_required times. '
-            'You will plug it in (or switch it on), let it run for about a '
-            'minute, then switch it off, $_required times.',
+            'You will plug it into either outlet (or switch it on), let it '
+            'run for about a minute, then switch it off, $_required times.',
             style: const TextStyle(color: Colors.grey),
           ),
           const SizedBox(height: 18),
@@ -326,7 +323,8 @@ class _RegisterApplianceScreenState extends State<RegisterApplianceScreen> {
         : switch (_step) {
             RegistrationStep.plugIn => (
               Icons.power,
-              'Plug in or switch on $name on Outlet $_outlet '
+              'Plug $name into Outlet A or B, or switch it on. If it is '
+                  'already running, switch it off and on again '
                   '(sample $sample of $_required).',
             ),
             RegistrationStep.restart => (

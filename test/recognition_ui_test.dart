@@ -284,7 +284,9 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
-  testWidgets('guided registration records 3 plug-ins', (tester) async {
+  testWidgets('guided registration records 3 plug-ins on either outlet', (
+    tester,
+  ) async {
     await tester.binding.setSurfaceSize(const Size(430, 1400));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     final recognition = FakeRecognition();
@@ -294,20 +296,35 @@ void main() {
       int stage = 2,
       bool open = true,
       int s = 0,
+      String outlet = 'outlet_1',
     }) => session(
       eventId: id,
+      outlet: outlet,
       stage: stage,
       startedAt: t0.add(Duration(seconds: s)),
       endedAt: open ? null : t0.add(Duration(seconds: s + 70)),
     );
+    // One entry per poll and outlet. Plug-ins 1 and 3 on A, plug-in 2 on B;
+    // B starts with another appliance that was already running (ignored).
+    final r1 = plugIn('r1', s: 1, open: false);
+    final r2 = plugIn('r2', s: 90, open: false, outlet: 'outlet_2');
     recognition.latest['A'] = [
       null,
       plugIn('r1', stage: 1, s: 1),
       plugIn('r1', s: 1),
-      plugIn('r1', s: 1, open: false),
-      plugIn('r2', s: 90),
-      plugIn('r2', s: 90, open: false),
+      r1,
+      r1,
+      r1,
       plugIn('r3', s: 180),
+    ];
+    recognition.latest['B'] = [
+      plugIn('old', s: -600, outlet: 'outlet_2'),
+      plugIn('old', s: -600, outlet: 'outlet_2'),
+      plugIn('old', s: -600, outlet: 'outlet_2'),
+      plugIn('old', s: -600, outlet: 'outlet_2'),
+      plugIn('r2', s: 90, outlet: 'outlet_2'),
+      r2,
+      r2,
     ];
     await tester.pumpWidget(
       MaterialApp(
@@ -321,6 +338,7 @@ void main() {
     // Only the type and the name: no mode, no safety limit (set by WisePlug).
     expect(find.textContaining('Mode'), findsNothing);
     expect(find.textContaining('Safe operating time'), findsNothing);
+    expect(find.text('Which outlet will you use?'), findsNothing);
     await tester.enterText(
       find.widgetWithText(TextFormField, 'Type of appliance'),
       'Fan',

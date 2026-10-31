@@ -73,7 +73,8 @@ Registration starts **only from the pop-up** WisePlug shows for a new
 appliance. There is no other register button and there are no preset profiles.
 
 - **What the user sets:** the type and the name, both required. The app then
-  guides **3 plug-ins**.
+  guides **3 plug-ins**, on **either outlet**: appliances are portable, so
+  there is no outlet to choose.
 - **What the system sets:** the **safety limit** (the type's default, then
   the 7-use learning) and the **modes**. The user cannot change either one,
   in the app or through the server.
