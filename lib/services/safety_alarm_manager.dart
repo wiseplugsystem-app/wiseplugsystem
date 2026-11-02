@@ -58,8 +58,7 @@ class _AudioTonePlayer implements TonePlayer {
 ///  * warning (the 60 s before a cutoff): two short beeps every 4 s, every
 ///    1 s in the last 10 s;
 ///  * cutoff (also an electrical trip): one long beep, then silence.
-/// "Mute this warning" silences it until this warning is over; the next
-/// warning sounds again. Muting never changes what the plug does.
+/// There is no mute: the sound stops only when the warning is over.
 /// With the app closed, the push notification plays the same tone (Android
 /// channel "wiseplug_safety", see MainActivity.kt).
 class SafetyAlarmManager {
@@ -81,47 +80,37 @@ class SafetyAlarmManager {
 
   Timer? _next;
   Duration? Function()? _remaining;
-  bool _warning = false, _muted = false;
+  bool _warning = false;
 
   bool get isPlaying => _warning;
-  bool get isMuted => _muted;
 
   /// Starts the warning pattern. [remaining] is the time left until the
   /// cutoff (null when unknown: the normal rate).
   Future<void> playSafetyAlarm({Duration? Function()? remaining}) async {
-    if (_warning || _muted) return;
+    if (_warning) return;
     _warning = true;
     _remaining = remaining;
     await _beep();
   }
 
   Future<void> _beep() async {
-    if (!_warning || _muted) return;
+    if (!_warning) return;
     final left = _remaining?.call();
     if (left != null && left <= Duration.zero) return; // the cutoff is due
     await _play(config.warningTone);
-    if (!_warning || _muted) return;
+    if (!_warning) return;
     _next = Timer(config.nextBeepIn(_remaining?.call()), _beep);
   }
 
-  /// The power was cut: one long beep, then silence (not after a mute).
+  /// The power was cut: one long beep, then silence.
   Future<void> playCutoff() async {
     _stopPattern();
-    if (_muted) return;
     await _play(config.cutoffTone);
-  }
-
-  /// "Mute this warning": silent until this warning is over.
-  Future<void> mute() async {
-    _muted = true;
-    _stopPattern();
-    await _player.stop();
   }
 
   /// The warning is over (closed, answered or cleared). The next one sounds.
   Future<void> stopAlarm() async {
     _stopPattern();
-    _muted = false;
     try {
       await _player.stop();
     } catch (error) {

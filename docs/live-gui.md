@@ -6,7 +6,7 @@
 - User names and types are stored in `appliance_registrations/OUTLET_A/{profileID}` (or `OUTLET_B`) and merged with the firmware-owned catalog. Deploy `database.rules.json` before using this update; otherwise the profile stream reports a permissions error. Firmware catalog publications cannot overwrite these names and types.
 - Registration requires a learned signature in `appliance_profiles`; telemetry alone cannot reliably identify an appliance. Existing firmware recognition remains per outlet. Shared recognition and relay changes are outside this UI update.
 - Profile editing saves firmware runtime limits through the existing command receipt flow, then saves display metadata. A metadata error keeps the editor open; the runtime command may already have succeeded.
-- Safety warnings are raised app-wide by `SafetyAlertListener` from `devices/gadget-1/status` (`safetyTriggered` or `remainingLimit <= 0`), with the WisePlug warning sound (see "Warning sounds" below). Turn Off Now sends TURN_OFF (the relay cuts power); Reset Safety sends RESET_SAFETY; Dismiss closes the current event; Mute this warning silences only its sound.
+- Safety warnings are raised app-wide by `SafetyAlertListener` from `devices/gadget-1/status` (`safetyTriggered` or `remainingLimit <= 0`), with the WisePlug warning sound (see "Warning sounds" below). Turn Off Now sends TURN_OFF (the relay cuts power); Reset Safety sends RESET_SAFETY; During the countdown there is no Dismiss and no mute: the warning ends with Turn Off Now, Yes, Override or the cutoff. After a power cut, Dismiss closes the pop-up.
 - Validate with `flutter test test/live_popups_test.dart test/esp32_live_view_test.dart test/esp32_data_test.dart` and `flutter analyze`.
 
 The default ESP32 dashboard implements the supplied Home, Profiles, profile-detail and Settings references. Screenshot names, wattages, times, identifiers and session counts are not production fixtures.
@@ -29,9 +29,9 @@ The default ESP32 dashboard implements the supplied Home, Profiles, profile-deta
   last 10 seconds.
 - **When the power is cut** (also right away for an electrical fault): one
   long beep, then silence.
-- **"Mute this warning"** in the warning pop-up silences this warning only.
-  The next warning sounds again. Muting does not stop the cutoff: the
-  appliance is still switched off on time.
+- **No mute, no dismiss.** During the countdown the sound stops only when
+  you answer (Turn Off Now, or Yes, Override to keep it running) or when the
+  power is cut.
 - **App closed or in the background:** the safety notification plays the
   same sound on Android (once the app has been opened once). iPhones play
   their default sound until the tone is added in Xcode. The web version

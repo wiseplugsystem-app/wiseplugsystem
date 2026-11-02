@@ -17,7 +17,7 @@ import '../services/safety_alarm_manager.dart';
 ///
 /// Sound (SafetyAlarmManager): during a warning, two short beeps that come
 /// faster in the last 10 s; when the power is cut (also an electrical trip),
-/// one long beep. "Mute this warning" silences only this warning.
+/// one long beep. There is no mute: the sound stops when the warning is over.
 class SafetyAlertListener extends StatefulWidget {
   final Esp32Service service;
   final SafetyAlarmManager? alarm;
@@ -121,7 +121,6 @@ class _SafetyAlertListenerState extends State<SafetyAlertListener> {
           readings: () => _readings,
           service: widget.service,
           onSilence: _silence,
-          onMute: _alarm.mute,
           onDismiss: () {
             _dismissed = true;
             _close();
@@ -174,7 +173,6 @@ class _SafetyAlertDialog extends StatefulWidget {
   final Map<String, OutletReading> Function() readings;
   final Esp32Service service;
   final Future<void> Function() onSilence;
-  final Future<void> Function() onMute;
   final VoidCallback onDismiss;
   const _SafetyAlertDialog({
     required this.updates,
@@ -182,7 +180,6 @@ class _SafetyAlertDialog extends StatefulWidget {
     required this.readings,
     required this.service,
     required this.onSilence,
-    required this.onMute,
     required this.onDismiss,
   });
 
@@ -191,7 +188,7 @@ class _SafetyAlertDialog extends StatefulWidget {
 }
 
 class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
-  bool _busy = false, _muted = false;
+  bool _busy = false;
   String? _error;
   // Repaints the countdown every second between device updates.
   late final Timer _tick = Timer.periodic(
@@ -396,32 +393,9 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
                           ),
                         ],
                 ),
-                if (warning)
-                  Wrap(
-                    alignment: WrapAlignment.center,
-                    children: [
-                      TextButton.icon(
-                        onPressed: _muted
-                            ? null
-                            : () {
-                                setState(() => _muted = true);
-                                widget.onMute();
-                              },
-                        icon: Icon(
-                          _muted ? Icons.volume_off : Icons.volume_off_outlined,
-                        ),
-                        label: Text(
-                          _muted
-                              ? 'Sound is off for this warning'
-                              : 'Mute this warning',
-                        ),
-                      ),
-                      TextButton(
-                        onPressed: _busy ? null : widget.onDismiss,
-                        child: const Text('Dismiss'),
-                      ),
-                    ],
-                  ),
+                // No Dismiss during the countdown: the warning (and its
+                // sound) ends only with Turn Off Now, Yes, Override or the
+                // cutoff.
               ],
             ),
           ),
