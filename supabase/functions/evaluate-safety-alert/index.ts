@@ -5,7 +5,7 @@
 //
 // Body: { deviceId, outlet, eventId, type, occurredAt (epoch ms), profileId,
 //         applianceName, runtimeS, limitS, baselineS, learned, sessionCount,
-//         powerW, currentA }
+//         powerW, currentA, timeEstimated? }
 // Auth: x-device-key.
 import { deviceIdOf, requireDevice } from "../_shared/auth.ts";
 import { db } from "../_shared/db.ts";
@@ -76,6 +76,9 @@ serve(async (req) => {
     current_a: input.currentA,
     message: result.message,
     occurred_at: new Date(occurredMs).toISOString(),
+    // Saved on the plug before it ever learned the time, then restarted:
+    // occurred_at is when it was uploaded, not when it happened.
+    time_estimated: body.timeEstimated === true,
   }, { onConflict: "event_id", ignoreDuplicates: true }).select("id");
   if (logError) throw logError;
   if (!logged.length) return json({ ok: true, duplicate: true, severity: result.severity });

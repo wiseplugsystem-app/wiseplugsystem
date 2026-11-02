@@ -26,3 +26,6 @@ verify_jwt = false
 
 [functions.manage-appliance]
 verify_jwt = false
+
+[functions.ingest-batch]
+verify_jwt = false

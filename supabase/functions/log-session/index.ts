@@ -6,7 +6,7 @@
 // Body: { deviceId, outlet, profileId, applianceName, startedAt, endedAt (epoch ms),
 //         durationS, energyWh, peakCurrentA, peakPowerW, endReason,
 //         learning: { sessionCount, learned, baselineS, limitS, countsTowardLearning },
-//         signature?: { power, current, powerFactor } }
+//         signature?: { power, current, powerFactor }, timeEstimated? }
 // Auth: x-device-key.
 import { deviceIdOf, requireDevice } from "../_shared/auth.ts";
 import { db } from "../_shared/db.ts";
@@ -123,6 +123,9 @@ serve(async (req) => {
     end_reason: endReason,
     counts_toward_learning: counts,
     learning_use: counts ? Math.min(Math.max(sessionCount, 1), LEARNING_SESSIONS) : null,
+    // Saved on the plug before it ever learned the time, then restarted:
+    // the times are when it was uploaded, not when it happened.
+    time_estimated: body.timeEstimated === true,
   }, { onConflict: "device_id,outlet,started_at", ignoreDuplicates: true }).select("id");
   if (sessionError) throw sessionError;
 

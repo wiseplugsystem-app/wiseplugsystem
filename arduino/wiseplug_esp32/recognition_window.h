@@ -13,11 +13,7 @@
 //             power_variation = (max - min) / mean power
 //   REPORTED  both stages produced; nothing more is measured
 //
-// Stage 1 is ready 5 s into STEADY (power, PF, start-up, settling, standby):
-// a 5-reading average is well inside the 2 % power tolerance floor, and the
-// name shows 5 s sooner. Stage 2 keeps the full 30 s window: its power
-// variation (max - min) must be measured as at registration.
-//
+// Stage 1 is ready 10 s into STEADY (power, PF, start-up, settling, standby);
 // Stage 2 at the end of STEADY adds the power variation and, if the load
 // switched on and off at least twice, the cycle period. A load that never
 // settles within 60 s (a thermostat cycling, a varying load) produces only
@@ -45,7 +41,7 @@ struct RecognitionWindow {
   static constexpr uint64_t STARTUP_MS = 5000;
   static constexpr uint32_t SETTLE_READINGS = 5;
   static constexpr float SETTLE_FRACTION = 0.02f;    // "changes < 2 %"
-  static constexpr uint64_t STAGE1_AFTER_MS = 5000;  // into STEADY
+  static constexpr uint64_t STAGE1_AFTER_MS = 10000; // into STEADY
   static constexpr uint64_t STEADY_MS = 30000;
   static constexpr uint64_t MAX_SETTLE_MS = 60000;   // from plug-in
   // Below this the meter cannot tell an appliance's standby from an empty socket.

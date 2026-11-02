@@ -2,7 +2,7 @@
 //
 // Rule-based recognition of the load that just started on outlet_1 or
 // outlet_2 (the rules are in _shared/matching.ts):
-//   Stage 1 (~5 s after the load settles): power, PF, start-up -> provisional
+//   Stage 1 (~10 s after the load settles): power, PF, start-up -> provisional
 //   Stage 2 (~60 s): + power variation and cycling -> confirms or corrects
 // Results: UNKNOWN, AMBIGUOUS, SAME_TYPE_IN_USE, MATCHED_PROVISIONAL, or
 // MATCHED_CONFIRMED when Stage 2 agrees with Stage 1.

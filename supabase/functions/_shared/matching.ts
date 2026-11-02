@@ -30,7 +30,7 @@ export const FEATURES = [
 export type Feature = (typeof FEATURES)[number];
 
 /**
- * Stage 1 (about 5 s after the load settles) knows power, PF and the
+ * Stage 1 (about 10 s after the load settles) knows power, PF and the
  * start-up. Stage 2 (about 60 s) adds the steady-state variation and, for
  * thermostat loads, the on/off cycle period.
  */

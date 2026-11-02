@@ -6,8 +6,7 @@
 //   devices/gadget-1/status, /wifiConfig   gadget summary, Wi-Fi provisioning
 //   devices/gadget-1/outlets/outlet_A|B    relayState, isLockedDown (app may set false to unlock)
 //   devices/gadget-1/notifications         one entry per electrical safety trip
-//   devices/gadget-1/live_telemetry/outlet_1|2   sanitized readings (sent with the status:
-//                                          on change, else every STATUS_HEARTBEAT_MS)
+//   devices/gadget-1/live_telemetry/outlet_1|2   sanitized readings, every 3 s
 // Optional (SUPABASE_FUNCTIONS_URL in secrets.h): session summaries and
 // safety reports are POSTed to Supabase Edge Functions (supabase/functions).
 //
@@ -34,7 +33,6 @@
 #define ARDUINOJSON_USE_LONG_LONG 1
 #include <ArduinoJson.h>
 #include <esp_timer.h>
-#include <esp_task_wdt.h>
 #include <time.h>
 #include "secrets.h"        // FIREBASE_HOST, FIREBASE_AUTH. Never commit or share.
 #include "safety_state.h"   // shared state machine, unit-tested in test/
@@ -108,30 +106,6 @@ constexpr uint32_t ANOMALY_SAMPLES = 3;
 // as 0); a meter that is not reporting is NO_SIGNAL, never fake zeros.
 constexpr uint64_t LIVE_TELEMETRY_MS = 3000;
 constexpr float NOISE_W = 0.5f, MIN_HZ = 45.0f, MAX_HZ = 65.0f;
-
-// Data use. The outlets' status (with the live readings) is sent to Firebase
-// at once when something the app shows changes (state, recognition, a command
-// result, an alert), every second during a warning countdown, when an
-// outlet's power moves by more than POWER_CHANGE_W and POWER_CHANGE_PCT (at
-// most every LIVE_TELEMETRY_MS), and otherwise every STATUS_HEARTBEAT_MS (the
-// app treats data older than 30 s as offline). App commands are read every
-// COMMAND_POLL_MS, a Wi-Fi change from the app every WIFI_CONFIG_POLL_MS.
-// MEASURE_OLD_RATES restores the previous rates (status every 1 s, commands
-// every 1 s, Wi-Fi changes every 10 s) to measure the difference.
-constexpr bool MEASURE_OLD_RATES = false;
-constexpr uint64_t STATUS_HEARTBEAT_MS = MEASURE_OLD_RATES ? 1000 : 10000;
-constexpr uint64_t COMMAND_POLL_MS = MEASURE_OLD_RATES ? 1000 : 2000;
-constexpr uint64_t WIFI_CONFIG_POLL_MS = MEASURE_OLD_RATES ? 10000 : 20000;
-constexpr float POWER_CHANGE_W = 2.0f, POWER_CHANGE_PCT = 0.05f;
-// HTTPS limits, so a bad connection never holds an upload task for long:
-// connecting, the TLS handshake and the reply each give up after these.
-// Supabase gets longer: an Edge Function may start cold and writes the database.
-constexpr uint32_t HTTP_CONNECT_TIMEOUT_MS = 5000, TLS_HANDSHAKE_TIMEOUT_S = 5;
-constexpr uint32_t FIREBASE_TIMEOUT_MS = 5000, SUPABASE_TIMEOUT_MS = 8000;
-// Network statistics (requests, bytes, handshakes) are printed every NET_STATS_MS.
-constexpr uint64_t NET_STATS_MS = 60 * 60000;
-// Safety loop watchdog: the board restarts if the control loop stops for this long.
-constexpr uint32_t LOOP_WATCHDOG_MS = 8000;
 
 // ==========================================
 // DATA STRUCTURES
@@ -600,51 +574,18 @@ void sensorTask(void*) {
 // ==========================================
 // FIREBASE REST (network task only)
 // ==========================================
-// Every HTTPS request of both upload tasks, for NET_STATS_MS reports and the
-// thesis (payload bytes only: HTTP headers and TLS records are not counted).
-struct NetStats {
-  std::atomic<uint32_t> requests{0}, failures{0}, bytesUp{0}, bytesDown{0};
-  std::atomic<uint32_t> handshakes{0}, handshakeMs{0}, reused{0}, reusedMs{0};
-};
-NetStats netStats;
-// Connection quality for the app (network task only): time without the
-// router since boot, how many times it was lost, and how long the last time.
-uint64_t offlineTotalMs = 0;
-uint32_t outages = 0, lastOutageS = 0;
-// One request on [client]: was its connection still open (reused) or new (a TLS handshake)?
-void countRequest(bool reused, uint64_t startedMs, int code, size_t up, size_t down) {
-  uint32_t ms = uint32_t(monotonicMs() - startedMs);
-  netStats.requests++; if (code <= 0 || code >= 500) netStats.failures++;
-  netStats.bytesUp += up; netStats.bytesDown += down;
-  if (reused) { netStats.reused++; netStats.reusedMs += ms; } else { netStats.handshakes++; netStats.handshakeMs += ms; }
-}
-void printNetStats() {
-  static uint32_t last[8] = {};
-  uint32_t now[8] = {netStats.requests, netStats.failures, netStats.bytesUp, netStats.bytesDown,
-                     netStats.handshakes, netStats.handshakeMs, netStats.reused, netStats.reusedMs};
-  uint32_t d[8]; for (int i = 0; i < 8; ++i) { d[i] = now[i] - last[i]; last[i] = now[i]; }
-  Serial.printf("[net] last %lu min: %lu requests (%lu failed), sent %.1f KB, received %.1f KB, "
-                "%lu new connections (avg %lu ms), %lu reused (avg %lu ms)\n",
-                (unsigned long)(NET_STATS_MS / 60000), (unsigned long)d[0], (unsigned long)d[1],
-                d[2] / 1024.0, d[3] / 1024.0, (unsigned long)d[4], (unsigned long)(d[4] ? d[5] / d[4] : 0),
-                (unsigned long)d[6], (unsigned long)(d[6] ? d[7] / d[6] : 0));
-}
-
 WiFiClientSecure tls;
 HTTPClient http;
 String firebaseHost;
 int firebaseRequest(const char* method, const String& path, const String& body = "", String* response = nullptr) {
   if (WiFi.status() != WL_CONNECTED) return -1;
-  bool reused = tls.connected(); uint64_t started = monotonicMs();
   if (!http.begin(tls, "https://" + firebaseHost + "/" + path + ".json?auth=" + FIREBASE_AUTH)) return -1;
-  http.setConnectTimeout(HTTP_CONNECT_TIMEOUT_MS); http.setTimeout(FIREBASE_TIMEOUT_MS);
+  http.setTimeout(5000);
   int code;
   if (strcmp(method, "GET") == 0) code = http.GET();
   else { http.addHeader("Content-Type", "application/json"); code = http.sendRequest(method, body); }
-  size_t down = 0;
-  if (response && code == HTTP_CODE_OK) { *response = http.getString(); down = response->length(); }
+  if (response && code == HTTP_CODE_OK) *response = http.getString();
   http.end();  // keeps the TLS connection open for reuse
-  countRequest(reused, started, code, body.length(), down);
   return code;
 }
 
@@ -740,40 +681,8 @@ void addStatus(JsonDocument& root, const Snapshot* s) {
   root[b + "powerDraw"] = draw; root[b + "connectionStatus"] = "Online";
   root[b + "safetyTriggered"] = triggered; root[b + "lastSeen"][".sv"] = "timestamp";
   root[b + "wifiSSID"] = WiFi.SSID();  // lets the app confirm a Wi-Fi change
-  // Connection quality: signal (dBm; about -50 strong, below -75 weak) and outages.
-  root[b + "wifiRssi"] = WiFi.RSSI();
-  root[b + "offlineMinutes"] = uint32_t(offlineTotalMs / 60000);
-  root[b + "outages"] = outages; root[b + "lastOutageSeconds"] = lastOutageS;
-  String n = b + "network/";
-  root[n + "requests"] = uint32_t(netStats.requests); root[n + "failures"] = uint32_t(netStats.failures);
-  root[n + "bytesUp"] = uint32_t(netStats.bytesUp); root[n + "bytesDown"] = uint32_t(netStats.bytesDown);
-  root[n + "newConnections"] = uint32_t(netStats.handshakes); root[n + "reused"] = uint32_t(netStats.reused);
   if (remainingMs >= 0) root[b + "remainingLimit"] = double(remainingMs) / 1000.0;
   else root[b + "remainingLimit"] = nullptr;  // null deletes the field
-}
-
-// Everything about an outlet the app shows except its readings: when this
-// changes, the status is published at once (FNV-1a hash of the fields).
-uint32_t statusKey(const Snapshot& s) {
-  uint32_t h = 2166136261u;
-  auto mix = [&](const void* p, size_t n) {
-    for (size_t k = 0; k < n; ++k) { h ^= static_cast<const uint8_t*>(p)[k]; h *= 16777619u; }
-  };
-  auto text = [&](const char* t) { mix(t, strlen(t) + 1); };
-  bool sensorOK = s.sensor.valid && s.capturedMono - s.sensor.captured < SENSOR_TIMEOUT_MS;
-  bool clockSet = s.capturedEpoch != 0;
-  mix(&s.safety.state, sizeof(s.safety.state)); mix(&s.safety.revision, sizeof(s.safety.revision));
-  mix(&s.safety.runtimeWarning, sizeof(bool)); mix(&s.safety.overridden, sizeof(bool));
-  mix(&s.confirmed, sizeof(bool)); mix(&sensorOK, sizeof(bool)); mix(&clockSet, sizeof(bool));
-  mix(&s.lockSeq, sizeof(s.lockSeq)); mix(&s.alert.trigger, sizeof(s.alert.trigger));
-  text(s.recognition); text(s.activeProfileID); text(s.activeName);
-  text(s.alert.id); text(s.alert.resolution); text(s.commandID); text(s.commandResult);
-  return h;
-}
-// The power the app shows for an outlet (0 when the meter is not reporting).
-float shownPower(const Snapshot& s) {
-  bool ok = s.sensor.valid && s.capturedMono - s.sensor.captured < SENSOR_TIMEOUT_MS;
-  return ok && s.sensor.power >= NOISE_W ? s.sensor.power : 0;
 }
 
 // devices/gadget-1/live_telemetry/outlet_N: the sanitized readings of one
@@ -804,16 +713,13 @@ WiFiClientSecure supaTls;
 HTTPClient supaHttp;
 
 int supabasePost(const char* function, const String& body, String* response = nullptr) {
-  bool reused = supaTls.connected(); uint64_t started = monotonicMs();
   if (!supaHttp.begin(supaTls, String(SUPABASE_FUNCTIONS_URL) + "/" + function)) return -1;
-  supaHttp.setConnectTimeout(HTTP_CONNECT_TIMEOUT_MS); supaHttp.setTimeout(SUPABASE_TIMEOUT_MS);
+  supaHttp.setTimeout(8000);
   supaHttp.addHeader("Content-Type", "application/json");
   supaHttp.addHeader("x-device-key", SUPABASE_DEVICE_KEY);
   int code = supaHttp.POST(body);
-  size_t down = 0;
-  if (response && code > 0) { *response = supaHttp.getString(); down = response->length(); }
+  if (response && code > 0) *response = supaHttp.getString();
   supaHttp.end();
-  countRequest(reused, started, code, body.length(), down);
   return code;
 }
 // Sent, a duplicate (already stored) or rejected as malformed: either way done.
@@ -916,35 +822,28 @@ void sendSupabase() {
 
 // ==========================================
 // WI-FI: home network + local setup network
-// Boot: try the saved router for 20 s. With nothing saved, the plug opens its
-// own Wi-Fi "wisewp" (open, one tap to join). Phones then show the setup page
-// by themselves (captive portal): it lists the 2.4 GHz networks the plug can
-// see, so the user taps theirs, types its password and is done. The app can
-// do the same through /status, /networks and /save-wifi.
-// A lost or unreachable router is retried, never waited out: each attempt
-// gets RECONNECT_ATTEMPT_MS, then a pause of 2 s, 4 s, 8 s ... up to
-// RECONNECT_MAX_MS, plus up to 1 s at random (exponential backoff with
-// jitter), so short drops heal in seconds. Only after ROUTER_LOST_TO_SETUP_MS
-// without the router (e.g. its password changed) does "wisewp" open, for
-// SETUP_WINDOW_MS; then the router is tried again (unless a phone is joined).
-// The station never searches while "wisewp" is up, so the setup network stays
-// on one channel and phones stay joined. New details are saved only once they
-// connect; a failed change made from the app rolls back to the saved network,
-// one made from setup returns to "wisewp". No reboot: it would lock a running outlet.
+// Boot: try the saved router for 20 s. If that fails, or nothing is saved, the
+// plug opens its own Wi-Fi "wisewp" (open, one tap to join). Phones then show
+// the setup page by themselves (captive portal): it lists the 2.4 GHz networks
+// the plug can see, so the user taps theirs, types its password and is done.
+// The app can do the same through /status, /networks and /save-wifi. The
+// station never searches while "wisewp" is up, so the setup network stays on
+// one channel and phones stay joined. While nobody is joined, the saved
+// router is retried every 2 minutes (after a power cut the router often boots
+// slower than the plug). New details are saved only once they connect; a
+// failed change made from the app rolls back to the saved network, one made
+// from setup returns to "wisewp". No reboot: it would lock a running outlet.
 // ==========================================
 constexpr const char* SETUP_AP_SSID = "wisewp";
-constexpr uint64_t CONNECT_TIMEOUT_MS = 20000;
-constexpr uint64_t RECONNECT_ATTEMPT_MS = 10000, RECONNECT_MIN_MS = 2000, RECONNECT_MAX_MS = 60000;
-constexpr uint64_t ROUTER_LOST_TO_SETUP_MS = 10 * 60000, SETUP_WINDOW_MS = 5 * 60000;
+constexpr uint64_t CONNECT_TIMEOUT_MS = 20000, OFFLINE_TO_SETUP_MS = 60000, SETUP_RETRY_MS = 120000;
 
-enum class NetMode { Connecting, Online, Reconnecting, Setup };
+enum class NetMode { Connecting, Online, Setup };
 NetMode netMode = NetMode::Connecting;
 Preferences wifiPrefs;
 String savedSsid, savedPass;  // last network that worked
 String trialSsid, trialPass;  // being tried; saved once connected
 bool trialFromSetup = false, legacyCredentials = false;
-uint64_t modeSince = 0, offlineSince = 0;
-uint64_t attemptAt = 0, nextAttemptAt = 0, backoffMs = RECONNECT_MIN_MS;  // Reconnecting
+uint64_t modeSince = 0, lastConnected = 0;
 int64_t appliedConfig = 0;
 WebServer setupServer(80);
 DNSServer setupDns;
@@ -982,8 +881,7 @@ void scanNetworks() {
 }
 void startConnect(const String& ssid, const String& pass, bool trial, bool fromSetup) {
   if (netMode == NetMode::Setup) { setupServer.stop(); setupDns.stop(); WiFi.softAPdisconnect(true); }
-  // Reconnecting is done here (updateWifi), with backoff, not by the Wi-Fi driver.
-  WiFi.mode(WIFI_STA); WiFi.disconnect(); WiFi.setAutoReconnect(false);
+  WiFi.mode(WIFI_STA); WiFi.disconnect(); WiFi.setAutoReconnect(true);
   trialSsid = trial ? ssid : ""; trialPass = trial ? pass : ""; trialFromSetup = fromSetup;
   if (ssid.length()) WiFi.begin(ssid.c_str(), pass.c_str());
   else WiFi.begin();  // whatever the ESP-IDF has stored
@@ -1074,71 +972,37 @@ void setupRoutes() {
   });
 }
 
-bool haveSavedNetwork() { return savedSsid.length() || legacyCredentials; }
-// One attempt at the saved router (non-blocking: the driver connects in the background).
-void beginAttempt(uint64_t now) {
-  WiFi.disconnect();
-  if (savedSsid.length()) WiFi.begin(savedSsid.c_str(), savedPass.c_str());
-  else WiFi.begin();
-  attemptAt = now;
-}
-// The router is lost or unreachable: retry it with backoff (first try at once).
-void startReconnect(uint64_t now) {
-  netMode = NetMode::Reconnecting; modeSince = now;
-  backoffMs = RECONNECT_MIN_MS; beginAttempt(now);
-  Serial.println("Wi-Fi: router not reachable, reconnecting");
-}
-void goOnline(uint64_t now) {
-  netMode = NetMode::Online;
-  String ssid = trialSsid.length() ? trialSsid : WiFi.SSID();
-  String pass = trialSsid.length() ? trialPass : WiFi.psk();
-  if (ssid.length() && (ssid != savedSsid || pass != savedPass)) {  // it works: keep it
-    savedSsid = ssid; savedPass = pass;
-    wifiPrefs.putString("ssid", ssid); wifiPrefs.putString("pass", pass);
-  }
-  trialSsid = "";
-  if (offlineSince) {  // the end of an outage
-    uint64_t lost = now - offlineSince;
-    offlineTotalMs += lost; ++outages; lastOutageS = uint32_t(lost / 1000); offlineSince = 0;
-    Serial.printf("Wi-Fi: online again on %s after %lu s (signal %d dBm)\n", WiFi.SSID().c_str(),
-                  (unsigned long)lastOutageS, WiFi.RSSI());
-  } else {
-    Serial.printf("Wi-Fi: online on %s (signal %d dBm)\n", WiFi.SSID().c_str(), WiFi.RSSI());
-  }
-}
-
 void updateWifi(uint64_t now) {
   bool connected = WiFi.status() == WL_CONNECTED;
   switch (netMode) {
     case NetMode::Connecting:
-      if (connected) goOnline(now);
-      else if (now - modeSince > CONNECT_TIMEOUT_MS) {
+      if (connected) {
+        netMode = NetMode::Online; lastConnected = now;
+        String ssid = trialSsid.length() ? trialSsid : WiFi.SSID();
+        String pass = trialSsid.length() ? trialPass : WiFi.psk();
+        if (ssid.length() && (ssid != savedSsid || pass != savedPass)) {  // it works: keep it
+          savedSsid = ssid; savedPass = pass;
+          wifiPrefs.putString("ssid", ssid); wifiPrefs.putString("pass", pass);
+        }
+        trialSsid = "";
+        Serial.printf("Wi-Fi: online on %s\n", WiFi.SSID().c_str());
+      } else if (now - modeSince > CONNECT_TIMEOUT_MS) {
         bool rollback = trialSsid.length() && !trialFromSetup && savedSsid.length();
         if (rollback) startConnect(savedSsid, savedPass, false, false);
-        else if (trialSsid.length() || !haveSavedNetwork()) startSetup();  // wrong details from setup
-        else startReconnect(now);
+        else startSetup();
       }
       break;
     case NetMode::Online:
-      if (!connected) { offlineSince = now; startReconnect(now); }
-      break;
-    case NetMode::Reconnecting:
-      if (connected) goOnline(now);
-      else if (now - modeSince >= ROUTER_LOST_TO_SETUP_MS) startSetup();  // e.g. the router's password changed
-      else if (attemptAt && now - attemptAt >= RECONNECT_ATTEMPT_MS) {  // this attempt failed: pause
-        WiFi.disconnect(); attemptAt = 0;
-        nextAttemptAt = now + backoffMs + esp_random() % 1000;
-        backoffMs = min(backoffMs * 2, RECONNECT_MAX_MS);
-      } else if (!attemptAt && now >= nextAttemptAt) {
-        beginAttempt(now);
-      }
+      if (connected) lastConnected = now;
+      else if (now - lastConnected > OFFLINE_TO_SETUP_MS) startSetup();  // router gone
       break;
     case NetMode::Setup:
       setupDns.processNextRequest(); setupServer.handleClient();
       if (queued && now - queuedAt > 1000) {  // let the reply reach the phone first
         queued = false;
         startConnect(queuedSsid, queuedPass, true, true);
-      } else if (now - modeSince > SETUP_WINDOW_MS && WiFi.softAPgetStationNum() == 0 && haveSavedNetwork()) {
+      } else if (now - modeSince > SETUP_RETRY_MS && WiFi.softAPgetStationNum() == 0 &&
+                 (savedSsid.length() || legacyCredentials)) {
         startConnect(savedSsid, savedPass, false, false);
       }
       break;
@@ -1226,10 +1090,8 @@ void networkTask(void*) {
   firebaseHost.replace("https://", ""); firebaseHost.replace("http://", "");
   while (firebaseHost.endsWith("/")) firebaseHost.remove(firebaseHost.length() - 1);
   tls.setInsecure();  // TODO: pin Google's root CA before production use
-  tls.setHandshakeTimeout(TLS_HANDSHAKE_TIMEOUT_S);
 #ifdef SUPABASE_FUNCTIONS_URL
   supaTls.setInsecure();  // TODO: pin the Supabase root CA before production use
-  supaTls.setHandshakeTimeout(TLS_HANDSHAKE_TIMEOUT_S);
 #endif
   wifiPrefs.begin("wifi", false); appliedConfig = wifiPrefs.getLong64("applied", 0);
   savedSsid = wifiPrefs.getString("ssid", ""); savedPass = wifiPrefs.getString("pass", "");
@@ -1240,8 +1102,7 @@ void networkTask(void*) {
   else startSetup();  // nothing to connect to yet
   configTime(0, 0, "pool.ntp.org", "time.google.com");  // UTC; the app localizes
   static Snapshot latest[2]; bool available[2] = {false, false};
-  uint64_t lastCommands = 0, lastPublish = 0, lastConfig = 0, lastStats = monotonicMs();
-  uint32_t sentKey[2] = {0, 0}; float sentPower[2] = {-1, -1};  // what the app last received
+  uint64_t lastCommands = 0, lastPublish = 0, lastConfig = 0, lastLive = 0;
   for (;;) {
     uint64_t now = monotonicMs();
     updateWifi(now);
@@ -1249,32 +1110,24 @@ void networkTask(void*) {
     for (int i = 0; i < 2; ++i) {
       if (xQueueReceive(outlets[i].snapshots, &latest[i], 0) == pdTRUE) available[i] = true;
     }
-    if (now - lastStats >= NET_STATS_MS) { lastStats = now; printNetStats(); }
     if (connected) {
-      if (now - lastCommands >= COMMAND_POLL_MS) {
+      if (now - lastCommands >= 1000) {
         lastCommands = now; readCommands();
         if (available[0] && available[1]) syncLockdown(latest);
       }
       if (available[0] && available[1] && now - lastPublish >= 1000) {
-        bool due = now - lastPublish >= STATUS_HEARTBEAT_MS;
+        lastPublish = now;
+        bool live = now - lastLive >= LIVE_TELEMETRY_MS;
+        JsonDocument root;
         for (int i = 0; i < 2; ++i) {
-          float p = shownPower(latest[i]);
-          due = due || statusKey(latest[i]) != sentKey[i] || latest[i].safety.state == SocketState::Warning ||
-                (now - lastPublish >= LIVE_TELEMETRY_MS &&
-                 fabsf(p - sentPower[i]) > max(POWER_CHANGE_W, POWER_CHANGE_PCT * sentPower[i]));
+          addOutlet(root, i, latest[i]);
+          if (live) addLiveTelemetry(root, i, latest[i]);
         }
-        if (due) {
-          lastPublish = now;  // also after a failure: the next try is a second later
-          JsonDocument root;
-          for (int i = 0; i < 2; ++i) { addOutlet(root, i, latest[i]); addLiveTelemetry(root, i, latest[i]); }
-          addStatus(root, latest);
-          String body; serializeJson(root, body);
-          if (firebaseRequest("PATCH", "", body) == HTTP_CODE_OK) {
-            for (int i = 0; i < 2; ++i) { sentKey[i] = statusKey(latest[i]); sentPower[i] = shownPower(latest[i]); }
-          }
-        }
+        addStatus(root, latest);
+        String body; serializeJson(root, body);
+        if (firebaseRequest("PATCH", "", body) == HTTP_CODE_OK && live) lastLive = now;
       }
-      if (now - lastConfig >= WIFI_CONFIG_POLL_MS) { lastConfig = now; checkWifiConfig(); }
+      if (now - lastConfig >= 10000) { lastConfig = now; checkWifiConfig(); }
       sendNotices();  // safety first
       sendEvents();
     }
@@ -1331,26 +1184,17 @@ void setup() {
     else if (ch.prefs.getBool("disabled", false)) ch.data.safety.state = SocketState::Disabled;
     applyRelay(ch);
   }
-  // Measuring outranks the upload tasks on core 0: a slow TLS handshake never
-  // delays a reading. Relays and cutoffs run in loop() on core 1, with no network.
-  configASSERT(xTaskCreatePinnedToCore(sensorTask, "meters", 4096, nullptr, 2, nullptr, 0) == pdPASS);
+  configASSERT(xTaskCreatePinnedToCore(sensorTask, "meters", 4096, nullptr, 1, nullptr, 0) == pdPASS);
   configASSERT(xTaskCreatePinnedToCore(networkTask, "firebase", 16384, nullptr, 1, nullptr, 0) == pdPASS);
 #ifdef SUPABASE_FUNCTIONS_URL
   configASSERT(xTaskCreatePinnedToCore(supabaseTask, "supabase", 12288, nullptr, 1, nullptr, 0) == pdPASS);
 #endif
   // 1 = power-on, 3 = software reset, 4/5 = crash, 6/7 = watchdog, 9 = brownout.
   // Any reboot while a session runs locks both outlets ("Power cut" in the app).
-  // Watchdog on the safety loop: if loop() stops for LOOP_WATCHDOG_MS the board restarts.
-  // timeout; core 0's idle task stays watched as before (core 1 runs loop()); panic = restart
-  esp_task_wdt_config_t wdt = {LOOP_WATCHDOG_MS, 1 << 0, true};
-  if (esp_task_wdt_status(nullptr) == ESP_ERR_INVALID_STATE) esp_task_wdt_init(&wdt);  // not started yet
-  else esp_task_wdt_reconfigure(&wdt);
-  esp_task_wdt_add(nullptr);
   Serial.printf("SYSTEM READY (reset reason %d, free heap %u)\n", int(esp_reset_reason()), ESP.getFreeHeap());
 }
 
 void loop() {
-  esp_task_wdt_reset();
   uint64_t now = monotonicMs();
   // recognize-appliance's answer for a run (Stage 1 or 2).
   //  * MATCHED_CONFIRMED: the appliance's own cutoff (it may be longer than the
