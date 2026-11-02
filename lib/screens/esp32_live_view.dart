@@ -949,6 +949,8 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
   }
 
   List<Widget> _profileList(DateTime now) {
+    // A small phone: the status badge moves under the appliance's name.
+    final narrow = MediaQuery.sizeOf(context).width < 480;
     if (widget.recognition == null) {
       return const [
         _Panel(
@@ -1034,21 +1036,28 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                     style: const TextStyle(fontWeight: FontWeight.w700),
                   ),
                   // Appliances are portable: one profile for both outlets.
-                  subtitle: _outletOf(a) == null
-                      ? Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(_usageText(a)),
-                            Text(
-                              _whereText(a),
-                              style: const TextStyle(fontSize: 12),
-                            ),
-                          ],
-                        )
-                      : Text(
+                  // On a narrow phone the status badge goes under the name,
+                  // so the text keeps its width.
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (_outletOf(a) == null) ...[
+                        Text(_usageText(a)),
+                        Text(
+                          _whereText(a),
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      ] else
+                        Text(
                           'Running on Outlet ${_outletOf(a)}'
                           '${_runningFor(_outletOf(a)!, now)}',
                         ),
+                      if (narrow) ...[
+                        const SizedBox(height: 6),
+                        _Badge(_applianceStatus(a, now)),
+                      ],
+                    ],
+                  ),
                   trailing: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -1061,7 +1070,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                           ),
                           onPressed: () => _deleteAppliance(context, a),
                         ),
-                      _Badge(_applianceStatus(a, now)),
+                      if (!narrow) _Badge(_applianceStatus(a, now)),
                       const Icon(Icons.chevron_right, color: Colors.grey),
                     ],
                   ),
@@ -1074,227 +1083,202 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
     ];
   }
 
+  /// The appliance detail screen (a full page): what it is, where it is, its
+  /// safety limit and how WisePlug recognises it, with Edit and Delete. It
+  /// follows live changes; usage history is kept in the database, not shown.
   void _showProfile(RegisteredAppliance selected) {
-    showDialog<void>(
-      context: context,
-      builder: (_) => AnimatedBuilder(
-        animation: _updates,
-        builder: (context, _) {
-          final match = _appliances.where((a) => a.id == selected.id);
-          if (match.isEmpty) {
-            return AlertDialog(
-              title: const Text('Profile removed'),
-              actions: [
-                TextButton(
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => AnimatedBuilder(
+          animation: _updates,
+          builder: (context, _) {
+            final match = _appliances.where((a) => a.id == selected.id);
+            return Scaffold(
+              appBar: AppBar(
+                leading: IconButton(
+                  tooltip: 'Back',
                   onPressed: () => Navigator.pop(context),
-                  child: const Text('Close'),
+                  icon: const Icon(Icons.chevron_left, color: _blue),
                 ),
-              ],
+                title: const Text(
+                  'Appliance Profile',
+                  style: TextStyle(fontWeight: FontWeight.w800),
+                ),
+                centerTitle: true,
+              ),
+              body: match.isEmpty
+                  ? const Center(
+                      child: Padding(
+                        padding: EdgeInsets.all(24),
+                        child: Text(
+                          'This appliance was removed.',
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                    )
+                  : _profileDetails(context, match.single),
             );
-          }
-          final a = match.single;
-          final now = DateTime.now();
-          final outlet = _outletOf(a);
-          final ready = a.isReady(_recognitionSettings.registrationSamples);
-          return Dialog(
-            insetPadding: const EdgeInsets.all(20),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(28),
-            ),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 480),
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.all(22),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Row(
+          },
+        ),
+      ),
+    );
+  }
+
+  /// The signature shown on the profile: the registered "Normal" mode, else
+  /// the first complete one, else the one still being registered.
+  ApplianceMode? _mainMode(RegisteredAppliance a) {
+    final required = _recognitionSettings.registrationSamples;
+    for (final m in a.modes) {
+      if (m.name == 'Normal' && m.sampleCount >= required) return m;
+    }
+    for (final m in a.modes) {
+      if (m.sampleCount >= required) return m;
+    }
+    return a.modes.isEmpty ? null : a.modes.first;
+  }
+
+  Widget _profileDetails(BuildContext context, RegisteredAppliance a) {
+    final now = DateTime.now();
+    final outlet = _outletOf(a);
+    final ready = a.isReady(_recognitionSettings.registrationSamples);
+    return Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 560),
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+          children: [
+            _Panel(
+              child: Row(
+                children: [
+                  _ApplianceIcon(type: '${a.typeName} ${a.name}'),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        IconButton(
-                          onPressed: () => Navigator.pop(context),
-                          icon: const Icon(Icons.chevron_left, color: _blue),
-                        ),
-                        const Expanded(
-                          child: Text(
-                            'Appliance\nProfile',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              fontSize: 23,
-                              fontWeight: FontWeight.w800,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 48),
-                      ],
-                    ),
-                    const SizedBox(height: 20),
-                    _Panel(
-                      child: Row(
-                        children: [
-                          _ApplianceIcon(type: '${a.typeName} ${a.name}'),
-                          const SizedBox(width: 14),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  a.name,
-                                  style: const TextStyle(
-                                    fontSize: 21,
-                                    fontWeight: FontWeight.w800,
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                                Text(
-                                  'Type of Appliance: ${a.typeName}',
-                                  style: const TextStyle(color: Colors.grey),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 20),
-                    _Panel(
-                      child: _PairLayout(
-                        labelWidth: 150,
-                        child: Column(
-                          children: [
-                            _Pair('Saved name', a.name, color: _blue),
-                            _Pair(
-                              'Plugged into',
-                              outlet == null
-                                  ? 'Not plugged in'
-                                  : 'Outlet $outlet',
-                            ),
-                            if (a.lastOutlet != null)
-                              _Pair(
-                                'Last used on',
-                                'Outlet ${outletLetter(a.lastOutlet!)}',
-                              ),
-                            // Set by WisePlug: the type's default, then the
-                            // learned typical use x 1.5.
-                            _Pair('Safety limit', _limitText(a), color: _green),
-                            // The 7-use learning: uses recorded so far.
-                            _Pair('Usage sessions', _sessionsText(a)),
-                            if (a.isLearned && a.baselineRuntimeSeconds != null)
-                              _Pair(
-                                'Typical use',
-                                _duration(a.baselineRuntimeSeconds),
-                              ),
-                            _Pair('Status', _applianceStatus(a, now)),
-                            // Every time it was used, on both outlets
-                            // (appliance_usage); "Usage sessions" above is
-                            // only the 7-use learning's progress.
-                            _Pair(
-                              'Total sessions',
-                              a.usage == null
-                                  ? '${a.useCount}'
-                                  : '${a.usage!.runs} (Outlet A ${a.usage!.runsOnA}'
-                                        ' · Outlet B ${a.usage!.runsOnB})',
-                            ),
-                            if (a.usage != null) ...[
-                              _Pair(
-                                'Total runtime',
-                                _duration(a.usage!.totalRuntimeSeconds),
-                              ),
-                              _Pair(
-                                'Energy used',
-                                '${(a.usage!.totalEnergyWh / 1000).toStringAsFixed(2)} kWh',
-                              ),
-                            ],
-                            // The power signature WisePlug recognises, per mode.
-                            for (final m in a.modes)
-                              _Pair(
-                                a.modes.length == 1 ? 'Signature' : m.name,
-                                m.sampleCount <
-                                        _recognitionSettings.registrationSamples
-                                    ? 'Learning (${m.sampleCount} of ${_recognitionSettings.registrationSamples})'
-                                    : '${m.meanPowerW?.toStringAsFixed(1) ?? '—'} W · PF ${m.meanPf?.toStringAsFixed(2) ?? '—'}',
-                              ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    if (widget.recognition != null && ready) ...[
-                      const SizedBox(height: 20),
-                      _RecentRuns(
-                        // Reloaded when a run starts or ends.
-                        key: ValueKey(
-                          '${a.id}/${a.usage?.runs}/${a.runningOn}',
-                        ),
-                        recognition: widget.recognition!,
-                        applianceId: a.id,
-                      ),
-                    ],
-                    if (!ready)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 10),
-                        child: Text(
-                          _registrationText(a),
+                        Text(
+                          a.name,
                           style: const TextStyle(
-                            fontSize: 12,
-                            color: Colors.grey,
+                            fontSize: 21,
+                            fontWeight: FontWeight.w800,
                           ),
                         ),
-                      ),
-                    const SizedBox(height: 18),
-                    _Panel(
-                      border: _amber,
-                      child: const Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Icon(Icons.shield_outlined, color: _amber),
-                          SizedBox(width: 12),
-                          Expanded(
-                            child: Text(
-                              'WisePlug sets the safety limit itself and learns this '
-                              'appliance\'s typical use. $_safetyNote',
-                              style: TextStyle(fontSize: 12),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 20),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: OutlinedButton(
-                            onPressed: outlet == null
-                                ? () => _deleteAppliance(context, a)
-                                : null,
-                            style: OutlinedButton.styleFrom(
-                              foregroundColor: Colors.red,
-                            ),
-                            child: const Text('Delete'),
-                          ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'Type of Appliance: ${a.typeName}',
+                          style: const TextStyle(color: Colors.grey),
                         ),
-                        const SizedBox(width: 16),
-                        Expanded(
-                          child: FilledButton(
-                            onPressed: () => _renameAppliance(context, a),
-                            child: const Text('Edit'),
-                          ),
-                        ),
+                        // Under the name, so a long name keeps its width.
+                        const SizedBox(height: 10),
+                        _Badge(_applianceStatus(a, now)),
                       ],
                     ),
-                    if (outlet != null)
-                      const Padding(
-                        padding: EdgeInsets.only(top: 8),
-                        child: Text(
-                          'Switch off or unplug this appliance to delete it.',
-                          style: TextStyle(fontSize: 12, color: Colors.grey),
-                        ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+            _Panel(
+              child: _PairLayout(
+                labelWidth: 150,
+                child: Column(
+                  children: [
+                    _Pair('Saved name', a.name, color: _blue),
+                    _Pair(
+                      'Plugged into',
+                      outlet == null ? 'Not plugged in' : 'Outlet $outlet',
+                    ),
+                    if (a.lastOutlet != null)
+                      _Pair(
+                        'Last used on',
+                        'Outlet ${outletLetter(a.lastOutlet!)}',
+                      ),
+                    // Set by WisePlug: the type's default, then the learned
+                    // typical use x 1.5.
+                    _Pair('Safety limit', _limitText(a), color: _green),
+                    // The 7-use learning: uses recorded so far.
+                    _Pair('Usage sessions', _sessionsText(a)),
+                    if (a.isLearned && a.baselineRuntimeSeconds != null)
+                      _Pair('Typical use', _duration(a.baselineRuntimeSeconds)),
+                    _Pair('Status', _applianceStatus(a, now)),
+                    // Confirmed uses (the count the 7-use learning keeps).
+                    _Pair('Total sessions', '${a.useCount}'),
+                    // The power signature WisePlug recognises. Only the main
+                    // one: extra modes WisePlug adds by itself ("Mode 2", e.g.
+                    // another fan speed) still count for recognition, unshown.
+                    if (_mainMode(a) case final m?)
+                      _Pair(
+                        'Power use',
+                        m.sampleCount < _recognitionSettings.registrationSamples
+                            ? 'Still learning (${m.sampleCount} of ${_recognitionSettings.registrationSamples} plug-ins)'
+                            : m.meanPowerW == null
+                            ? 'Not known yet'
+                            : 'About ${m.meanPowerW!.round()} W',
                       ),
                   ],
                 ),
               ),
             ),
-          );
-        },
+            if (!ready)
+              Padding(
+                padding: const EdgeInsets.only(top: 10),
+                child: Text(
+                  _registrationText(a),
+                  style: const TextStyle(fontSize: 12, color: Colors.grey),
+                ),
+              ),
+            const SizedBox(height: 16),
+            _Panel(
+              border: _amber,
+              child: const Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(Icons.shield_outlined, color: _amber),
+                  SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      'WisePlug sets the safety limit itself and learns this '
+                      'appliance\'s typical use. $_safetyNote',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 20),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: outlet == null
+                        ? () => _deleteAppliance(context, a)
+                        : null,
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.red,
+                    ),
+                    child: const Text('Delete'),
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: FilledButton(
+                    onPressed: () => _renameAppliance(context, a),
+                    child: const Text('Edit'),
+                  ),
+                ),
+              ],
+            ),
+            if (outlet != null)
+              const Padding(
+                padding: EdgeInsets.only(top: 8),
+                child: Text(
+                  'Switch off or unplug this appliance to delete it.',
+                  style: TextStyle(fontSize: 12, color: Colors.grey),
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -1554,105 +1538,6 @@ class _Panel extends StatelessWidget {
 
 /// Lays out the [_Pair]s below it as a left-aligned table: labels in one
 /// column of [labelWidth], values lined up next to them.
-/// An appliance's newest runs, on whichever outlet each one was.
-class _RecentRuns extends StatefulWidget {
-  final RecognitionService recognition;
-  final String applianceId;
-  const _RecentRuns({
-    super.key,
-    required this.recognition,
-    required this.applianceId,
-  });
-
-  @override
-  State<_RecentRuns> createState() => _RecentRunsState();
-}
-
-class _RecentRunsState extends State<_RecentRuns> {
-  late final Future<List<ApplianceRun>> _runs = widget.recognition.runs(
-    widget.applianceId,
-  );
-
-  static const _months = [
-    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', //
-    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-  ];
-  static String _when(DateTime t) {
-    final l = t.toLocal();
-    String two(int v) => v.toString().padLeft(2, '0');
-    return '${l.day} ${_months[l.month - 1]}, ${two(l.hour)}:${two(l.minute)}';
-  }
-
-  static String _length(ApplianceRun r) {
-    if (r.endedAt == null) return 'Running';
-    final energy = r.energyWh == null
-        ? ''
-        : ' · ${r.energyWh!.toStringAsFixed(1)} Wh';
-    return '${_duration(r.durationSeconds)}$energy';
-  }
-
-  @override
-  Widget build(BuildContext context) => _Panel(
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text(
-          'Usage history',
-          style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16),
-        ),
-        const SizedBox(height: 10),
-        FutureBuilder<List<ApplianceRun>>(
-          future: _runs,
-          builder: (context, snap) {
-            if (snap.hasError) {
-              return const Text(
-                'Usage history is not available yet.',
-                style: TextStyle(color: Colors.grey),
-              );
-            }
-            if (!snap.hasData) return const LinearProgressIndicator();
-            final runs = snap.data!;
-            if (runs.isEmpty) {
-              return const Text(
-                'No runs yet.',
-                style: TextStyle(color: Colors.grey),
-              );
-            }
-            return Column(
-              children: [
-                for (final r in runs)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 4),
-                    child: Row(
-                      children: [
-                        _Badge('Outlet ${r.outlet}'),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(_when(r.startedAt)),
-                              Text(
-                                _length(r),
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-              ],
-            );
-          },
-        ),
-      ],
-    ),
-  );
-}
-
 class _PairLayout extends InheritedWidget {
   final double labelWidth;
   const _PairLayout({required this.labelWidth, required super.child});

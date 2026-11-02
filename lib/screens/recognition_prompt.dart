@@ -130,8 +130,9 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
 
   String _question() => switch (s.status) {
     RecognitionStatus.provisional =>
-      'WisePlug thinks this is ${s.applianceName}'
-          '${s.modeName == null || s.modeName == 'Normal' ? '' : ' (${s.modeName})'}. '
+      // No mode names ("Normal", "Mode 2"): they are WisePlug's own labels
+      // for an appliance's power patterns and mean nothing to users.
+      'WisePlug thinks this is ${s.applianceName}. '
           'Confirm it to use its own safe operating time.',
     _ => s.promptText ?? 'New appliance detected. Register it?',
   };
@@ -160,9 +161,6 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
               : null,
         ),
         title: Text(c.name),
-        subtitle: c.modeName.isEmpty || c.modeName == 'Normal'
-            ? null
-            : Text(c.modeName),
         trailing: c.applianceId == s.suggested?.applianceId
             ? const Text('Last used here', style: TextStyle(fontSize: 12))
             : null,

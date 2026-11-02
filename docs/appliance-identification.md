@@ -191,7 +191,7 @@ use it:
 | registration: plug-ins may happen on either outlet and all count | outlet exclusivity: one appliance cannot run on both at once |
 | matching: every appliance of the user, same rules and config | "last used on this outlet" pre-selects an AMBIGUOUS answer, never decides |
 | EMA updates, 7-use learning, safety limit, 30 min default | sensor calibration factors |
-| usage history, runtime and energy (`appliance_usage`) | |
+| usage history, runtime and energy (`appliance_runs`, `appliance_usage`: kept in the database for evaluation, not shown in the app) | |
 
 The outlet is kept on each sample and run only as a record of where it was
 measured. The firmware runs one code path for both outlets. The only
@@ -259,7 +259,7 @@ unsteady load. The tool refuses it, and so does the database.
   - calibration
 - `node --test supabase/tests/stale_runs.test.ts`: closing runs whose end
   was never reported.
-- `flutter test`: the prompts, guided registration and the Profiles tab (one list for both outlets, usage history with the outlet per run).
+- `flutter test`: the prompts, guided registration and the Profiles tab (one list for both outlets; each appliance opens a full detail screen with its name, type, status, safety limit, usage sessions and signature, and Edit / Delete, but no usage history).
 - The plug's measurement state machine is tested in
   `test/recognition_window_test.cpp`. It runs with g++ on a PC.
 
