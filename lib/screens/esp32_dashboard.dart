@@ -1,12 +1,12 @@
 import 'esp32_live_view.dart';
 
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
 import '../models/esp32_data.dart';
 import '../services/device_binding.dart';
 import '../services/esp32_service.dart';
 import '../services/recognition_service.dart';
+import '../services/session_service.dart';
 import '../services/supabase_backend.dart';
 import '../widgets/safety_alert_listener.dart';
 
@@ -56,7 +56,7 @@ class _Esp32DashboardState extends State<Esp32Dashboard> {
             recognition: _recognition,
             darkMode: widget.darkMode,
             onDarkModeChanged: widget.onDarkModeChanged,
-            onSignOut: () => FirebaseAuth.instance.signOut(),
+            onSignOut: () => SessionService.standard().signOut(),
           ),
         );
       }
@@ -102,7 +102,7 @@ class _ClaimProblem extends StatelessWidget {
                   child: const Text('Try again'),
                 ),
               TextButton(
-                onPressed: () => FirebaseAuth.instance.signOut(),
+                onPressed: () => SessionService.standard().signOut(),
                 child: const Text('Sign out'),
               ),
             ],

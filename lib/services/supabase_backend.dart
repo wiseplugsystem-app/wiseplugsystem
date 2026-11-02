@@ -258,6 +258,10 @@ class SupabaseBackend {
     return rows.map(SafetyAlertLog.fromRow).toList();
   }
 
+  /// This phone stops receiving pushes (on sign-out).
+  Future<void> removePushToken(String token) =>
+      _client.from('push_tokens').delete().eq('token', token);
+
   /// Lets evaluate-safety-alert push to this phone (FCM HTTP v1).
   Future<void> savePushToken(String token) async {
     final uid = FirebaseAuth.instance.currentUser?.uid;

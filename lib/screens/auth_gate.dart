@@ -10,22 +10,36 @@ import '../services/auth_error.dart';
 import '../services/supabase_backend.dart';
 import '../widgets/wiseplug_logo.dart';
 
+/// Stays logged in: Firebase Auth keeps the login on the phone and refreshes
+/// it by itself (Supabase uses the same Firebase token). On start the saved
+/// login goes straight to [child]; without one, Sign in / Create account.
+/// An expired token does not log out while offline: Firebase ends the session
+/// only once it is online and the account is really invalid (password changed
+/// elsewhere, account deleted or disabled), and then this shows Sign in.
 class AuthGate extends StatelessWidget {
   final Widget child;
-  const AuthGate({super.key, required this.child});
+  final FirebaseAuth? auth;
+
+  /// Push notifications and the Supabase account link (off in tests).
+  final bool setUpSession;
+  const AuthGate({
+    super.key,
+    required this.child,
+    this.auth,
+    this.setUpSession = true,
+  });
   @override
   Widget build(BuildContext context) => StreamBuilder<User?>(
-    stream: FirebaseAuth.instance.authStateChanges(),
+    stream: (auth ?? FirebaseAuth.instance).authStateChanges(),
     builder: (context, snapshot) {
       if (snapshot.connectionState == ConnectionState.waiting) {
         return const Scaffold(body: Center(child: CircularProgressIndicator()));
       }
-      return snapshot.data == null
-          ? const SignInScreen()
-          : _NotificationSession(
-              key: ValueKey(snapshot.data!.uid),
-              child: child,
-            );
+      final user = snapshot.data;
+      if (user == null) return SignInScreen(auth: auth);
+      return setUpSession
+          ? _NotificationSession(key: ValueKey(user.uid), child: child)
+          : KeyedSubtree(key: ValueKey(user.uid), child: child);
     },
   );
 }

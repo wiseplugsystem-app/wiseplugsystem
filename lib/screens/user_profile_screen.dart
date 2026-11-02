@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import '../services/auth_error.dart';
 import '../services/device_binding.dart';
 import '../services/esp32_service.dart';
+import '../services/session_service.dart';
 
 /// Shows the signed-in account and the 1:1 bound gadget, and lets the user
 /// permanently delete their account after re-entering their password.
@@ -22,7 +23,8 @@ class UserProfileScreen extends StatelessWidget {
 
   Future<void> _signOut(BuildContext context) async {
     Navigator.of(context).popUntil((route) => route.isFirst);
-    await _auth.signOut();
+    // Also stops this phone receiving the account's safety alerts.
+    await SessionService.standard(auth: _auth).signOut();
   }
 
   Future<void> _delete(BuildContext context) async {

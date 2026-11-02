@@ -267,6 +267,34 @@ Users sign in **only with Firebase Auth** (the existing sign-in screen).
 There is no second password, no account syncing, and nothing extra to explain
 at the defense: "Firebase is our identity provider; Supabase trusts it."
 
+### Staying logged in (in plain words)
+
+- **You log in once.** The app remembers you on this phone. Next time you open
+  it, even after restarting the phone, it goes straight to your WisePlug.
+- **No internet?** You stay logged in. You are only asked to log in again
+  once the internet is back, and only if your account really changed (for
+  example, your password was changed on another phone, or the account was
+  deleted).
+- **Sign out** (Settings or Profile → Sign out): this phone stops getting your WisePlug's
+  safety alerts, and the app shows the log-in screen again. If there is no
+  internet at that moment, you are still signed out at once; the alerts stop
+  reaching this phone after the next alert.
+
+How it works: Firebase Auth keeps the login on the phone (Keychain on iPhone,
+the app's private storage on Android, the browser's storage on the web) and
+refreshes the hour-long access token by itself; Supabase asks for that token
+on every request (`accessToken: getIdToken()`), so it never keeps a separate
+login. `AuthGate` (`lib/screens/auth_gate.dart`) follows Firebase's login
+state. Every Sign out button goes through `SessionService.signOut()`
+(`lib/services/session_service.dart`): it removes this phone's notification
+token from Firebase (`users/<uid>/fcmTokens`) and Supabase (`push_tokens`),
+deletes it on the phone, then logs out. Each step gives up after 5 s, so it
+never hangs without internet. Tests: `test/session_test.dart`.
+
+On the web build the login is kept per browser: clearing the site's data logs
+you out. Showing the last known readings while the phone is offline is a
+separate item (it needs the app's offline storage).
+
 ## 7. Setup, step by step
 
 All commands run in PowerShell in the project folder. `npx supabase` runs the
