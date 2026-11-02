@@ -36,9 +36,12 @@ Future<PromptChoice?> showRecognitionPrompt(
   context: context,
   isScrollControlled: true,
   showDragHandle: true,
-  builder: (_) => RecognitionPromptSheet(
-    session: session,
-    defaultCutoffMinutes: defaultCutoffMinutes,
+  // Scrolls when the question is taller than a small phone's screen.
+  builder: (_) => SingleChildScrollView(
+    child: RecognitionPromptSheet(
+      session: session,
+      defaultCutoffMinutes: defaultCutoffMinutes,
+    ),
   ),
 );
 

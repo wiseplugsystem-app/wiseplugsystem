@@ -40,6 +40,20 @@ String _runningTime(Duration d) {
   return h > 0 ? '$h:${two(m)}:${two(sec)}' : '$m:${two(sec)}';
 }
 
+/// "3:19 PM" today, otherwise "2 Nov, 3:19 PM" (the phone's local time).
+String _clockTime(DateTime t, DateTime now) {
+  const months = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', //
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ];
+  final l = t.toLocal(), n = now.toLocal();
+  final hour = l.hour % 12 == 0 ? 12 : l.hour % 12;
+  final time =
+      '$hour:${l.minute.toString().padLeft(2, '0')} ${l.hour < 12 ? 'AM' : 'PM'}';
+  final today = l.year == n.year && l.month == n.month && l.day == n.day;
+  return today ? time : '${l.day} ${months[l.month - 1]}, $time';
+}
+
 String _duration(int? seconds) {
   if (seconds == null) return 'Not available';
   if (seconds <= 0) return '0 s';
@@ -141,7 +155,6 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
   final _subscriptions = <StreamSubscription<dynamic>>[];
   Map<String, OutletReading> _readings = {};
   bool _readError = false, _loading = true;
-  String? _telemetryFailure;
   String _version = 'Loading…';
   int _tab = 0;
   Timer? _clock;
@@ -163,7 +176,8 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
 
   // Safety warnings are raised app-wide by SafetyAlertListener. A run that
   // needs the user's answer (UNKNOWN, AMBIGUOUS, SAME_TYPE_IN_USE) opens its
-  // prompt once, when nothing more urgent is on screen.
+  // prompt once, when nothing more urgent is on screen. A provisional
+  // "Looks like X" is asked on the outlet card only, never in a pop-up.
   void _checkPopups() {
     if (!mounted || _loading || _readError || _promptOpen) return;
     final now = DateTime.now();
@@ -287,13 +301,12 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
           }
           _readings = value;
           _readError = false;
-          _telemetryFailure = null;
           _loading = false;
           _refresh();
         },
         onError: (Object error) {
           _readError = true;
-          _telemetryFailure = error.toString();
+          debugPrint('WisePlug readings unavailable: $error'); // for developers
           _loading = false;
           _refresh();
         },
@@ -434,7 +447,8 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                   if (_tab == 0 && _readError)
                     _Panel(
                       child: Text(
-                        'Cannot load ESP32 readings (telemetry_logs). $_telemetryFailure',
+                        'Can\'t load your WisePlug\'s readings right now. '
+                        'Check your phone\'s internet connection.',
                       ),
                     ),
                   if (_tab == 0) ..._home(now),
@@ -478,7 +492,8 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
       if (!_loading && !_readError && _readings.isEmpty)
         const _Panel(
           child: Text(
-            'No outlet readings found. The ESP32 must publish telemetry_logs/outlet_A and outlet_B to this app’s database.',
+            'No readings from your WisePlug yet. Make sure it is plugged in '
+            'and connected to Wi-Fi.',
           ),
         ),
       Wrap(
@@ -780,8 +795,9 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
             reading == null
                 ? 'No reading received for this outlet.'
                 : reading.lastUpdated == null
-                ? 'Received a reading without a valid device timestamp.'
-                : 'Device updated: ${reading.lastUpdated!.toLocal()}${fresh ? '' : ' · stale or clock mismatch'}',
+                ? 'Last updated: unknown'
+                : 'Last updated: ${_clockTime(reading.lastUpdated!, now)}'
+                      '${fresh ? '' : ' · may be out of date'}',
             style: const TextStyle(fontSize: 11, color: Colors.grey),
           ),
           _Pair(
@@ -937,7 +953,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
       return const [
         _Panel(
           child: Text(
-            'Appliance profiles need WisePlug\'s Supabase backend, which is not configured in this build.',
+            'Appliance profiles are not available in this version of the app.',
           ),
         ),
       ];
@@ -982,7 +998,10 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
       if (!_appliancesLoaded) const LinearProgressIndicator(),
       if (_appliancesError != null)
         _Panel(
-          child: Text('Cannot load appliance profiles. $_appliancesError'),
+          child: Text(
+            'Can\'t load your appliances right now. Check your phone\'s '
+            'internet connection.',
+          ),
         ),
       if (profiles.isEmpty && _appliancesLoaded && _appliancesError == null)
         _Panel(
@@ -1166,14 +1185,17 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                                 _duration(a.baselineRuntimeSeconds),
                               ),
                             _Pair('Status', _applianceStatus(a, now)),
-                            _Pair('Total sessions', '${a.useCount}'),
-                            // Both outlets combined (appliance_usage).
+                            // Every time it was used, on both outlets
+                            // (appliance_usage); "Usage sessions" above is
+                            // only the 7-use learning's progress.
+                            _Pair(
+                              'Total sessions',
+                              a.usage == null
+                                  ? '${a.useCount}'
+                                  : '${a.usage!.runs} (Outlet A ${a.usage!.runsOnA}'
+                                        ' · Outlet B ${a.usage!.runsOnB})',
+                            ),
                             if (a.usage != null) ...[
-                              _Pair(
-                                'Runs',
-                                '${a.usage!.runs} (Outlet A ${a.usage!.runsOnA}'
-                                    ' · Outlet B ${a.usage!.runsOnB})',
-                              ),
                               _Pair(
                                 'Total runtime',
                                 _duration(a.usage!.totalRuntimeSeconds),
@@ -1801,7 +1823,8 @@ class _PowerControlState extends State<_PowerControl> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-            'Connect the ESP32 and wait for live device data before turning an outlet on or off.',
+            'Your WisePlug isn\'t connected right now. Wait until it shows '
+            'live readings, then try again.',
           ),
         ),
       );
@@ -1833,7 +1856,7 @@ class _PowerControlState extends State<_PowerControl> {
       );
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('ESP32 confirmed the command.')),
+          const SnackBar(content: Text('Done. Your WisePlug did it.')),
         );
       }
     } catch (error) {
@@ -1942,7 +1965,7 @@ class _PowerControlState extends State<_PowerControl> {
                               ? ''
                               : 'Outlet ${widget.outlet} · ') +
                           (_busy
-                              ? 'Waiting for ESP32…'
+                              ? 'Waiting for your WisePlug…'
                               : r == null || !r.isFresh(widget.now)
                               ? 'Unavailable'
                               : r.isLockedOut

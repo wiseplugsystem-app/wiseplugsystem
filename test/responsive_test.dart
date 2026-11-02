@@ -193,6 +193,38 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
+  testWidgets('the recognition pop-up fits a small phone', (tester) async {
+    final recognition = FakeRecognition();
+    await noOverflow(tester, () async {
+      await show(tester, dashboard(SmallScreenDevice(), recognition));
+      recognition.sessions.add({
+        'A': session(
+          status: 'AMBIGUOUS',
+          promptText: 'Is this the Electric kettle in the kitchen corner or the Electric kettle in the dining room?',
+          reason: 'They give near-identical readings.',
+          candidates: [
+            {
+              'applianceId': 'k1',
+              'name': 'Electric kettle in the kitchen corner',
+              'modeName': 'Keep warm',
+            },
+            {
+              'applianceId': 'k2',
+              'name': 'Electric kettle in the dining room',
+              'modeName': 'Normal',
+            },
+          ],
+        ),
+      });
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.byType(BottomSheet), findsOneWidget);
+      await tester.drag(find.byType(BottomSheet), const Offset(0, -2000));
+      await tester.pump();
+    });
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets('offline banner and settings fit a small phone', (tester) async {
     await noOverflow(tester, () async {
       await show(tester, dashboard(SmallScreenDevice(online: false)));

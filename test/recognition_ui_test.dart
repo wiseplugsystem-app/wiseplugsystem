@@ -276,7 +276,8 @@ void main() {
       ),
     });
     await tester.pumpAndSettle();
-    // No pop-up: the outlet card itself asks, with a big confirm button.
+    // No pop-up, even after Stage 2: the outlet card itself asks, with a big
+    // confirm button (pop-ups are for new or unsure appliances).
     expect(find.byType(BottomSheet), findsNothing);
     expect(find.text('Is this Fan?'), findsOneWidget);
     final yes = find.widgetWithText(FilledButton, 'Yes, it is Fan');
@@ -522,7 +523,9 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Not plugged in'), findsOneWidget);
       expect(find.text('Last used on'), findsOneWidget);
+      // One "Total sessions" row (both outlets), no separate "Runs" row.
       expect(find.text('3 (Outlet A 2 · Outlet B 1)'), findsOneWidget);
+      expect(find.text('Runs'), findsNothing);
       expect(find.text('0.09 kWh'), findsOneWidget);
       expect(find.text('Usage history'), findsOneWidget);
       // Both outlets' runs in one history, each with its outlet.
@@ -531,6 +534,23 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     },
   );
+
+  testWidgets('the home screen says when it was updated, in plain words', (
+    tester,
+  ) async {
+    final (device, _) = await mountLive(tester);
+    device.readings.add({'A': running('A')});
+    await tester.pumpAndSettle();
+    // "Last updated: 3:19 PM" (today: the time only).
+    expect(
+      find.textContaining(RegExp(r'^Last updated: \d{1,2}:\d\d [AP]M$')),
+      findsOneWidget,
+    );
+    for (final word in ['ESP32', 'Device updated', 'stale', 'telemetry']) {
+      expect(find.textContaining(word), findsNothing, reason: word);
+    }
+    await tester.pumpWidget(const SizedBox());
+  });
 
   testWidgets('the pop-up offers to continue an unfinished registration', (
     tester,

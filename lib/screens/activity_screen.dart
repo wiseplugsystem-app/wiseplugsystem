@@ -63,8 +63,8 @@ class ActivityScreen extends StatelessWidget {
       builder: (context, snapshot) {
         if (snapshot.hasError) {
           return const _Message(
-            'Cannot load the activity history. Check your connection and that '
-            'the latest database rules are published.',
+            'Can\'t load the activity history right now. Check your phone\'s '
+            'internet connection.',
           );
         }
         final events = snapshot.data;

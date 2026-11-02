@@ -59,8 +59,11 @@ IDLE → STARTUP (first 5 s) → SETTLING → STEADY (30 s) → REPORTED
 **Why not current:** I = P / (V × PF). Once power, voltage and PF are known,
 current adds no independent information.
 
-**When each stage is sent:** Stage 1 goes about 10 s after the load settles;
-Stage 2 at the end of STEADY (about 35–60 s after plug-in).
+**When each stage is sent:** Stage 1 goes 5 s after the load settles (about
+10–17 s after plug-in, depending on how fast the appliance settles); Stage 2
+at the end of STEADY (about 35–60 s after plug-in). Stage 1 averages 5
+readings, which is well within the 2 % power tolerance; Stage 2 keeps 30 s,
+because its power variation must be measured as it was at registration.
 
 **Limits of 1 reading per second:**
 - Millisecond inrush is averaged away, so the peak only reflects slow
@@ -330,7 +333,7 @@ correct answer. Registration plug-ins 2 and 3 are left out.
 - *functional correctness*: accuracy, F1
 - *functional completeness*: the 9 scenarios
 - *fault tolerance*: offline → default cutoff
-- *time behaviour*: Stage 1 at about 15 s, Stage 2 at about 35–60 s
+- *time behaviour*: Stage 1 at about 10–17 s, Stage 2 at about 35–60 s
 - *safety*: the safety-violation count and scenario 9
 
 ## 8. Deploying (order matters)
