@@ -64,6 +64,18 @@ export interface PushResult {
   invalidTokens: string[];
 }
 
+/**
+ * Every safety push sounds WisePlug's own warning tone (CC0, made by
+ * tool/make_warning_tone.ts), so users learn one sound. Android: the
+ * "wiseplug_safety" channel the app creates (MainActivity.kt) with
+ * res/raw/wiseplug_warning.wav; before the app has been opened once, the
+ * phone's default sound. iOS: the file must be added to the app in Xcode;
+ * until then iPhones play the default sound.
+ */
+export const safetyAndroidNotification = (tag: string | undefined) =>
+  ({ channel_id: "wiseplug_safety", sound: "wiseplug_warning", tag });
+export const SAFETY_IOS_SOUND = "wiseplug_warning.wav";
+
 /** Sends one notification to each token with the FCM HTTP v1 API. */
 export async function sendPush(
   deviceTokens: string[],
@@ -83,8 +95,8 @@ export async function sendPush(
           token,
           notification,
           data,
-          android: { priority: "HIGH", notification: { sound: "default", tag: data.eventId } },
-          apns: { headers: { "apns-priority": "10" }, payload: { aps: { sound: "default" } } },
+          android: { priority: "HIGH", notification: safetyAndroidNotification(data.eventId) },
+          apns: { headers: { "apns-priority": "10" }, payload: { aps: { sound: SAFETY_IOS_SOUND } } },
         },
       }),
     });

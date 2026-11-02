@@ -10,10 +10,14 @@ import '../services/safety_alarm_manager.dart';
 /// App-wide safety watchdog. Place it below the Navigator (e.g. around the
 /// signed-in home screen) so its dialog covers every tab and pushed screen.
 ///
-/// The dialog and looping alarm start automatically only when the gadget
+/// The dialog and its warning sound start automatically only when the gadget
 /// reports `safetyTriggered == true` or `remainingLimit <= 0`. Dismissing
 /// silences that event; a new event (the condition clears, then recurs)
 /// raises it again. The dialog closes itself when the condition clears.
+///
+/// Sound (SafetyAlarmManager): during a warning, two short beeps that come
+/// faster in the last 10 s; when the power is cut (also an electrical trip),
+/// one long beep. "Mute this warning" silences only this warning.
 class SafetyAlertListener extends StatefulWidget {
   final Esp32Service service;
   final SafetyAlarmManager? alarm;
@@ -37,6 +41,34 @@ class _SafetyAlertListenerState extends State<SafetyAlertListener> {
   Map<String, OutletReading> _readings = {};
   DialogRoute<void>? _route;
   bool _dismissed = false;
+  bool _warningSounding = false; // the warning pattern is playing
+
+  /// Time left until the soonest cutoff among the outlets in warning.
+  Duration? _untilCutoff() {
+    final now = DateTime.now();
+    final seconds = _readings.values
+        .where((r) => r.isWarning)
+        .map((r) => r.secondsRemaining(now));
+    return seconds.isEmpty
+        ? null
+        : Duration(seconds: seconds.reduce((a, b) => a < b ? a : b));
+  }
+
+  /// The warning ended with the power cut: one long beep.
+  void _checkCutoff() {
+    if (_route == null || !_warningSounding) return;
+    final values = _readings.values;
+    if (values.any((r) => r.isWarning) || !values.any((r) => r.isLockedOut)) {
+      return;
+    }
+    _warningSounding = false;
+    unawaited(_alarm.playCutoff());
+  }
+
+  Future<void> _silence() {
+    _warningSounding = false;
+    return _alarm.stopAlarm();
+  }
 
   bool get _alertActive {
     final status = _status;
@@ -59,6 +91,7 @@ class _SafetyAlertListenerState extends State<SafetyAlertListener> {
         widget.service.streamOutlets().listen((readings) {
           _readings = readings;
           _updates.value++;
+          _checkCutoff();
         }, onError: (Object _) {}),
       );
   }
@@ -87,7 +120,8 @@ class _SafetyAlertListenerState extends State<SafetyAlertListener> {
           status: () => _status,
           readings: () => _readings,
           service: widget.service,
-          onSilence: _alarm.stopAlarm,
+          onSilence: _silence,
+          onMute: _alarm.mute,
           onDismiss: () {
             _dismissed = true;
             _close();
@@ -95,7 +129,12 @@ class _SafetyAlertListenerState extends State<SafetyAlertListener> {
         ),
       ),
     );
-    unawaited(_alarm.playSafetyAlarm());
+    if (_readings.values.any((r) => r.isWarning)) {
+      _warningSounding = true;
+      unawaited(_alarm.playSafetyAlarm(remaining: _untilCutoff));
+    } else {
+      unawaited(_alarm.playCutoff()); // cut at once, e.g. an electrical trip
+    }
     await navigator.push(route);
     if (identical(_route, route)) _close();
   }
@@ -105,6 +144,7 @@ class _SafetyAlertListenerState extends State<SafetyAlertListener> {
     final route = _route;
     if (route == null) return;
     _route = null;
+    _warningSounding = false;
     _alarm.stopAlarm();
     if (!route.isActive) return;
     if (route.isCurrent) {
@@ -134,6 +174,7 @@ class _SafetyAlertDialog extends StatefulWidget {
   final Map<String, OutletReading> Function() readings;
   final Esp32Service service;
   final Future<void> Function() onSilence;
+  final Future<void> Function() onMute;
   final VoidCallback onDismiss;
   const _SafetyAlertDialog({
     required this.updates,
@@ -141,6 +182,7 @@ class _SafetyAlertDialog extends StatefulWidget {
     required this.readings,
     required this.service,
     required this.onSilence,
+    required this.onMute,
     required this.onDismiss,
   });
 
@@ -149,7 +191,7 @@ class _SafetyAlertDialog extends StatefulWidget {
 }
 
 class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
-  bool _busy = false;
+  bool _busy = false, _muted = false;
   String? _error;
   // Repaints the countdown every second between device updates.
   late final Timer _tick = Timer.periodic(
@@ -355,9 +397,30 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
                         ],
                 ),
                 if (warning)
-                  TextButton(
-                    onPressed: _busy ? null : widget.onDismiss,
-                    child: const Text('Dismiss'),
+                  Wrap(
+                    alignment: WrapAlignment.center,
+                    children: [
+                      TextButton.icon(
+                        onPressed: _muted
+                            ? null
+                            : () {
+                                setState(() => _muted = true);
+                                widget.onMute();
+                              },
+                        icon: Icon(
+                          _muted ? Icons.volume_off : Icons.volume_off_outlined,
+                        ),
+                        label: Text(
+                          _muted
+                              ? 'Sound is off for this warning'
+                              : 'Mute this warning',
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: _busy ? null : widget.onDismiss,
+                        child: const Text('Dismiss'),
+                      ),
+                    ],
                   ),
               ],
             ),
