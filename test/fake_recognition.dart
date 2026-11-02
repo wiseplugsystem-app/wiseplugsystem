@@ -26,6 +26,13 @@ class FakeRecognition extends Fake implements RecognitionService {
   @override
   Future<List<RegisteredAppliance>> appliances() async => list;
 
+  /// What runs() returns, per appliance id.
+  final history = <String, List<ApplianceRun>>{};
+
+  @override
+  Future<List<ApplianceRun>> runs(String applianceId, {int limit = 10}) async =>
+      history[applianceId] ?? const [];
+
   @override
   Future<OutletSession?> latestSession(String outlet) async {
     final queue = latest[outlet] ?? const [];

@@ -463,6 +463,75 @@ void main() {
     },
   );
 
+  testWidgets(
+    'one profile for both outlets: combined usage, outlet per run, and a '
+    'run left open on an idle outlet is not shown as plugged in',
+    (tester) async {
+      final fan = RegisteredAppliance.fromRow(
+        {
+          'id': 'fan-1',
+          'name': 'Fan 1',
+          'max_runtime_mins': 240,
+          'use_count': 3,
+          'last_outlet': 'outlet_1',
+          'appliance_types': {'name': 'Fan'},
+        },
+        modes: fan1().modes,
+        // An open run on A whose end was never reported.
+        runningOn: 'outlet_1',
+        usage: ApplianceUsage.fromRow({
+          'runs': 3,
+          'runs_on_a': 2,
+          'runs_on_b': 1,
+          'total_runtime_s': 5400,
+          'total_energy_wh': '85.5',
+        }),
+      );
+      final (device, recognition) = await mountLive(tester, appliances: [fan]);
+      recognition.history['fan-1'] = [
+        for (final (outlet, at) in [
+          ('outlet_2', '2026-11-01T09:00:00Z'),
+          ('outlet_1', '2026-10-31T08:00:00Z'),
+        ])
+          ApplianceRun.fromRow({
+            'outlet': outlet,
+            'started_at': at,
+            'ended_at': at,
+            'duration_s': 1800,
+            'energy_wh': 28.5,
+          }),
+      ];
+      final idle = OutletReading.fromMap('A', {
+        'status': 'Idle',
+        'currentState': 'IDLE',
+        'sessionID': 'boot',
+        'power_W': 0,
+        'sensor_valid': true,
+        'last_updated_ms': DateTime.now().millisecondsSinceEpoch,
+      });
+      device.readings.add({'A': idle});
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Profiles'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Running on'), findsNothing);
+      expect(
+        find.text('Not plugged in · last used on Outlet A'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Fan 1'));
+      await tester.pumpAndSettle();
+      expect(find.text('Not plugged in'), findsOneWidget);
+      expect(find.text('Last used on'), findsOneWidget);
+      expect(find.text('3 (Outlet A 2 · Outlet B 1)'), findsOneWidget);
+      expect(find.text('0.09 kWh'), findsOneWidget);
+      expect(find.text('Usage history'), findsOneWidget);
+      // Both outlets' runs in one history, each with its outlet.
+      expect(find.text('Outlet B'), findsOneWidget);
+      expect(find.text('Outlet A'), findsNWidgets(2)); // badge + last used
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
   testWidgets('the pop-up offers to continue an unfinished registration', (
     tester,
   ) async {

@@ -16,10 +16,15 @@
 // any other outlet of the user's plugs is not a candidate, and the database
 // refuses a second open session for the same appliance.
 //
+// Both outlets run this same code: the outlet is only where the load is. The
+// summary is first put in the reference meter's units with the outlet's
+// calibration (_shared/calibration.ts), so samples from A and B compare.
+//
 // Body: { deviceId, outlet, eventId, startedAt (epoch ms), stage: 1 | 2,
 //         features: { avg_power_w, avg_pf?, avg_voltage_v?, startup_peak_ratio?,
 //                     settling_time_s?, power_variation?, cycle_period_s?,
-//                     standby_power_w?, unstable? } }
+//                     standby_power_w?, unstable? },
+//         running?: [event IDs the plug is running now] }
 // Auth: x-device-key. Idempotent per (eventId, stage).
 // Reply: { status, applianceId, applianceName, candidates, suggested, registerAs,
 //          promptText, cutoffS, stage, reason, ... } (see sessionReply)
@@ -35,6 +40,16 @@ import {
   ownerOf,
   sessionReply,
 } from "../_shared/recognition_db.ts";
+import { parseRunning, staleRuns } from "../_shared/stale_runs.ts";
+import { calibrate, calibrationFromRow } from "../_shared/calibration.ts";
+
+/** The outlet's sensor calibration (1.0 until tool/calibrate.ts sets it). */
+async function loadCalibration(deviceId: string, outlet: string) {
+  const { data, error } = await db.from("outlets").select("power_cal, voltage_cal, pf_cal")
+    .eq("device_id", deviceId).eq("outlet", outlet).maybeSingle();
+  if (error) throw error;
+  return calibrationFromRow(data);
+}
 
 type Row = Record<string, unknown>;
 
@@ -51,10 +66,12 @@ serve(async (req) => {
   }
   if (body.stage !== 1 && body.stage !== 2) throw new HttpError(400, "stage must be 1 or 2");
   const stage = body.stage as Stage;
-  const features = parseFeatures(body.features);
-  if (typeof features === "string") throw new HttpError(400, features);
+  const rawFeatures = parseFeatures(body.features);
+  if (typeof rawFeatures === "string") throw new HttpError(400, rawFeatures);
 
-  const [config, owner] = await Promise.all([loadConfig(), ownerOf(deviceId)]);
+  const [config, owner, calibration] = await Promise.all([loadConfig(), ownerOf(deviceId), loadCalibration(deviceId, outlet)]);
+  // In the reference meter's units, so Outlet A and Outlet B samples compare.
+  const features = calibrate(rawFeatures, calibration);
   const { data: existing, error: existingError } = await db.from("outlet_sessions")
     .select("*").eq("event_id", eventId).maybeSingle();
   if (existingError) throw existingError;
@@ -67,7 +84,7 @@ serve(async (req) => {
   // The user (or registration) already said what this is: keep their answer.
   // At Stage 2 a user confirmation also teaches the profile (EMA), once.
   if (existing && (existing.confirmed_by === "user" || existing.confirmed_by === "registration")) {
-    const update: Row = { stage, features };
+    const update: Row = { stage, features, raw_features: rawFeatures };
     if (stage === 2 && existing.confirmed_by === "user" && !existing.sample_recorded && existing.appliance_id && owner) {
       const learned = await learnFromConfirmed(await loadAppliance(owner, existing.appliance_id), features, eventId, config);
       update.sample_recorded = learned != null;
@@ -78,13 +95,20 @@ serve(async (req) => {
     return json(sessionReply(data));
   }
 
-  // A new run on this outlet means the previous one there has ended, even if
-  // its end was never reported (e.g. the upload was lost).
-  if (!existing) {
-    const { error } = await db.from("outlet_sessions")
-      .update({ ended_at: new Date().toISOString(), end_reason: "SUPERSEDED" })
-      .eq("device_id", deviceId).eq("outlet", outlet).is("ended_at", null);
+  // Close the plug's runs that have ended though their end was never reported
+  // (an earlier run on this outlet, a run from before a restart, a run the
+  // plug no longer lists), so an appliance left "in use" there by a lost
+  // report can be recognised on either outlet.
+  {
+    const { data: open, error } = await db.from("outlet_sessions")
+      .select("id, event_id, outlet").eq("device_id", deviceId).is("ended_at", null);
     if (error) throw error;
+    const now = new Date().toISOString();
+    for (const s of staleRuns(open ?? [], { eventId, outlet, running: parseRunning(body.running) })) {
+      const { error } = await db.from("outlet_sessions")
+        .update({ ended_at: now, end_reason: s.reason }).eq("id", s.id).is("ended_at", null);
+      if (error) throw error;
+    }
   }
 
   const decide = async (): Promise<Recognition> => {
@@ -127,6 +151,7 @@ serve(async (req) => {
     },
     prompt_text: r.promptText,
     features,
+    raw_features: rawFeatures,
   });
   const write = (r: Recognition) => existing
     ? db.from("outlet_sessions").update(row(r)).eq("id", existing.id).select("*").single()

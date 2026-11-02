@@ -874,9 +874,13 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
     return start == null ? '' : ' · ${_runningTime(now.difference(start))}';
   }
 
-  /// The outlet ('A' / 'B') [a] is running on now, or null.
-  String? _outletOf(RegisteredAppliance a) =>
-      a.runningOn == null ? null : outletLetter(a.runningOn!);
+  /// The outlet ('A' / 'B') [a] is running on now, or null. A run whose end
+  /// was never reported is not shown while the outlet's live reading is idle.
+  String? _outletOf(RegisteredAppliance a) {
+    if (a.runningOn == null) return null;
+    final outlet = outletLetter(a.runningOn!);
+    return _status(_readings[outlet], DateTime.now()) == 'Idle' ? null : outlet;
+  }
 
   /// Status shown for a profile: the live status of the outlet it is on,
   /// "Registering" until its plug-ins are done, else "Idle".
@@ -911,6 +915,11 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
         ? 'Learned from $total uses'
         : '${a.useCount.clamp(0, total)} of $total uses';
   }
+
+  /// "Not plugged in · last used on Outlet A" (or never used yet).
+  String _whereText(RegisteredAppliance a) => a.lastOutlet == null
+      ? 'Not plugged in'
+      : 'Not plugged in · last used on Outlet ${outletLetter(a.lastOutlet!)}';
 
   String _usageText(RegisteredAppliance a) {
     if (!a.isReady(_recognitionSettings.registrationSamples)) {
@@ -1005,17 +1014,26 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                     a.name,
                     style: const TextStyle(fontWeight: FontWeight.w700),
                   ),
-                  // Appliances are portable: show an outlet only while running.
-                  subtitle: Text(
-                    _outletOf(a) == null
-                        ? _usageText(a)
-                        : 'Running on Outlet ${_outletOf(a)}'
-                              '${_runningFor(_outletOf(a)!, now)}',
-                  ),
+                  // Appliances are portable: one profile for both outlets.
+                  subtitle: _outletOf(a) == null
+                      ? Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(_usageText(a)),
+                            Text(
+                              _whereText(a),
+                              style: const TextStyle(fontSize: 12),
+                            ),
+                          ],
+                        )
+                      : Text(
+                          'Running on Outlet ${_outletOf(a)}'
+                          '${_runningFor(_outletOf(a)!, now)}',
+                        ),
                   trailing: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      if (a.runningOn == null)
+                      if (_outletOf(a) == null)
                         IconButton(
                           tooltip: 'Delete appliance',
                           icon: const Icon(
@@ -1128,8 +1146,15 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                             _Pair('Saved name', a.name, color: _blue),
                             _Pair(
                               'Plugged into',
-                              outlet == null ? 'Not running' : 'Outlet $outlet',
+                              outlet == null
+                                  ? 'Not plugged in'
+                                  : 'Outlet $outlet',
                             ),
+                            if (a.lastOutlet != null)
+                              _Pair(
+                                'Last used on',
+                                'Outlet ${outletLetter(a.lastOutlet!)}',
+                              ),
                             // Set by WisePlug: the type's default, then the
                             // learned typical use x 1.5.
                             _Pair('Safety limit', _limitText(a), color: _green),
@@ -1142,6 +1167,22 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                               ),
                             _Pair('Status', _applianceStatus(a, now)),
                             _Pair('Total sessions', '${a.useCount}'),
+                            // Both outlets combined (appliance_usage).
+                            if (a.usage != null) ...[
+                              _Pair(
+                                'Runs',
+                                '${a.usage!.runs} (Outlet A ${a.usage!.runsOnA}'
+                                    ' · Outlet B ${a.usage!.runsOnB})',
+                              ),
+                              _Pair(
+                                'Total runtime',
+                                _duration(a.usage!.totalRuntimeSeconds),
+                              ),
+                              _Pair(
+                                'Energy used',
+                                '${(a.usage!.totalEnergyWh / 1000).toStringAsFixed(2)} kWh',
+                              ),
+                            ],
                             // The power signature WisePlug recognises, per mode.
                             for (final m in a.modes)
                               _Pair(
@@ -1155,6 +1196,17 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                         ),
                       ),
                     ),
+                    if (widget.recognition != null && ready) ...[
+                      const SizedBox(height: 20),
+                      _RecentRuns(
+                        // Reloaded when a run starts or ends.
+                        key: ValueKey(
+                          '${a.id}/${a.usage?.runs}/${a.runningOn}',
+                        ),
+                        recognition: widget.recognition!,
+                        applianceId: a.id,
+                      ),
+                    ],
                     if (!ready)
                       Padding(
                         padding: const EdgeInsets.only(top: 10),
@@ -1480,6 +1532,105 @@ class _Panel extends StatelessWidget {
 
 /// Lays out the [_Pair]s below it as a left-aligned table: labels in one
 /// column of [labelWidth], values lined up next to them.
+/// An appliance's newest runs, on whichever outlet each one was.
+class _RecentRuns extends StatefulWidget {
+  final RecognitionService recognition;
+  final String applianceId;
+  const _RecentRuns({
+    super.key,
+    required this.recognition,
+    required this.applianceId,
+  });
+
+  @override
+  State<_RecentRuns> createState() => _RecentRunsState();
+}
+
+class _RecentRunsState extends State<_RecentRuns> {
+  late final Future<List<ApplianceRun>> _runs = widget.recognition.runs(
+    widget.applianceId,
+  );
+
+  static const _months = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', //
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ];
+  static String _when(DateTime t) {
+    final l = t.toLocal();
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${l.day} ${_months[l.month - 1]}, ${two(l.hour)}:${two(l.minute)}';
+  }
+
+  static String _length(ApplianceRun r) {
+    if (r.endedAt == null) return 'Running';
+    final energy = r.energyWh == null
+        ? ''
+        : ' · ${r.energyWh!.toStringAsFixed(1)} Wh';
+    return '${_duration(r.durationSeconds)}$energy';
+  }
+
+  @override
+  Widget build(BuildContext context) => _Panel(
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'Usage history',
+          style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16),
+        ),
+        const SizedBox(height: 10),
+        FutureBuilder<List<ApplianceRun>>(
+          future: _runs,
+          builder: (context, snap) {
+            if (snap.hasError) {
+              return const Text(
+                'Usage history is not available yet.',
+                style: TextStyle(color: Colors.grey),
+              );
+            }
+            if (!snap.hasData) return const LinearProgressIndicator();
+            final runs = snap.data!;
+            if (runs.isEmpty) {
+              return const Text(
+                'No runs yet.',
+                style: TextStyle(color: Colors.grey),
+              );
+            }
+            return Column(
+              children: [
+                for (final r in runs)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Row(
+                      children: [
+                        _Badge('Outlet ${r.outlet}'),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(_when(r.startedAt)),
+                              Text(
+                                _length(r),
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            );
+          },
+        ),
+      ],
+    ),
+  );
+}
+
 class _PairLayout extends InheritedWidget {
   final double labelWidth;
   const _PairLayout({required this.labelWidth, required super.child});

@@ -11,8 +11,9 @@ hand.
 | Rules (pure, unit-tested) | `supabase/functions/_shared/matching.ts`, tests in `supabase/tests/matching.test.ts` |
 | Scenario table for the thesis | `tool/recognition_table.ts` |
 | Edge Functions | `recognize-appliance` (plug), `register-sample`, `confirm-match`, `manage-appliance` (app), `log-session` (end of run, 7-use learning) |
-| Schema | `supabase/migrations/20261029020000…` to `…050000` |
+| Schema | `supabase/migrations/20261029020000…` to `…050000`, `20261102000000_shared_outlets.sql` (calibration, shared history) |
 | Tunable numbers | table `recognition_config` (one row) |
+| Outlet calibration | `outlets.power_cal / voltage_cal / pf_cal`, `supabase/functions/_shared/calibration.ts`, `tool/calibrate.ts` |
 | Firmware measurement | `arduino/wiseplug_esp32/recognition_window.h` (tests in `test/recognition_window_test.cpp`) |
 | App | `lib/screens/recognition_prompt.dart` (pop-ups), `registration_dialog.dart` (registration pop-up, 3 plug-ins), Profiles tab in `esp32_live_view.dart` |
 | Evaluation | views `recognition_evaluation`, `recognition_confusion`, `recognition_metrics`, `recognition_summary` |
@@ -167,21 +168,98 @@ All numbers below come from `recognition_config`.
 ```
 appliance_types (Fan) 1─* appliance_instances (Fan 1, Fan 2: owner, cutoff, 7-use learning, last outlet)
 appliance_instances 1─* appliance_profiles (modes: mean/std per feature, registration V, sample count)
-appliance_profiles 1─* signature_samples (raw samples, newest 20 kept)
-outlets (device, outlet_1/outlet_2) 1─* outlet_sessions (one per run: status, cutoff, prediction, truth)
+appliance_profiles 1─* signature_samples (raw samples, newest 20 kept; outlet measured on, as a record)
+outlets (device, outlet_1/outlet_2, calibration) 1─* outlet_sessions (one per run: status, cutoff, prediction, truth)
 recognition_config (one row: every tunable number)
+appliance_runs / appliance_usage (views: every run of an appliance, and its totals, both outlets combined)
 ```
 
 Appliances belong to the **user** (`devices.owner_uid`), so one Fan can move
 between the user's plugs. Row-level security lets owners read their rows;
 only Edge Functions write.
 
+### One system for both outlets
+
+Outlet A and Outlet B are different sockets but one system. An appliance is
+registered once and used on either outlet. Everything learned about it is
+stored against the **appliance**, never against an outlet, and both outlets
+use it:
+
+| Shared (per appliance) | Per outlet (on purpose) |
+|---|---|
+| appliance, type, modes, samples | the run on it now, relay, cutoff timer, live readings |
+| registration: plug-ins may happen on either outlet and all count | outlet exclusivity: one appliance cannot run on both at once |
+| matching: every appliance of the user, same rules and config | "last used on this outlet" pre-selects an AMBIGUOUS answer, never decides |
+| EMA updates, 7-use learning, safety limit, 30 min default | sensor calibration factors |
+| usage history, runtime and energy (`appliance_usage`) | |
+
+The outlet is kept on each sample and run only as a record of where it was
+measured. The firmware runs one code path for both outlets. The only
+per-outlet values are in its `OUTLET_HW` table: SSR pin, PZEM UART and pins,
+button, and names.
+
+**Runs whose end was never reported.** A run stays open until the plug
+reports its end. If that report is lost, for example through a restart or a
+reflash, the appliance would stay "in use" on that outlet and exclusivity
+would refuse it on the other one. To prevent this, every recognition report
+lists the runs the plug is actually running. `recognize-appliance` then
+closes any other open run of that plug (`end_reason` NOT_RUNNING). It also
+closes runs from before a restart (REBOOT) and an earlier run on the same
+outlet (SUPERSEDED). If the end report arrives later, `log-session` still
+records it and counts the use. The app only shows "Running on Outlet X"
+while that outlet is actually drawing power.
+
+### Calibrating the outlets
+
+Two PZEM-004T modules can read the same load slightly differently. A sample
+from Outlet B must be comparable with a profile registered on Outlet A, so
+each outlet has calibration factors in `outlets` (`power_cal`,
+`voltage_cal`, `pf_cal`, default 1.0, allowed 0.8–1.2).
+`recognize-appliance` applies them to the plug's summary before matching or
+storing anything. The raw summary is kept in `outlet_sessions.raw_features`.
+`log-session` applies `power_cal` to the energy. This gives the same result
+as calibrating every reading on the plug: scaling every reading scales its
+average by the same factor, and ratios and times do not change.
+
+Procedure (once, and again after replacing a PZEM):
+
+1. Use a steady resistive load: an incandescent bulb, a kettle, a heater.
+   Not a fan or a charger, whose draw varies.
+2. Plug it into **Outlet A**. Wait about 30 s, then note V, W and PF on the
+   outlet card. Alternatively, read `raw_features` of the run:
+   `select outlet, raw_features from outlet_sessions order by started_at desc limit 2;`
+3. Unplug it, plug it into **Outlet B**, and note the same values.
+4. Compute the factors:
+   `node tool/calibrate.ts --a 230.4,60.2,1.00 --b 229.6,58.9,0.99`
+   (volts,watts,pf). Outlet A is the reference unless you add `--ref V,W,PF`
+   from a trusted meter. The tool prints the difference and the SQL.
+5. Run the printed `update public.outlets …` lines in the Supabase SQL editor.
+6. Calibrate **before** registering appliances. Samples registered before a
+   calibration change keep the old units. If a factor changes by more than
+   about 2 % (the power tolerance floor), register the affected appliances
+   again.
+
+A factor outside 0.8–1.2 points to a faulty meter, faulty wiring or an
+unsteady load. The tool refuses it, and so does the database.
+
 ## 6. Test plan
 
 **Automated tests:**
 - `node --test supabase/tests/matching.test.ts`: 20 tests, including the 9
   required scenarios. They also run under `deno test`.
-- `flutter test`: the prompts, guided registration and Appliances tab.
+- `node --test supabase/tests/shared_outlets.test.ts`: Outlet A and B as one
+  system:
+  - a Fan registered on A is recognised and confirmed on B
+  - plug-ins split over A and B make one profile
+  - the 7-use learning counts both outlets, and the learned limit applies on both
+  - exclusivity still applies
+  - a run left open on A does not block B
+  - the 30 min default is the same on both outlets
+  - the tie-breaker only pre-selects
+  - calibration
+- `node --test supabase/tests/stale_runs.test.ts`: closing runs whose end
+  was never reported.
+- `flutter test`: the prompts, guided registration and the Profiles tab (one list for both outlets, usage history with the outlet per run).
 - The plug's measurement state machine is tested in
   `test/recognition_window_test.cpp`. It runs with g++ on a PC.
 
@@ -257,13 +335,17 @@ correct answer. Registration plug-ins 2 and 3 are left out.
 
 ## 8. Deploying (order matters)
 
+From the 20261102000000 migration (calibration, shared usage history) the
+order is **migration first, then functions**. The new `recognize-appliance`
+and `log-session` read `outlets.power_cal` and write `raw_features`.
+
 ```powershell
-npx supabase functions deploy recognize-appliance register-sample confirm-match manage-appliance log-session
 npx supabase db push
+npx supabase functions deploy recognize-appliance register-sample confirm-match manage-appliance log-session
 npx supabase functions delete identify-appliance
 npx supabase functions delete confirm-appliance
 ```
 
-1. **Deploy the functions first:** the new `log-session` no longer uses
-   `active_sessions`, which the last migration drops.
+1. **(Already done) The 20261029050000 migration needed the functions first:** `log-session` no longer uses
+   `active_sessions`, which that migration dropped.
 2. **Delete the old functions last:** they belong to the removed k-NN design.

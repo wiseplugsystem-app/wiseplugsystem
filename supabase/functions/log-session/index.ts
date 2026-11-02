@@ -15,10 +15,13 @@ import { recordUse } from "../_shared/matching.ts";
 import { loadConfig } from "../_shared/recognition_db.ts";
 import { LEARNING_SESSIONS } from "../_shared/safety.ts";
 import { boundsFromBaseline, signatureColumns } from "../_shared/signature.ts";
+import { calibrationFromRow } from "../_shared/calibration.ts";
 
 const END_REASONS = ["APPLIANCE_OFF", "TURNED_OFF", "LOCKED_OUT", "RESET", "ENDED"];
 /** Typical use: the appliance or the user switched it off (a lock-out is not). */
 const NORMAL_ENDS = ["APPLIANCE_OFF", "TURNED_OFF"];
+// How recognize-appliance closes a run whose end was not reported (yet).
+const STALE_ENDS = ["SUPERSEDED", "REBOOT", "NOT_RUNNING"];
 
 function num(v: unknown, name: string, max: number): number {
   if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > max) {
@@ -53,6 +56,11 @@ serve(async (req) => {
     .update({ last_seen_at: new Date().toISOString() }).eq("id", deviceId).select("id").maybeSingle();
   if (deviceError) throw deviceError;
   if (!device) throw new HttpError(404, `Unknown device ${deviceId}; add it to the devices table`);
+  // Energy in the reference meter's units, as recognize-appliance stores power.
+  const { data: outletRow, error: outletError } = await db.from("outlets")
+    .select("power_cal, voltage_cal, pf_cal").eq("device_id", deviceId).eq("outlet", outlet).maybeSingle();
+  if (outletError) throw outletError;
+  const powerCal = calibrationFromRow(outletRow).power;
 
   // Keep a Postgres copy of the firmware's profile and learning progress.
   let applianceId: string | null = null;
@@ -109,9 +117,9 @@ serve(async (req) => {
     started_at: startedAt,
     ended_at: endedAt,
     duration_s: Math.trunc(num(body.durationS, "durationS", 604800 * 4)),
-    energy_wh: round(num(body.energyWh, "energyWh", 1e7), 3),
+    energy_wh: round(num(body.energyWh, "energyWh", 1e7) * powerCal, 3),
     peak_current_a: round(num(body.peakCurrentA ?? 0, "peakCurrentA", 100), 3),
-    peak_power_w: round(num(body.peakPowerW ?? 0, "peakPowerW", 25000), 2),
+    peak_power_w: round(num(body.peakPowerW ?? 0, "peakPowerW", 25000) * powerCal, 2),
     end_reason: endReason,
     counts_toward_learning: counts,
     learning_use: counts ? Math.min(Math.max(sessionCount, 1), LEARNING_SESSIONS) : null,
@@ -126,7 +134,21 @@ serve(async (req) => {
     .select("id, appliance_id, status").eq("device_id", deviceId).eq("outlet", outlet)
     .is("ended_at", null).lte("started_at", endedAt).order("started_at", { ascending: false }).limit(1).maybeSingle();
   if (openError) throw openError;
-  if (open) {
+  // recognize-appliance may already have closed this run as stale (its end
+  // arrived after the next run's report): it still ends here, and counts.
+  let run = open;
+  if (!run) {
+    const start = Date.parse(startedAt);
+    const { data: closed, error: closedError } = await db.from("outlet_sessions")
+      .select("id, appliance_id, status").eq("device_id", deviceId).eq("outlet", outlet)
+      .in("end_reason", STALE_ENDS)
+      .gte("started_at", new Date(start - 5000).toISOString()).lte("started_at", new Date(start + 5000).toISOString())
+      .limit(1).maybeSingle();
+    if (closedError) throw closedError;
+    run = closed;
+  }
+  if (run) {
+    const open = run;
     const { error } = await db.from("outlet_sessions").update({ ended_at: endedAt, end_reason: endReason }).eq("id", open.id);
     if (error) throw error;
     if (open.status === "MATCHED_CONFIRMED" && open.appliance_id && NORMAL_ENDS.includes(endReason)) {

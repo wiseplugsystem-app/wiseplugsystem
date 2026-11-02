@@ -51,11 +51,20 @@ constexpr const char* DEVICE_ID = "gadget-1";  // must match the app's DeviceBin
 //             HIGH at power-up or the ESP32 will not boot. An SSR input pulls
 //             it towards GND, which is safe; never add a pull-up to it.
 // (14 pulses during boot, 34 and 35 are input-only.)
-constexpr int RELAY_A_PIN = 13, RELAY_B_PIN = 12;
-constexpr uint8_t RELAY_A_ON = HIGH, RELAY_B_ON = HIGH;
-
-constexpr int PZEM_A_RX = 32, PZEM_A_TX = 33, PZEM_B_RX = 25, PZEM_B_TX = 26;
-constexpr int BUTTON_A_PIN = 4, BUTTON_B_PIN = 5;  // optional reset buttons to GND
+//
+// One row per outlet: the only things that differ between A and B. The rest
+// of the firmware (measurement, recognition, cutoff, safety) is one code path
+// for both, indexed 0 / 1.
+struct OutletHw {
+  const char *outlet, *key, *letter, *ns;  // Firebase name, Supabase name, app label, NVS namespace
+  int relay; uint8_t relayOn;              // SSR pin, and the level that switches it on
+  int button;                              // optional reset button to GND
+  HardwareSerial& port; int rx, tx;        // the outlet's PZEM-004T, on its own UART
+};
+const OutletHw OUTLET_HW[2] = {
+  {"outlet_A", "outlet_1", "A", "apps_a", 13, HIGH, 4, Serial2, 32, 33},
+  {"outlet_B", "outlet_2", "B", "apps_b", 12, HIGH, 5, Serial1, 25, 26},
+};
 
 // Plug-in: power above START_W_THRESHOLD. Unplug / switched off: power below
 // IDLE_W_THRESHOLD for UNPLUG_MS in a row (a single low reading is noise).
@@ -71,6 +80,10 @@ constexpr uint32_t DEFAULT_LIMIT_S = 30 * 60;
 // (appliance_instances.max_runtime_mins <= 10080).
 constexpr uint32_t MAX_CONFIRMED_LIMIT_S = 7 * 24 * 3600;
 constexpr uint64_t SENSOR_TIMEOUT_MS = 5000;
+// A meter that has not answered for this long has its serial link restarted
+// (again every METER_RESTART_MS while it stays silent): noise from a switching
+// load can leave the PZEM's UART stuck until then.
+constexpr uint64_t METER_RESTART_MS = 5000;
 // A recognition upload that fails (e.g. Wi-Fi reconnecting) is retried every
 // RECOGNITION_RETRY_MS for as long as its run lasts; it is dropped once the run
 // ends or a later stage of the same run is waiting. Meanwhile the run keeps
@@ -152,7 +165,8 @@ struct SocketChannel {
   float standbyW = 0;  // smoothed draw while idle (an appliance's standby)
 };
 
-PZEM004Tv30 pzemA(Serial2, PZEM_A_RX, PZEM_A_TX), pzemB(Serial1, PZEM_B_RX, PZEM_B_TX);
+PZEM004Tv30 meters[2] = {{OUTLET_HW[0].port, uint8_t(OUTLET_HW[0].rx), uint8_t(OUTLET_HW[0].tx)},
+                          {OUTLET_HW[1].port, uint8_t(OUTLET_HW[1].rx), uint8_t(OUTLET_HW[1].tx)}};
 SocketChannel outlets[2];
 char sessionID[40];
 
@@ -522,13 +536,14 @@ void handleCommand(SocketChannel& ch, const Command& cmd, uint64_t now) {
 // SENSOR TASK (core 0)
 // ==========================================
 void sensorTask(void*) {
-  PZEM004Tv30* meters[] = {&pzemA, &pzemB};
-  uint64_t lastWarning[2] = {0, 0};
+  uint64_t lastWarning[2] = {0, 0}, lastAnswer[2], lastRestart[2] = {0, 0};
+  bool restarted[2] = {false, false};
+  lastAnswer[0] = lastAnswer[1] = monotonicMs();
   for (;;) {
     for (int i = 0; i < 2; ++i) {
       SensorSample s;
-      s.power = meters[i]->power(); s.current = meters[i]->current(); s.voltage = meters[i]->voltage();
-      s.pf = meters[i]->pf(); s.energy = meters[i]->energy(); s.frequency = meters[i]->frequency();
+      s.power = meters[i].power(); s.current = meters[i].current(); s.voltage = meters[i].voltage();
+      s.pf = meters[i].pf(); s.energy = meters[i].energy(); s.frequency = meters[i].frequency();
       s.valid = isfinite(s.power) && s.power >= 0 && isfinite(s.current) && s.current >= 0 &&
                 isfinite(s.voltage) && s.voltage > 0 && isfinite(s.pf) && s.pf >= 0 && s.pf <= 1;
       s.captured = monotonicMs(); xQueueOverwrite(outlets[i].sensors, &s);
@@ -537,6 +552,19 @@ void sensorTask(void*) {
         lastWarning[i] = s.captured;
         Serial.printf("[%s] PZEM not responding (V=%.1f): check its RX/TX wiring, 5V/GND and mains supply\n",
                       outlets[i].outlet, s.voltage);
+      }
+      // Self-recovery: restart a silent meter's serial link.
+      if (s.valid) {
+        lastAnswer[i] = s.captured;
+        if (restarted[i]) Serial.printf("[%s] PZEM answering again\n", outlets[i].outlet);
+        restarted[i] = false;
+      } else if (s.captured - lastAnswer[i] >= METER_RESTART_MS && s.captured - lastRestart[i] >= METER_RESTART_MS) {
+        const auto& h = OUTLET_HW[i];
+        lastRestart[i] = s.captured; restarted[i] = true;
+        h.port.end();
+        h.port.begin(9600, SERIAL_8N1, h.rx, h.tx);
+        Serial.printf("[%s] PZEM silent for %llu s: serial link restarted\n", outlets[i].outlet,
+                      (unsigned long long)((s.captured - lastAnswer[i]) / 1000));
       }
     }
     vTaskDelay(pdMS_TO_TICKS(200));
@@ -638,9 +666,9 @@ void addStatus(JsonDocument& root, const Snapshot* s) {
   int64_t remainingMs = -1;  // -1: nothing running, so no limit applies
   for (int i = 0; i < 2; ++i) {
     auto st = s[i].safety.state;
-    root[b + (i == 0 ? "outletA" : "outletB")] = relayEnergized(st);
+    root[b + "outlet" + OUTLET_HW[i].letter] = relayEnergized(st);
     // Per-channel view, one object per outlet.
-    String o = b + (i == 0 ? "outlet_1/" : "outlet_2/");
+    String o = b + OUTLET_HW[i].key + "/";
     root[o + "relayOn"] = relayEnergized(st); root[o + "state"] = stateName(st);
     root[o + "appliance"] = s[i].activeProfileID[0] ? s[i].activeName : "None";
     if (s[i].sensor.valid && s[i].capturedMono - s[i].sensor.captured < SENSOR_TIMEOUT_MS) draw += s[i].sensor.power;
@@ -660,11 +688,11 @@ void addStatus(JsonDocument& root, const Snapshot* s) {
 // devices/gadget-1/live_telemetry/outlet_N: the sanitized readings of one
 // outlet. The whole node is replaced, so a value that turns invalid disappears.
 void addLiveTelemetry(JsonDocument& root, int i, const Snapshot& s) {
-  JsonObject o = root[String("devices/") + DEVICE_ID + "/live_telemetry/" + (i == 0 ? "outlet_1" : "outlet_2")]
+  JsonObject o = root[String("devices/") + DEVICE_ID + "/live_telemetry/" + OUTLET_HW[i].key]
       .to<JsonObject>();
   const auto& x = s.sensor;
   bool ok = x.valid && s.capturedMono - x.captured < SENSOR_TIMEOUT_MS;  // valid: finite, V > 0, 0 <= pf <= 1
-  o["deviceId"] = DEVICE_ID; o["outlet"] = i == 0 ? "outlet_1" : "outlet_2";
+  o["deviceId"] = DEVICE_ID; o["outlet"] = OUTLET_HW[i].key;
   o["timestamp"] = timestamp(s.capturedEpoch); o["timestamp_ms"] = s.capturedEpoch;
   o["relayOn"] = relayEnergized(s.safety.state); o["state"] = stateName(s.safety.state);
   o["appliance"] = s.activeProfileID[0] ? s.activeName : "None";
@@ -715,7 +743,7 @@ bool sendRecognition(const RecognitionReport& r) {
   int64_t start = datedAt(r.startEpoch, r.startMono);
   if (!start) return false;  // clock not set yet
   JsonDocument doc;
-  doc["deviceId"] = DEVICE_ID; doc["outlet"] = r.outlet == 0 ? "outlet_1" : "outlet_2";
+  doc["deviceId"] = DEVICE_ID; doc["outlet"] = OUTLET_HW[r.outlet].key;
   doc["eventId"] = r.eventID; doc["startedAt"] = start; doc["stage"] = r.stage;
   JsonObject x = doc["features"].to<JsonObject>();
   // At the meter's resolution: 0.1 W, 0.01 PF, 0.1 V.
@@ -751,7 +779,7 @@ void sendSupabase() {
     int64_t at = datedAt(r.at, r.mono);
     if (!at) break;
     JsonDocument doc;
-    doc["deviceId"] = DEVICE_ID; doc["outlet"] = r.outlet == 0 ? "outlet_1" : "outlet_2";
+    doc["deviceId"] = DEVICE_ID; doc["outlet"] = OUTLET_HW[r.outlet].key;
     doc["eventId"] = r.eventID; doc["type"] = r.type; doc["occurredAt"] = at;
     doc["profileId"] = ""; doc["applianceName"] = r.name;
     doc["runtimeS"] = r.runtimeS; doc["limitS"] = r.limitS; doc["baselineS"] = 0;
@@ -776,7 +804,7 @@ void sendSupabase() {
     int64_t end = datedAt(s.endEpoch, s.endMono);
     if (!end) break;
     JsonDocument doc;
-    doc["deviceId"] = DEVICE_ID; doc["outlet"] = s.outlet == 0 ? "outlet_1" : "outlet_2";
+    doc["deviceId"] = DEVICE_ID; doc["outlet"] = OUTLET_HW[s.outlet].key;
     doc["profileId"] = ""; doc["applianceName"] = s.name;
     doc["startedAt"] = s.startEpoch ? s.startEpoch : end - int64_t(s.durationS) * 1000;
     doc["endedAt"] = end; doc["durationS"] = s.durationS; doc["endReason"] = s.reason;
@@ -1003,7 +1031,7 @@ void sendEvents() {
   Event e;
   while (xQueuePeek(events, &e, 0) == pdTRUE) {
     JsonDocument doc;
-    doc["type"] = e.type; doc["outlet"] = e.outlet == 0 ? "A" : "B";
+    doc["type"] = e.type; doc["outlet"] = OUTLET_HW[e.outlet].letter;
     if (e.profileID[0]) doc["profileID"] = e.profileID;
     if (e.detail[0]) doc["detail"] = e.detail;
     if (e.at) doc["time"] = e.at; else doc["time"][".sv"] = "timestamp";
@@ -1019,11 +1047,11 @@ void sendNotices() {
   while (xQueuePeek(notices, &n, 0) == pdTRUE) {
     JsonDocument doc;
     doc["type"] = "SAFETY_TRIP"; doc["reason"] = n.reason;
-    doc["outlet"] = n.outlet == 0 ? "A" : "B"; doc["appliance"] = n.appliance;
+    doc["outlet"] = OUTLET_HW[n.outlet].letter; doc["appliance"] = n.appliance;
     doc["power_W"] = n.power; doc["current_A"] = n.current;
     doc["message"] = String(n.appliance) + (strcmp(n.reason, "OVERCURRENT") == 0
         ? " drew more current than the outlet is rated for" : " drew far more power than it normally does") +
-        ". Outlet " + (n.outlet == 0 ? "A" : "B") + " was locked down.";
+        ". Outlet " + OUTLET_HW[n.outlet].letter + " was locked down.";
     // Tripped before the clock was set: date it from the monotonic clock now.
     int64_t at = n.at ? n.at : epochMs() ? epochMs() - int64_t(monotonicMs() - n.mono) : 0;
     if (at) doc["time"] = at; else doc["time"][".sv"] = "timestamp";
@@ -1125,8 +1153,7 @@ void supabaseTask(void*) {
 // ==========================================
 void setup() {
   // Relays stay off until the persisted safety state is known.
-  digitalWrite(RELAY_A_PIN, !RELAY_A_ON); pinMode(RELAY_A_PIN, OUTPUT);
-  digitalWrite(RELAY_B_PIN, !RELAY_B_ON); pinMode(RELAY_B_PIN, OUTPUT);
+  for (const auto& h : OUTLET_HW) { digitalWrite(h.relay, !h.relayOn); pinMode(h.relay, OUTPUT); }
   Serial.begin(115200);
   events = xQueueCreate(16, sizeof(Event));
   notices = xQueueCreate(8, sizeof(Notice));
@@ -1138,14 +1165,12 @@ void setup() {
 #endif
   // The PZEM constructors open these ports before the core is fully started,
   // which is unreliable; open them again here so both meters respond.
-  Serial2.begin(9600, SERIAL_8N1, PZEM_A_RX, PZEM_A_TX);
-  Serial1.begin(9600, SERIAL_8N1, PZEM_B_RX, PZEM_B_TX);
+  for (const auto& h : OUTLET_HW) h.port.begin(9600, SERIAL_8N1, h.rx, h.tx);
   snprintf(sessionID, sizeof(sessionID), "%08lx%08lx", (unsigned long)esp_random(), (unsigned long)esp_random());
   for (int i = 0; i < 2; ++i) {
     auto& ch = outlets[i];
-    ch.ns = i == 0 ? "apps_a" : "apps_b"; ch.outlet = i == 0 ? "outlet_A" : "outlet_B";
-    ch.relay = i == 0 ? RELAY_A_PIN : RELAY_B_PIN; ch.relayOn = i == 0 ? RELAY_A_ON : RELAY_B_ON;
-    ch.button = i == 0 ? BUTTON_A_PIN : BUTTON_B_PIN;
+    const auto& h = OUTLET_HW[i];
+    ch.ns = h.ns; ch.outlet = h.outlet; ch.relay = h.relay; ch.relayOn = h.relayOn; ch.button = h.button;
     pinMode(ch.button, INPUT_PULLUP);
     ch.rawButton = ch.stableButton = digitalRead(ch.button); ch.buttonChanged = monotonicMs();
     ch.sensors = xQueueCreate(1, sizeof(SensorSample)); ch.commands = xQueueCreate(4, sizeof(Command));

@@ -133,10 +133,14 @@ class RegisteredAppliance {
   /// The outlet it is running on now (an open outlet session), or null.
   final String? runningOn;
 
+  /// Its runs, runtime and energy on both outlets combined, if known.
+  final ApplianceUsage? usage;
+
   RegisteredAppliance.fromRow(
     Map<String, dynamic> r, {
     required this.modes,
     this.runningOn,
+    this.usage,
   }) : id = r['id'].toString(),
        name = r['name'].toString(),
        typeName = _map(r['appliance_types'])['name']?.toString() ?? 'Appliance',
@@ -149,6 +153,37 @@ class RegisteredAppliance {
   /// It can be recognised once one of its modes has all its registration samples.
   bool isReady(int requiredSamples) =>
       modes.any((m) => m.sampleCount >= requiredSamples);
+}
+
+/// An appliance_usage row: one appliance's use on both outlets combined.
+class ApplianceUsage {
+  final int runs, runsOnA, runsOnB, totalRuntimeSeconds;
+  final double totalEnergyWh;
+  final DateTime? lastUsedAt;
+
+  ApplianceUsage.fromRow(Map<String, dynamic> r)
+    : runs = (r['runs'] as num?)?.toInt() ?? 0,
+      runsOnA = (r['runs_on_a'] as num?)?.toInt() ?? 0,
+      runsOnB = (r['runs_on_b'] as num?)?.toInt() ?? 0,
+      totalRuntimeSeconds = (r['total_runtime_s'] as num?)?.toInt() ?? 0,
+      totalEnergyWh = sensorNumber(r['total_energy_wh']) ?? 0,
+      lastUsedAt = DateTime.tryParse(r['last_used_at']?.toString() ?? '');
+}
+
+/// An appliance_runs row: one run of an appliance, on the outlet it was on.
+class ApplianceRun {
+  final String outlet;
+  final DateTime startedAt;
+  final DateTime? endedAt;
+  final int? durationSeconds;
+  final double? energyWh;
+
+  ApplianceRun.fromRow(Map<String, dynamic> r)
+    : outlet = outletLetter(r['outlet'].toString()),
+      startedAt = DateTime.parse(r['started_at'].toString()),
+      endedAt = DateTime.tryParse(r['ended_at']?.toString() ?? ''),
+      durationSeconds = (r['duration_s'] as num?)?.toInt(),
+      energyWh = sensorNumber(r['energy_wh']);
 }
 
 /// The numbers the app shows from recognition_config.

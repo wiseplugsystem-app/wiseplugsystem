@@ -53,7 +53,8 @@ class RecognitionService {
     return rows.isEmpty ? null : OutletSession.fromRow(rows.first);
   }
 
-  /// The user's appliances with their modes and where each is running.
+  /// The user's appliances with their modes, where each is running, and its
+  /// usage on both outlets combined.
   Future<List<RegisteredAppliance>> appliances() async {
     final results = await Future.wait([
       _db
@@ -69,7 +70,19 @@ class RecognitionService {
           .select('appliance_id, outlet')
           .isFilter('ended_at', null)
           .not('appliance_id', 'is', null),
+      // Optional: the view arrives with the 20261102000000 migration.
+      _db
+          .from('appliance_usage')
+          .select()
+          .then<List<Map<String, dynamic>>>(
+            (rows) => rows,
+            onError: (Object _) => <Map<String, dynamic>>[],
+          ),
     ]);
+    final usage = {
+      for (final u in results[3])
+        u['appliance_id'].toString(): ApplianceUsage.fromRow(u),
+    };
     final running = {
       for (final s in results[2])
         s['appliance_id'].toString(): s['outlet'].toString(),
@@ -83,8 +96,20 @@ class RecognitionService {
               if (p['appliance_id'] == r['id']) ApplianceMode.fromRow(p),
           ],
           runningOn: running[r['id'].toString()],
+          usage: usage[r['id'].toString()],
         ),
     ];
+  }
+
+  /// The newest runs of [applianceId] on either outlet, newest first.
+  Future<List<ApplianceRun>> runs(String applianceId, {int limit = 10}) async {
+    final rows = await _db
+        .from('appliance_runs')
+        .select()
+        .eq('appliance_id', applianceId)
+        .order('started_at', ascending: false)
+        .limit(limit);
+    return [for (final r in rows) ApplianceRun.fromRow(r)];
   }
 
   /// The user's appliance types ("Fan", "Charger"), for the registration form.
