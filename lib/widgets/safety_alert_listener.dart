@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../theme.dart';
+
 import '../models/appliance_icons.dart';
 import '../models/esp32_data.dart';
 import '../models/gadget_status.dart';
@@ -306,7 +308,9 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
                       fontSize: 96,
                       fontWeight: FontWeight.w800,
                       height: 1,
-                      color: seconds <= 10 ? Colors.red : null,
+                      color: seconds <= 10
+                          ? context.readable(Colors.red)
+                          : null,
                     ),
                   ),
                   const SizedBox(height: 6),
@@ -330,11 +334,11 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
                     style: TextStyle(fontSize: 28, fontWeight: FontWeight.w800),
                   ),
                   const SizedBox(height: 10),
-                  const Text(
+                  Text(
                     'The outlet was switched off for safety. Inspect the '
                     'appliance, then reset to switch it back on.',
                     textAlign: TextAlign.center,
-                    style: TextStyle(color: Colors.grey, height: 1.4),
+                    style: TextStyle(color: context.muted, height: 1.4),
                   ),
                 ],
                 // Which appliance, with its icon and name, on which outlet.
@@ -368,7 +372,7 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
                     child: Text(
                       _error!,
                       textAlign: TextAlign.center,
-                      style: const TextStyle(color: Colors.red),
+                      style: TextStyle(color: context.readable(Colors.red)),
                     ),
                   ),
                 const SizedBox(height: 24),

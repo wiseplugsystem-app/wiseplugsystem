@@ -74,6 +74,10 @@ class OutletReading {
   bool get isLockedOut =>
       currentState == 'LOCKED_OUT' || status == 'LOCKED_OUT';
   bool get isWarning => currentState == 'WARNING';
+
+  /// The outlet gives power (the plug switches it off when it is turned off
+  /// or locked out for safety).
+  bool get switchedOn => currentState != 'DISABLED' && !isLockedOut;
   int secondsRemaining(DateTime now) => countdownExpiry == null
       ? 0
       : ((countdownExpiry!.difference(now).inMilliseconds + 999) ~/ 1000).clamp(

@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../theme.dart';
+
 import '../models/activity_event.dart';
 import '../services/esp32_service.dart';
 
@@ -122,7 +124,7 @@ class _Message extends StatelessWidget {
       child: Text(
         text,
         textAlign: TextAlign.center,
-        style: const TextStyle(color: Colors.grey),
+        style: TextStyle(color: context.muted),
       ),
     ),
   );

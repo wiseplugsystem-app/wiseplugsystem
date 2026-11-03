@@ -3,6 +3,8 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 
+import '../theme.dart';
+
 import '../models/gadget_status.dart';
 import '../services/device_binding.dart';
 import '../services/esp32_service.dart';
@@ -141,12 +143,12 @@ class _WifiConfigScreenState extends State<WifiConfigScreen> {
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
       if (_status != null && !_online)
-        const Padding(
-          padding: EdgeInsets.only(bottom: 16),
+        Padding(
+          padding: const EdgeInsets.only(bottom: 16),
           child: Text(
             'The WisePlug is offline, so it cannot receive settings over the '
             'internet. Use "Nearby setup".',
-            style: TextStyle(color: Colors.orange),
+            style: TextStyle(color: context.readable(Colors.orange)),
           ),
         ),
       TextFormField(
@@ -192,10 +194,10 @@ class _WifiConfigScreenState extends State<WifiConfigScreen> {
         child: Text(_busy ? 'Sending…' : 'Send to WisePlug'),
       ),
       const SizedBox(height: 16),
-      const Text(
+      Text(
         'The WisePlug keeps the new network after every reboot. If it cannot '
         'join, it returns to its previous network within about 30 seconds.',
-        style: TextStyle(color: Colors.grey, fontSize: 12),
+        style: TextStyle(color: context.muted, fontSize: 16),
       ),
     ],
   );
@@ -277,6 +279,7 @@ class WifiProvisioningDialog extends StatelessWidget {
       return PopScope(
         canPop: done,
         child: AlertDialog(
+          scrollable: true, // long messages at large text sizes
           icon: icon == null
               ? const SizedBox.square(
                   dimension: 36,
@@ -509,7 +512,10 @@ class _NearbySetupPanelState extends State<NearbySetupPanel> {
           if (_error != null)
             Padding(
               padding: const EdgeInsets.only(top: 12),
-              child: Text(_error!, style: const TextStyle(color: Colors.red)),
+              child: Text(
+                _error!,
+                style: TextStyle(color: context.readable(Colors.red)),
+              ),
             ),
           const SizedBox(height: 16),
           FilledButton(
@@ -588,7 +594,7 @@ class _Step extends StatelessWidget {
                 const SizedBox(height: 6),
                 Text(
                   detail!,
-                  style: const TextStyle(color: Colors.grey, height: 1.4),
+                  style: TextStyle(color: context.muted, height: 1.4),
                 ),
               ],
             ],

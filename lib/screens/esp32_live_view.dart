@@ -1,6 +1,9 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+
+import '../theme.dart';
+
 import 'package:flutter/services.dart';
 
 import '../models/appliance_icons.dart';
@@ -422,7 +425,9 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                     children: [
                       Expanded(
                         child: _tab == 0
-                            ? const Align(
+                            // Shrinks to make room for "History" on a phone.
+                            ? const FittedBox(
+                                fit: BoxFit.scaleDown,
                                 alignment: Alignment.centerLeft,
                                 child: WisePlugLogo(fontSize: 34),
                               )
@@ -435,10 +440,29 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                               ),
                       ),
                       if (_tab == 0) ...[
-                        IconButton(
-                          tooltip: 'Activity',
-                          icon: const Icon(Icons.notifications_none),
-                          onPressed: _openActivity,
+                        // The history of everything that happened: a word
+                        // next to the bell, never the bell alone.
+                        // At most 45% of the row, at the right; it only
+                        // shrinks when the text is very large.
+                        ConstrainedBox(
+                          constraints: BoxConstraints(
+                            maxWidth: MediaQuery.sizeOf(context).width * .45,
+                          ),
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            alignment: Alignment.centerRight,
+                            child: TextButton.icon(
+                              onPressed: _openActivity,
+                              // The header's own text colour, not link blue.
+                              style: TextButton.styleFrom(
+                                foregroundColor: Theme.of(
+                                  context,
+                                ).colorScheme.onSurface,
+                              ),
+                              icon: const Icon(Icons.history),
+                              label: const Text('History'),
+                            ),
+                          ),
                         ),
                       ],
                     ],
@@ -505,10 +529,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
           _StatusChip(online: gadget != null),
           Text(
             '${DeviceBinding.gadgetId} · Dual outlet',
-            style: const TextStyle(
-              color: Colors.grey,
-              fontWeight: FontWeight.w600,
-            ),
+            style: TextStyle(color: context.muted, fontWeight: FontWeight.w600),
           ),
         ],
       ),
@@ -581,9 +602,9 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                   kind: _outletKind(_readings[key], now),
                 ),
               ),
-            const Text(
+            Text(
               _safetyNote,
-              style: TextStyle(fontSize: 12, color: Colors.grey),
+              style: TextStyle(fontSize: 16, color: context.muted),
             ),
           ],
         ),
@@ -649,17 +670,19 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
           children: [
             Text(
               'Is this $name?',
-              style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15),
+              style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 18),
             ),
             const SizedBox(height: 4),
             const Text(
               'Confirm it so WisePlug uses its own safety limit and counts this use.',
-              style: TextStyle(fontSize: 12),
+              style: TextStyle(fontSize: 16),
             ),
             const SizedBox(height: 10),
             FilledButton.icon(
               style: FilledButton.styleFrom(
-                backgroundColor: _green,
+                // Dark enough for white text (at least 4.5:1).
+                backgroundColor: readableOn(_green, Colors.white),
+                foregroundColor: Colors.white,
                 padding: const EdgeInsets.symmetric(vertical: 14),
               ),
               onPressed: () => _confirmProvisional(session),
@@ -679,7 +702,11 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
       return Padding(
         padding: const EdgeInsets.only(top: 10),
         child: FilledButton.icon(
-          style: FilledButton.styleFrom(backgroundColor: _amber),
+          // Dark text on amber (white on amber is too faint).
+          style: FilledButton.styleFrom(
+            backgroundColor: _amber,
+            foregroundColor: Colors.black87,
+          ),
           onPressed: () => _openPrompt(session),
           icon: const Icon(Icons.help_outline),
           label: const Text('Needs your answer'),
@@ -702,9 +729,9 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
         child: Text(
           text,
           style: TextStyle(
-            color: color,
+            color: context.readable(color),
             fontWeight: FontWeight.w700,
-            fontSize: 12,
+            fontSize: 16,
           ),
         ),
       ),
@@ -753,8 +780,8 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
               Expanded(
                 child: Text(
                   'Outlet $key',
-                  style: const TextStyle(
-                    color: Colors.grey,
+                  style: TextStyle(
+                    color: context.muted,
                     fontWeight: FontWeight.bold,
                   ),
                 ),
@@ -791,7 +818,35 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
             ],
           ),
           const SizedBox(height: 5),
-          Text(status, style: TextStyle(color: color)),
+          Text(status, style: TextStyle(color: context.readable(color))),
+          // On or off, in words and with an icon (not by colour alone).
+          if (fresh) ...[
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                Icon(
+                  reading!.switchedOn ? Icons.power : Icons.power_off,
+                  size: 22,
+                  color: context.muted,
+                ),
+                const SizedBox(width: 6),
+                Flexible(
+                  child: Text(
+                    // What the socket is doing, said plainly: on with
+                    // nothing running is "ready", not "power on".
+                    !reading.switchedOn
+                        ? reading.isLockedOut
+                              ? 'Turned off for safety'
+                              : 'Turned off'
+                        : connected
+                        ? 'In use'
+                        : 'Ready to use',
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ],
+            ),
+          ],
           // How long the appliance has been on: a timer that counts up every
           // second (the screen refreshes each second).
           if (start != null)
@@ -809,10 +864,10 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                   Expanded(
                     child: Text(
                       'On for ${_onFor(now.difference(start))}',
-                      style: const TextStyle(
-                        fontSize: 17,
+                      style: TextStyle(
+                        fontSize: 18,
                         fontWeight: FontWeight.w800,
-                        color: _blue,
+                        color: context.readable(_blue),
                       ),
                     ),
                   ),
@@ -837,7 +892,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                 ? 'Last updated: unknown'
                 : 'Last updated: ${_clockTime(reading.lastUpdated!, now)}'
                       '${fresh ? '' : ' · may be out of date'}',
-            style: const TextStyle(fontSize: 11, color: Colors.grey),
+            style: TextStyle(fontSize: 16, color: context.muted),
           ),
           _Pair(
             'Start',
@@ -886,18 +941,18 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                   Expanded(
                     child: Text(
                       _overrideNote,
-                      style: const TextStyle(fontSize: 12, height: 1.35),
+                      style: const TextStyle(fontSize: 16, height: 1.35),
                     ),
                   ),
                 ],
               ),
             ),
           if (!fresh)
-            const Padding(
+            Padding(
               padding: EdgeInsets.only(top: 8),
               child: Text(
                 'Live data unavailable',
-                style: TextStyle(fontSize: 11, color: Colors.grey),
+                style: TextStyle(fontSize: 16, color: context.muted),
               ),
             ),
         ],
@@ -915,7 +970,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
           ),
         ),
         const SizedBox(height: 8),
-        Text(label, style: const TextStyle(color: Colors.grey)),
+        Text(label, style: TextStyle(color: context.muted)),
       ],
     ),
   );
@@ -1080,7 +1135,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                         Text(_usageText(a)),
                         Text(
                           _whereText(a),
-                          style: const TextStyle(fontSize: 12),
+                          style: const TextStyle(fontSize: 16),
                         ),
                       ] else
                         Text(
@@ -1096,15 +1151,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                   trailing: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      if (_outletOf(a) == null)
-                        IconButton(
-                          tooltip: 'Delete appliance',
-                          icon: const Icon(
-                            Icons.delete_outline,
-                            color: Colors.red,
-                          ),
-                          onPressed: () => _deleteAppliance(context, a),
-                        ),
+                      // One action per row (open it); Delete is on its screen.
                       if (!narrow) _Badge(_applianceStatus(a, now)),
                       const Icon(Icons.chevron_right, color: Colors.grey),
                     ],
@@ -1202,7 +1249,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                         const SizedBox(height: 8),
                         Text(
                           'Type of Appliance: ${a.typeName}',
-                          style: const TextStyle(color: Colors.grey),
+                          style: TextStyle(color: context.muted),
                         ),
                         // Under the name, so a long name keeps its width.
                         const SizedBox(height: 10),
@@ -1260,7 +1307,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                 padding: const EdgeInsets.only(top: 10),
                 child: Text(
                   _registrationText(a),
-                  style: const TextStyle(fontSize: 12, color: Colors.grey),
+                  style: TextStyle(fontSize: 16, color: context.muted),
                 ),
               ),
             const SizedBox(height: 16),
@@ -1275,7 +1322,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                     child: Text(
                       'WisePlug sets the safety limit itself and learns this '
                       'appliance\'s typical use. $_safetyNote',
-                      style: TextStyle(fontSize: 12),
+                      style: TextStyle(fontSize: 16),
                     ),
                   ),
                 ],
@@ -1305,11 +1352,11 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
               ],
             ),
             if (outlet != null)
-              const Padding(
+              Padding(
                 padding: EdgeInsets.only(top: 8),
                 child: Text(
                   'Switch off or unplug this appliance to delete it.',
-                  style: TextStyle(fontSize: 12, color: Colors.grey),
+                  style: TextStyle(fontSize: 16, color: context.muted),
                 ),
               ),
           ],
@@ -1442,11 +1489,11 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
           ],
         ),
       ),
-      const Padding(
+      Padding(
         padding: EdgeInsets.only(top: 16),
         child: Text(
           'Device changes and newly learned appliances appear while the app is open. Safety push notifications require mobile notification permission.',
-          style: TextStyle(color: Colors.grey, fontSize: 12),
+          style: TextStyle(color: context.muted, fontSize: 16),
         ),
       ),
       const SizedBox(height: 24),
@@ -1500,9 +1547,14 @@ class _StatusChip extends StatelessWidget {
         children: [
           Icon(Icons.circle, size: 10, color: color),
           const SizedBox(width: 6),
-          Text(
-            online ? 'Online' : 'Offline',
-            style: TextStyle(color: color, fontWeight: FontWeight.w800),
+          Flexible(
+            child: Text(
+              online ? 'Online' : 'Offline',
+              style: TextStyle(
+                color: context.readable(color),
+                fontWeight: FontWeight.w800,
+              ),
+            ),
           ),
         ],
       ),
@@ -1528,7 +1580,7 @@ class _WifiHelpBanner extends StatelessWidget {
             Expanded(
               child: Text(
                 'Your WisePlug is offline',
-                style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800),
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
               ),
             ),
           ],
@@ -1590,10 +1642,13 @@ class _Pair extends StatelessWidget {
   const _Pair(this.label, this.value, {this.color});
   @override
   Widget build(BuildContext context) {
-    final labelText = Text(label, style: const TextStyle(color: Colors.grey));
+    final labelText = Text(label, style: TextStyle(color: context.muted));
     final valueText = Text(
       value,
-      style: TextStyle(fontWeight: FontWeight.w700, color: color),
+      style: TextStyle(
+        fontWeight: FontWeight.w700,
+        color: color == null ? null : context.readable(color!),
+      ),
     );
     final labelWidth = _PairLayout.of(context);
     return Padding(
@@ -1671,7 +1726,7 @@ class _Badge extends StatelessWidget {
     child: Text(
       status,
       style: TextStyle(
-        color: _statusColor(status),
+        color: context.readable(_statusColor(status)),
         fontWeight: FontWeight.bold,
       ),
     ),
@@ -1872,7 +1927,7 @@ class _PowerControlState extends State<_PowerControl> {
                               : on
                               ? 'On · monitoring enabled'
                               : 'Off · monitoring disabled'),
-                      style: const TextStyle(color: Colors.grey),
+                      style: TextStyle(color: context.muted),
                     ),
                   ],
                 ),
@@ -1913,7 +1968,7 @@ class _PowerControlState extends State<_PowerControl> {
             ],
           ),
           if (lit && !appliance && !_busy)
-            const Padding(
+            Padding(
               padding: EdgeInsets.only(top: 8, left: 4),
               child: Row(
                 children: [
@@ -1922,7 +1977,7 @@ class _PowerControlState extends State<_PowerControl> {
                   Expanded(
                     child: Text(
                       'Plug in an appliance to use this switch.',
-                      style: TextStyle(fontSize: 12, color: Colors.grey),
+                      style: TextStyle(fontSize: 16, color: context.muted),
                     ),
                   ),
                 ],
@@ -1943,7 +1998,7 @@ class _PowerControlState extends State<_PowerControl> {
                   const Expanded(
                     child: Text(
                       'Inspect the appliance, then reset to switch it back on.',
-                      style: TextStyle(fontSize: 12, height: 1.35),
+                      style: TextStyle(fontSize: 16, height: 1.35),
                     ),
                   ),
                   const SizedBox(width: 8),

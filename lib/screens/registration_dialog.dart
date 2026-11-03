@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../theme.dart';
+
 import '../models/appliance_icons.dart';
 import '../models/recognition.dart';
 import '../services/recognition_service.dart';
@@ -289,36 +291,50 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 480),
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(22),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Row(
-                children: [
-                  // A new load: a question mark; continuing: what it is.
-                  ApplianceIcon(
-                    _newAppliance ? unknownKind : _appliance!.kind,
-                    size: 24,
-                    label: title,
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      title,
-                      style: const TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.w800,
-                      ),
+        // The form scrolls; Not now / Register stay in view at the bottom.
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Flexible(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(22, 22, 22, 8),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        // A new load: a question mark; continuing: what it is.
+                        ApplianceIcon(
+                          _newAppliance ? unknownKind : _appliance!.kind,
+                          size: 24,
+                          label: title,
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            title,
+                            style: const TextStyle(
+                              fontSize: 20,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
-                  ),
-                ],
+                    const SizedBox(height: 16),
+                    ...(_tracker == null ? _formFields() : _progress()),
+                  ],
+                ),
               ),
-              const SizedBox(height: 16),
-              ...(_tracker == null ? _formFields() : _progress()),
-            ],
-          ),
+            ),
+            if (_tracker == null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(22, 8, 22, 18),
+                child: _formActions(),
+              ),
+          ],
         ),
       ),
     );
@@ -414,26 +430,26 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
       'this run, then you switch it off and on again (either outlet). '
       'Until then it runs on the '
       '${widget.settings.defaultCutoffMinutes}-minute safety limit.',
-      style: const TextStyle(color: Colors.grey, fontSize: 13),
-    ),
-    const SizedBox(height: 18),
-    // Side by side when they fit, stacked on a narrow phone.
-    OverflowBar(
-      alignment: MainAxisAlignment.end,
-      overflowAlignment: OverflowBarAlignment.end,
-      spacing: 8,
-      children: [
-        TextButton(
-          onPressed: () => Navigator.pop(context, false),
-          child: const Text('Not now'),
-        ),
-        FilledButton(
-          onPressed: _start,
-          child: Text(_newAppliance ? 'Register' : 'Continue'),
-        ),
-      ],
+      style: TextStyle(color: context.muted, fontSize: 16),
     ),
   ];
+
+  // Side by side when they fit, stacked on a narrow phone.
+  Widget _formActions() => OverflowBar(
+    alignment: MainAxisAlignment.end,
+    overflowAlignment: OverflowBarAlignment.end,
+    spacing: 8,
+    children: [
+      TextButton(
+        onPressed: () => Navigator.pop(context, false),
+        child: const Text('Not now'),
+      ),
+      FilledButton(
+        onPressed: _start,
+        child: Text(_newAppliance ? 'Register' : 'Continue'),
+      ),
+    ],
+  );
 
   /// One choice of the "What are you adding?" grid: its icon (48 dp) with
   /// its name under it.
@@ -472,7 +488,7 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
                 label,
                 textAlign: TextAlign.center,
                 style: TextStyle(
-                  fontSize: 13,
+                  fontSize: 16,
                   fontWeight: selected ? FontWeight.w800 : FontWeight.w500,
                 ),
               ),
@@ -541,7 +557,7 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
       Text(
         '$_collected of $_required samples',
         textAlign: TextAlign.center,
-        style: const TextStyle(color: Colors.grey),
+        style: TextStyle(color: context.muted),
       ),
       const SizedBox(height: 24),
       Icon(icon, size: 48, color: Theme.of(context).colorScheme.primary),
@@ -560,7 +576,7 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
         Text(
           _error!,
           textAlign: TextAlign.center,
-          style: const TextStyle(color: Colors.red),
+          style: TextStyle(color: context.readable(Colors.red)),
         ),
       ],
       const SizedBox(height: 20),
@@ -575,11 +591,11 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
           child: Text(_collected > 0 ? 'Finish later' : 'Cancel'),
         ),
       if (!_complete && _collected > 0)
-        const Text(
+        Text(
           'To continue later, plug it in again: the pop-up will offer it. '
           'Until all samples are saved, WisePlug cannot recognise it yet.',
           textAlign: TextAlign.center,
-          style: TextStyle(fontSize: 12, color: Colors.grey),
+          style: TextStyle(fontSize: 16, color: context.muted),
         ),
     ];
   }

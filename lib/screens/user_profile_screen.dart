@@ -1,6 +1,8 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
+import '../theme.dart';
+
 import '../services/auth_error.dart';
 import '../services/device_binding.dart';
 import '../services/esp32_service.dart';
@@ -192,7 +194,10 @@ class _DeleteAccountDialogState extends State<DeleteAccountDialog> {
           if (_error != null)
             Padding(
               padding: const EdgeInsets.only(top: 12),
-              child: Text(_error!, style: const TextStyle(color: Colors.red)),
+              child: Text(
+                _error!,
+                style: TextStyle(color: context.readable(Colors.red)),
+              ),
             ),
         ],
       ),

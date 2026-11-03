@@ -5,6 +5,8 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import '../theme.dart';
+
 import '../services/esp32_service.dart';
 import '../services/auth_error.dart';
 import '../services/supabase_backend.dart';
@@ -242,7 +244,10 @@ class _SignInState extends State<SignInScreen> {
                 ),
               ],
               if (_error != null)
-                Text(_error!, style: const TextStyle(color: Colors.red)),
+                Text(
+                  _error!,
+                  style: TextStyle(color: context.readable(Colors.red)),
+                ),
               const SizedBox(height: 16),
               FilledButton(
                 onPressed: _busy ? null : _login,

@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../theme.dart';
+
 import '../models/appliance_icons.dart';
 import '../models/recognition.dart';
 
@@ -106,10 +108,7 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
             if (s.status == RecognitionStatus.ambiguous) ..._choices(),
             if (_note() case final note?) ...[
               const SizedBox(height: 10),
-              Text(
-                note,
-                style: const TextStyle(fontSize: 12, color: Colors.grey),
-              ),
+              Text(note, style: TextStyle(fontSize: 16, color: context.muted)),
             ],
             const SizedBox(height: 14),
             _SafetyBanner(minutes: widget.defaultCutoffMinutes),
@@ -175,7 +174,7 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
           ],
         ),
         trailing: c.applianceId == s.suggested?.applianceId
-            ? const Text('Last used here', style: TextStyle(fontSize: 12))
+            ? const Text('Last used here', style: TextStyle(fontSize: 16))
             : null,
         onTap: () => setState(() => _selected = c.applianceId),
       ),
@@ -269,7 +268,7 @@ class _SafetyBanner extends StatelessWidget {
         Expanded(
           child: Text(
             'Using a $minutes-minute safety limit until you confirm what this is.',
-            style: const TextStyle(fontSize: 12),
+            style: const TextStyle(fontSize: 16),
           ),
         ),
       ],

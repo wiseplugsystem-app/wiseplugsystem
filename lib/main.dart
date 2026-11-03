@@ -12,6 +12,7 @@ import 'screens/settings_tab.dart';
 import 'screens/appliance_registration_screen.dart';
 import 'services/device_binding.dart';
 import 'services/supabase_backend.dart';
+import 'theme.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -43,16 +44,11 @@ class _WisePlugAppState extends State<WisePlugApp> {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       themeMode: darkMode ? ThemeMode.dark : ThemeMode.light,
-      theme: ThemeData(
-        useMaterial3: true,
-        colorSchemeSeed: Colors.blue,
-        scaffoldBackgroundColor: const Color(0xFFF2F2F2),
-      ),
-      darkTheme: ThemeData(
-        useMaterial3: true,
-        brightness: Brightness.dark,
-        colorSchemeSeed: Colors.blue,
-      ),
+      // Readable text, 48 dp buttons, readable colours (lib/theme.dart).
+      theme: wisePlugTheme(Brightness.light),
+      darkTheme: wisePlugTheme(Brightness.dark),
+      // Text fitted to the screen and capped at 1.3x (lib/theme.dart).
+      builder: fitTextToScreen,
       home: const bool.fromEnvironment('WISEPLUG_USE_FIRESTORE')
           ? WiseplugDeviceDashboard(
               deviceID: currentDeviceID,

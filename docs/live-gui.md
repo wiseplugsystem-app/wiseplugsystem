@@ -84,6 +84,36 @@ water dispenser (water drop). Icons are 24 dp in lists and 48 dp on Home and
 in the grid, in a darker blue (about 4.6:1 on white), with screen-reader
 labels.
 
+## Easy to read (in plain words)
+
+- **Text that fits your phone.** Normal text is 16 points, nothing is
+  smaller than 14. Text is a little smaller on narrow phones and full size
+  on tablets, so every screen looks the same on any phone. The app follows
+  your phone's text size setting up to 1.3 times bigger; beyond that it
+  stops growing so buttons and numbers stay on the screen.
+- **Clear colours.** All text stands out from its background (at least
+  4.5 to 1, the usual accessibility rule), in light and dark mode. Faint
+  grey text is now darker.
+- **Easy to tap.** Every button is at least 48 dp, about the size of a
+  fingertip.
+- **Words with pictures.** The bell on Home now says **History** (the list
+  of everything that happened). Each outlet says what it is doing in words,
+  not only in colour: **Ready to use** (on, nothing running), **In use**,
+  **Turned off** (you turned it off) or **Turned off for safety** (the
+  safety limit turned it off).
+- **One thing per row.** The Profiles list has no trash can; open an
+  appliance to delete it.
+- **Plain words.** Screens don't use technical words (server, power factor,
+  calibration, ESP32 and so on). Words we kept on purpose: outlet,
+  appliance profile, usage session, sample, and watts as numbers ("73 W").
+
+How it works: `lib/theme.dart` holds the text sizes, button sizes and the
+contrast check (`readableOn`, `context.readable`, `context.muted`) and the
+text fitting (`fitTextToScreen`, set as the app's `builder`), used by
+every screen. Tests (kept local): `readability_test.dart` (contrast, sizes,
+no technical words) and `responsive_test.dart` (a small phone at the
+largest text size). How to test with people: `docs/usability-test.md`.
+
 ## Deployment
 
 Deploy the updated database rules to permit each signed-in user to read/write their alert preferences. Deploy the updated functions to honor those preferences for safety push delivery. These changes do not alter device ownership requirements.
