@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../models/appliance_icons.dart';
 import '../models/esp32_data.dart';
 import '../models/gadget_status.dart';
 import '../services/esp32_service.dart';
@@ -282,7 +283,6 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
                 .map((r) => r.secondsRemaining(now))
                 .reduce((a, b) => a < b ? a : b)
           : 0;
-      final outlets = triggered.map((r) => 'Outlet ${r.outlet}').join(' & ');
       return Dialog(
         insetPadding: const EdgeInsets.all(20),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
@@ -337,12 +337,21 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
                     style: TextStyle(color: Colors.grey, height: 1.4),
                   ),
                 ],
-                if (outlets.isNotEmpty) ...[
-                  const SizedBox(height: 8),
-                  Text(
-                    outlets,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(color: Colors.grey),
+                // Which appliance, with its icon and name, on which outlet.
+                for (final r in triggered) ...[
+                  const SizedBox(height: 10),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      ApplianceIcon(_kindOf(r), size: 24, label: _nameOf(r)),
+                      const SizedBox(width: 10),
+                      Flexible(
+                        child: Text(
+                          '${_nameOf(r)} · Outlet ${r.outlet}',
+                          style: const TextStyle(fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                    ],
                   ),
                 ],
                 if (_busy)
@@ -403,6 +412,19 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
       );
     },
   );
+
+  /// The plug names the appliance it recognised; until then it says it does
+  /// not know it, which shows the question-mark icon.
+  static bool _known(OutletReading r) => !const {
+    '',
+    'None',
+    'Unknown appliance',
+    'Recognizing appliance',
+  }.contains(r.appliance);
+  static ApplianceKind _kindOf(OutletReading r) =>
+      _known(r) ? kindForType(r.appliance) : unknownKind;
+  static String _nameOf(OutletReading r) =>
+      _known(r) ? r.appliance : 'Unknown appliance';
 
   Widget _choice(
     String label,

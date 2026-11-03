@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../models/appliance_icons.dart';
 import '../models/recognition.dart';
 import '../services/recognition_service.dart';
 
@@ -151,6 +152,14 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
   late final _name = TextEditingController(text: widget.name ?? '');
   List<String> _types = [];
 
+  /// "Other" was picked: the type is typed in.
+  late bool _otherType =
+      (widget.typeName ?? '').isNotEmpty &&
+      !applianceKinds.any(
+        (k) => k.label.toLowerCase() == widget.typeName!.toLowerCase(),
+      );
+  String? _typeError;
+
   /// The appliance being continued (from the widget, or chosen here).
   late RegisteredAppliance? _appliance = widget.appliance;
 
@@ -184,7 +193,13 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
   }
 
   void _start() {
-    if (_newAppliance && !_form.currentState!.validate()) return;
+    if (_newAppliance) {
+      final noType = _type.text.trim().isEmpty;
+      setState(
+        () => _typeError = noType ? 'Choose what you are adding.' : null,
+      );
+      if (!_form.currentState!.validate() || noType) return;
+    }
     setState(() {
       _applianceId = _appliance?.id;
       _applianceName = _appliance?.name ?? _name.text.trim();
@@ -239,6 +254,8 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
         applianceId: _applianceId,
         typeName: first ? _type.text.trim() : null,
         name: first ? _name.text.trim() : null,
+        // Its type's icon (lib/models/appliance_icons.dart).
+        iconKey: first ? kindForType(_type.text.trim()).key : null,
       );
       tracker.recorded(run.eventId);
       if (!mounted) return;
@@ -280,11 +297,13 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
             children: [
               Row(
                 children: [
-                  Icon(
-                    Icons.new_releases_outlined,
-                    color: Theme.of(context).colorScheme.primary,
+                  // A new load: a question mark; continuing: what it is.
+                  ApplianceIcon(
+                    _newAppliance ? unknownKind : _appliance!.kind,
+                    size: 24,
+                    label: title,
                   ),
-                  const SizedBox(width: 10),
+                  const SizedBox(width: 12),
                   Expanded(
                     child: Text(
                       title,
@@ -326,31 +345,48 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            TextFormField(
-              controller: _type,
-              decoration: const InputDecoration(
-                labelText: 'Type of appliance',
-                hintText: 'e.g. Fan, Laptop charger',
-                border: OutlineInputBorder(),
-              ),
-              validator: (v) =>
-                  (v ?? '').trim().isEmpty ? 'Enter a type, e.g. Fan' : null,
+            const Text(
+              'What are you adding?',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
             ),
-            // The user's existing types: one tap reuses one ("Fan" for Fan 2).
-            if (_types.isNotEmpty)
+            const SizedBox(height: 10),
+            // Every standard appliance, then the user's own types, then Other.
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final k in applianceKinds) _typeTile(k.label, k),
+                for (final t in _types)
+                  if (!applianceKinds.any(
+                    (k) => k.label.toLowerCase() == t.toLowerCase(),
+                  ))
+                    _typeTile(t, kindForType(t)),
+                _typeTile(otherKind.label, otherKind, other: true),
+              ],
+            ),
+            if (_typeError != null)
               Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: Wrap(
-                  spacing: 8,
-                  children: [
-                    for (final t in _types)
-                      ActionChip(
-                        label: Text(t),
-                        onPressed: () => setState(() => _type.text = t),
-                      ),
-                  ],
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(
+                  _typeError!,
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
                 ),
               ),
+            if (_otherType) ...[
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _type,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  labelText: 'What is it?',
+                  hintText: 'e.g. Electric grill',
+                  border: OutlineInputBorder(),
+                ),
+                validator: (v) => (v ?? '').trim().isEmpty
+                    ? 'Write what it is, e.g. Electric grill'
+                    : null,
+              ),
+            ],
             const SizedBox(height: 14),
             TextFormField(
               controller: _name,
@@ -398,6 +434,54 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
       ],
     ),
   ];
+
+  /// One choice of the "What are you adding?" grid: its icon (48 dp) with
+  /// its name under it.
+  Widget _typeTile(String label, ApplianceKind kind, {bool other = false}) {
+    final selected = other
+        ? _otherType
+        : !_otherType && _type.text.trim().toLowerCase() == label.toLowerCase();
+    final scheme = Theme.of(context).colorScheme;
+    return Semantics(
+      button: true,
+      selected: selected,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: () => setState(() {
+          _typeError = null;
+          _otherType = other;
+          _type.text = other ? '' : label;
+        }),
+        child: Container(
+          width: 104,
+          padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 6),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: selected
+                  ? scheme.primary
+                  : Colors.grey.withValues(alpha: .35),
+              width: selected ? 2.5 : 1,
+            ),
+          ),
+          child: Column(
+            children: [
+              ApplianceIcon(kind, size: 48, label: label),
+              const SizedBox(height: 6),
+              Text(
+                label,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: selected ? FontWeight.w800 : FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 
   List<Widget> _progress() {
     final name = _applianceName.isEmpty ? 'the appliance' : _applianceName;

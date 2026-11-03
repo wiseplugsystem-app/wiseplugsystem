@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../models/appliance_icons.dart';
 import '../models/esp32_data.dart';
 import '../models/gadget_status.dart';
 import '../models/recognition.dart';
@@ -470,8 +471,8 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
               label: 'Home',
             ),
             NavigationDestination(
-              icon: Icon(Icons.person_outline),
-              selectedIcon: Icon(Icons.person, color: _blue),
+              icon: Icon(Icons.devices_other_outlined),
+              selectedIcon: Icon(Icons.devices_other, color: _blue),
               label: 'Profiles',
             ),
             NavigationDestination(
@@ -577,6 +578,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                   now: now,
                   on: gadget?.outlet(key),
                   applianceName: _applianceName(_readings[key], now),
+                  kind: _outletKind(_readings[key], now),
                 ),
               ),
             const Text(
@@ -587,6 +589,26 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
         ),
       ),
     ];
+  }
+
+  /// What runs on an outlet, for its icon: the recognised appliance's type,
+  /// the question-mark "unknown" while WisePlug does not know it, null when
+  /// nothing runs.
+  ApplianceKind? _outletKind(OutletReading? reading, DateTime now) {
+    if (_readError || reading?.hasConnectedAppliance(now) != true) return null;
+    final session = _sessions[reading!.outlet];
+    final matched =
+        session != null &&
+        (session.status == RecognitionStatus.provisional ||
+            session.status == RecognitionStatus.confirmed);
+    if (!matched) return unknownKind;
+    for (final a in _appliances) {
+      if (a.id == session.applianceId) return a.kind;
+    }
+    for (final c in session.candidates) {
+      if (c.applianceId == session.applianceId) return kindForType(c.typeName);
+    }
+    return kindForType(session.applianceName ?? reading.appliance);
   }
 
   /// Display name for the appliance running on an outlet, or null when none.
@@ -741,15 +763,32 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
             ],
           ),
           const SizedBox(height: 16),
-          Text(
-            connected
-                ? _applianceName(reading, now)!
-                : fresh && reading?.sensorValid == false
-                ? 'Meter not responding'
-                : fresh
-                ? 'No appliance detected'
-                : 'Waiting for device',
-            style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w800),
+          Row(
+            children: [
+              if (connected) ...[
+                ApplianceIcon(
+                  _outletKind(reading, now) ?? unknownKind,
+                  size: 48,
+                  label: _applianceName(reading, now),
+                ),
+                const SizedBox(width: 14),
+              ],
+              Expanded(
+                child: Text(
+                  connected
+                      ? _applianceName(reading, now)!
+                      : fresh && reading?.sensorValid == false
+                      ? 'Meter not responding'
+                      : fresh
+                      ? 'No appliance detected'
+                      : 'Waiting for device',
+                  style: const TextStyle(
+                    fontSize: 19,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+            ],
           ),
           const SizedBox(height: 5),
           Text(status, style: TextStyle(color: color)),
@@ -1026,11 +1065,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                     horizontal: 16,
                     vertical: 8,
                   ),
-                  leading: _ApplianceIcon(
-                    type: '${a.typeName} ${a.name}',
-                    compact: true,
-                    color: _statusColor(_applianceStatus(a, now)),
-                  ),
+                  leading: ApplianceIcon(a.kind, size: 24, label: a.name),
                   title: Text(
                     a.name,
                     style: const TextStyle(fontWeight: FontWeight.w700),
@@ -1151,7 +1186,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
             _Panel(
               child: Row(
                 children: [
-                  _ApplianceIcon(type: '${a.typeName} ${a.name}'),
+                  ApplianceIcon(a.kind, size: 40, label: a.name),
                   const SizedBox(width: 14),
                   Expanded(
                     child: Column(
@@ -1643,37 +1678,6 @@ class _Badge extends StatelessWidget {
   );
 }
 
-class _ApplianceIcon extends StatelessWidget {
-  /// Type or name; the icon is guessed from keywords in it.
-  final String? type;
-  final Color color;
-  final bool compact;
-  const _ApplianceIcon({this.type, this.color = _blue, this.compact = false});
-  @override
-  Widget build(BuildContext context) {
-    final normalized = type?.toLowerCase() ?? '';
-    final icon = normalized.contains('fan')
-        ? Icons.air
-        : normalized.contains('iron')
-        ? Icons.iron
-        : normalized.contains('cooker') || normalized.contains('rice')
-        ? Icons.rice_bowl
-        : normalized.contains('kettle')
-        ? Icons.coffee_maker_outlined
-        : normalized.contains('lamp') || normalized.contains('light')
-        ? Icons.lightbulb_outline
-        : Icons.power;
-    return Container(
-      padding: EdgeInsets.all(compact ? 9 : 13),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: .12),
-        borderRadius: BorderRadius.circular(compact ? 14 : 18),
-      ),
-      child: Icon(icon, color: color, size: compact ? 22 : 27),
-    );
-  }
-}
-
 class _PowerControl extends StatefulWidget {
   final Esp32Service service;
   final OutletReading? reading;
@@ -1685,6 +1689,9 @@ class _PowerControl extends StatefulWidget {
 
   /// Registered or recognized appliance on this outlet; null when empty.
   final String? applianceName;
+
+  /// Its icon: its type, or "unknown" while not recognised; null when empty.
+  final ApplianceKind? kind;
   const _PowerControl({
     required this.service,
     required this.reading,
@@ -1692,6 +1699,7 @@ class _PowerControl extends StatefulWidget {
     required this.now,
     this.on,
     this.applianceName,
+    this.kind,
   });
   @override
   State<_PowerControl> createState() => _PowerControlState();
@@ -1834,7 +1842,11 @@ class _PowerControlState extends State<_PowerControl> {
         children: [
           Row(
             children: [
-              _ApplianceIcon(type: widget.applianceName),
+              ApplianceIcon(
+                widget.kind ?? kindOfKey(null),
+                size: 24,
+                label: widget.applianceName ?? 'Outlet ${widget.outlet}',
+              ),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(

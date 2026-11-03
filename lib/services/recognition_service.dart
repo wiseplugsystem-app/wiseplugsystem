@@ -60,7 +60,7 @@ class RecognitionService {
           .from('appliance_instances')
           .select(
             'id, name, max_runtime_mins, is_learned, use_count, '
-            'baseline_runtime_s, last_outlet, appliance_types(name)',
+            'baseline_runtime_s, last_outlet, appliance_types(name, icon_key)',
           )
           .order('name'),
       _db.from('appliance_profiles').select().order('mode_name'),
@@ -115,12 +115,14 @@ class RecognitionService {
     String? applianceId,
     String? typeName,
     String? name,
+    String? iconKey,
   }) async => RegistrationProgress.fromJson(
     await _invoke('register-sample', {
       'eventId': eventId,
       'applianceId': ?applianceId,
       'typeName': ?typeName,
       'name': ?name,
+      'iconKey': ?iconKey,
     }),
   );
 

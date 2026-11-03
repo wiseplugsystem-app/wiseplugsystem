@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../models/appliance_icons.dart';
 import '../models/recognition.dart';
 
 /// What the user answered in a recognition prompt.
@@ -70,20 +71,12 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
   @override
   Widget build(BuildContext context) {
     final outlet = 'Outlet ${s.outletName}';
-    final (title, icon) = switch (s.status) {
-      RecognitionStatus.sameTypeInUse => (
+    final title = switch (s.status) {
+      RecognitionStatus.sameTypeInUse =>
         'Another ${s.registerAs?.typeName ?? 'appliance'}?',
-        Icons.devices_other,
-      ),
-      RecognitionStatus.ambiguous => (
-        'Which appliance is on $outlet?',
-        Icons.help_outline,
-      ),
-      RecognitionStatus.provisional => (
-        'Is this ${s.applianceName ?? 'it'}?',
-        Icons.check_circle_outline,
-      ),
-      _ => ('New appliance on $outlet', Icons.new_releases_outlined),
+      RecognitionStatus.ambiguous => 'Which appliance is on $outlet?',
+      RecognitionStatus.provisional => 'Is this ${s.applianceName ?? 'it'}?',
+      _ => 'New appliance on $outlet',
     };
     return SafeArea(
       child: Padding(
@@ -94,8 +87,9 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
           children: [
             Row(
               children: [
-                Icon(icon, color: Theme.of(context).colorScheme.primary),
-                const SizedBox(width: 10),
+                // What it is (or a question mark while WisePlug does not know).
+                ApplianceIcon(_kind(), size: 24, label: title),
+                const SizedBox(width: 12),
                 Expanded(
                   child: Text(
                     title,
@@ -137,6 +131,19 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
     _ => s.promptText ?? 'New appliance detected. Register it?',
   };
 
+  /// The appliance the question is about, for its icon.
+  ApplianceKind _kind() => switch (s.status) {
+    RecognitionStatus.sameTypeInUse => kindForType(s.registerAs?.typeName),
+    RecognitionStatus.provisional => kindForType(
+      s.candidates
+              .where((c) => c.applianceId == s.applianceId)
+              .firstOrNull
+              ?.typeName ??
+          s.applianceName,
+    ),
+    _ => unknownKind, // a new or unsure load
+  };
+
   /// Why WisePlug asks, in the honest terms of the rules.
   String? _note() => switch (s.status) {
     RecognitionStatus.sameTypeInUse =>
@@ -160,7 +167,13 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
               ? Theme.of(context).colorScheme.primary
               : null,
         ),
-        title: Text(c.name),
+        title: Row(
+          children: [
+            ApplianceIcon(kindForType(c.typeName), size: 24, label: c.name),
+            const SizedBox(width: 10),
+            Expanded(child: Text(c.name)),
+          ],
+        ),
         trailing: c.applianceId == s.suggested?.applianceId
             ? const Text('Last used here', style: TextStyle(fontSize: 12))
             : null,

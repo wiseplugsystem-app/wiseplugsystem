@@ -2,7 +2,7 @@
 //
 // Guided registration: the user names the appliance and plugs it in
 // registration_samples times (3). Each run is one call:
-//   first run:   { deviceId, eventId, typeName, name }  creates the appliance
+//   first run:   { deviceId, eventId, typeName, name, iconKey? }  creates the appliance
 //                and its first mode profile ("Normal")
 //   next runs:   { deviceId, eventId, applianceId }      the profile still
 //                collecting samples (the first, or a mode WisePlug started)
@@ -58,12 +58,17 @@ serve(async (req) => {
     // Types are unique per user ignoring case ("fan" is "Fan").
     const { data: types, error: typesError } = await db.from("appliance_types").select("*").eq("owner_uid", uid);
     if (typesError) throw typesError;
+    // Its icon ("What are you adding?"); the app maps unknown keys to "Other".
+    const iconKey = typeof body.iconKey === "string" && /^[a-z_]{1,32}$/.test(body.iconKey) ? body.iconKey : null;
     let type = types.find((t) => String(t.name).toLowerCase() === typeName.toLowerCase());
     if (!type) {
       const { data, error } = await db.from("appliance_types")
-        .insert({ device_id: deviceId, owner_uid: uid, name: typeName }).select("*").single();
+        .insert({ device_id: deviceId, owner_uid: uid, name: typeName, icon_key: iconKey }).select("*").single();
       if (error) throw error;
       type = data;
+    } else if (!type.icon_key && iconKey) {
+      const { error } = await db.from("appliance_types").update({ icon_key: iconKey }).eq("id", type.id);
+      if (error) throw error;
     }
     const name = text(body.name, 63);
     if (!name) throw new HttpError(400, "name is required, e.g. Fan 2");

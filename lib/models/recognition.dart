@@ -1,6 +1,7 @@
 // Rule-based appliance recognition as the app sees it: the run on each outlet
 // (Supabase outlet_sessions, written by recognize-appliance) and the user's
 // registered appliances with their mode profiles.
+import 'appliance_icons.dart';
 import 'esp32_data.dart' show sensorNumber;
 
 /// recognize-appliance's verdict on the run on one outlet.
@@ -123,6 +124,9 @@ class ApplianceMode {
 /// A registered appliance (an appliance_instances row) and its modes.
 class RegisteredAppliance {
   final String id, name, typeName;
+
+  /// Its type's icon (appliance_types.icon_key), if stored.
+  final String? typeIconKey;
   final int cutoffMinutes;
   final bool isLearned;
   final int useCount;
@@ -140,11 +144,15 @@ class RegisteredAppliance {
   }) : id = r['id'].toString(),
        name = r['name'].toString(),
        typeName = _map(r['appliance_types'])['name']?.toString() ?? 'Appliance',
+       typeIconKey = _map(r['appliance_types'])['icon_key']?.toString(),
        cutoffMinutes = (r['max_runtime_mins'] as num?)?.toInt() ?? 30,
        isLearned = r['is_learned'] == true,
        useCount = (r['use_count'] as num?)?.toInt() ?? 0,
        baselineRuntimeSeconds = (r['baseline_runtime_s'] as num?)?.toInt(),
        lastOutlet = r['last_outlet'] as String?;
+
+  /// What it is, for its icon (lib/models/appliance_icons.dart).
+  ApplianceKind get kind => kindForType(typeName, iconKey: typeIconKey);
 
   /// It can be recognised once one of its modes has all its registration samples.
   bool isReady(int requiredSamples) =>

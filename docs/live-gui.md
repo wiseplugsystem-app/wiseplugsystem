@@ -55,6 +55,35 @@ sender (`supabase/functions/_shared/google.ts`). The Firebase function
 `safetyAlert` (needs the paid Blaze plan, not deployed) still names the
 default sound.
 
+## Appliance icons (in plain words)
+
+- **Every appliance shows a picture of what it is**: a fan, a rice cooker,
+  an iron, a TV and so on, always with its name next to it.
+- **When you add an appliance**, you pick what it is from pictures ("What
+  are you adding?"). If it is not there, tap **Other** and write what it is.
+- **All appliances of the same type share the same picture**, so all your
+  fans look alike.
+- **A question mark** means WisePlug does not know the appliance yet (new,
+  or not sure). It changes to the right picture once it is recognised.
+- **Other** appliances show a general electrical picture.
+
+Where: Home (each outlet at 48 dp, and Power Control), the Profiles list and
+each appliance's screen, the "What are you adding?" grid (48 dp), the
+recognition questions, and the safety warning. Push notifications use the
+app icon (phones allow one small single-colour icon there).
+
+How it works: one mapping file, `lib/models/appliance_icons.dart`: each
+standard type has a key, a label and a Material Icon (built into Flutter,
+Apache 2.0, see `CREDITS.md`). The key is stored per type in
+`appliance_types.icon_key` (migration `20261104000000_appliance_icons.sql`)
+and sent by registration (`register-sample`, `iconKey`). Types without a key
+are matched by the words in their name; anything else is "Other". Closest
+icons (the set has no exact one): fan (wind), kettle (coffee maker), air
+fryer (grill), induction cooker (countertop), hair dryer (drying hands),
+water dispenser (water drop). Icons are 24 dp in lists and 48 dp on Home and
+in the grid, in a darker blue (about 4.6:1 on white), with screen-reader
+labels.
+
 ## Deployment
 
 Deploy the updated database rules to permit each signed-in user to read/write their alert preferences. Deploy the updated functions to honor those preferences for safety push delivery. These changes do not alter device ownership requirements.
