@@ -197,10 +197,17 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
   void _start() {
     if (_newAppliance) {
       final noType = _type.text.trim().isEmpty;
+      // "Other" typed as an aircon is refused too.
+      final tooBig = unsupportedKinds.contains(kindForType(_type.text).key);
       setState(
-        () => _typeError = noType ? 'Choose what you are adding.' : null,
+        () => _typeError = noType
+            ? 'Choose what you are adding.'
+            : tooBig
+            ? 'WisePlug cannot power this: it needs more than '
+                  '$maxApplianceText.'
+            : null,
       );
-      if (!_form.currentState!.validate() || noType) return;
+      if (!_form.currentState!.validate() || noType || tooBig) return;
     }
     setState(() {
       _applianceId = _appliance?.id;
@@ -365,13 +372,20 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
               'What are you adding?',
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
             ),
+            const SizedBox(height: 4),
+            // The hardware's limit, before the user picks.
+            Text(
+              'Up to $maxApplianceText: check the label on the appliance.',
+              style: TextStyle(fontSize: 16, color: context.muted),
+            ),
             const SizedBox(height: 10),
             // Every standard appliance, then the user's own types, then Other.
             Wrap(
               spacing: 8,
               runSpacing: 8,
               children: [
-                for (final k in applianceKinds) _typeTile(k.label, k),
+                for (final k in applianceKinds)
+                  if (canAdd(k)) _typeTile(k.label, k),
                 for (final t in _types)
                   if (!applianceKinds.any(
                     (k) => k.label.toLowerCase() == t.toLowerCase(),
@@ -458,6 +472,8 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
         ? _otherType
         : !_otherType && _type.text.trim().toLowerCase() == label.toLowerCase();
     final scheme = Theme.of(context).colorScheme;
+    // Its usual power, so the user can compare it with the limit.
+    final watts = other ? null : wattRangeText(kind.key);
     return Semantics(
       button: true,
       selected: selected,
@@ -492,6 +508,12 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
                   fontWeight: selected ? FontWeight.w800 : FontWeight.w500,
                 ),
               ),
+              if (watts != null)
+                Text(
+                  watts,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 14, color: context.muted),
+                ),
             ],
           ),
         ),

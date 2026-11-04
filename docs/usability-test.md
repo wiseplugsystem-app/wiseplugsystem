@@ -37,7 +37,7 @@ gives up twice.
 | 3 | "Plug in this new appliance and add it to the app." | They answer "What are you adding?" and the appliance shows in Appliance Profiles. |
 | 4 | "The fan has been on a long time. When the phone warns you, decide what to do." | They read the warning and choose to keep it on or let it turn off, on purpose. |
 | 5 | "The WisePlug turned the fan off for safety. Turn it back on." | They reset the outlet and the fan runs again. |
-| 6 | "Find out what happened to the fan today." | They open History and point to the warning or the cutoff. |
+| 6 | "Find out how long the fan may stay on before WisePlug turns it off." | They open the fan in Appliance Profiles and read its Safety limit. |
 
 ## What to write down for each task
 

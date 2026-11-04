@@ -96,8 +96,7 @@ labels.
   grey text is now darker.
 - **Easy to tap.** Every button is at least 48 dp, about the size of a
   fingertip.
-- **Words with pictures.** The bell on Home now says **History** (the list
-  of everything that happened). Each outlet says what it is doing in words,
+- **Words, not only colours.** Each outlet says what it is doing in words,
   not only in colour: **Ready to use** (on, nothing running), **In use**,
   **Turned off** (you turned it off) or **Turned off for safety** (the
   safety limit turned it off).
@@ -113,6 +112,69 @@ text fitting (`fitTextToScreen`, set as the app's `builder`), used by
 every screen. Tests (kept local): `readability_test.dart` (contrast, sizes,
 no technical words) and `responsive_test.dart` (a small phone at the
 largest text size). How to test with people: `docs/usability-test.md`.
+
+## Measuring appliances (in plain words)
+
+- **What it is for:** measuring real appliances on WisePlug to build the
+  thesis dataset and check how well recognition works.
+- **Only use what the plug can carry:** appliances whose label says **8 A or
+  1,760 W or less** (with the heatsinks fitted). Never an aircon. Above that
+  the plug turns the outlet off after 10 seconds.
+- **Stay with heating appliances** the whole time, never run a microwave
+  empty (heat a cup of water), and keep a switch within reach to cut power
+  by hand.
+- **Each appliance and each setting:** 3 plug-ins to register it (2 on
+  Outlet A, 1 on B), then 10 tests on A and 10 on B, each left on at least
+  90 seconds. Irons, rice cookers and fridges also get one 10-minute log.
+- **Write every run in the recording sheet** (date, time, outlet, which
+  appliance, which setting). The plug measures the rest by itself.
+- **The analysis** makes the tables and charts for the thesis from your
+  measurements only.
+
+How it works: `docs/measurement-guide.md` (the full steps, safety and
+references), `measurements/recording_sheet_template.csv`,
+`tool/measure_log.ts` (10-minute logs from the plug's live readings, about
+every 3 s) and `tool/measure_analyze.ts` (export from Supabase, then the
+report and charts in `measurements/results/`).
+
+## What WisePlug can power (in plain words)
+
+- **Appliances up to 1,760 W (8 A).** Look at the label on the appliance. Most
+  fans, TVs, chargers, rice cookers, irons and microwaves fit.
+- **Above that, WisePlug turns the outlet off** after 10 seconds and locks it,
+  and at once above 10 A. A motor's short start-up surge does not count.
+- **These cannot be added:** aircon, electric kettle, hair dryer, induction
+  cooker and washing machine. They can draw more than the plug can carry.
+- **When you add an appliance**, the pictures are: electric fan, rice cooker,
+  flat iron, microwave, TV, refrigerator, phone charger and laptop charger,
+  each with its usual power (for example "30–100 W" for a fan). Anything else
+  goes under **Other**. The app refuses any appliance it measures above
+  1,760 W, whatever you call it.
+
+How it works: `CONTINUOUS_CURRENT_A` (8 A) and `OVERLOAD_MS` (10 s) next to
+`MAX_CURRENT_A` (10 A) in the firmware; the outlet trips with the existing
+OVERCURRENT reason, so the server and database are unchanged. In the app,
+`maxApplianceWatts`, `applianceWatts` (each type's usual range, from the owner's list) and `unsupportedKinds` (the types whose range goes above the limit) in `lib/models/appliance_icons.dart`; on the server, `recognition_config.max_appliance_w` (migration `20261105010000_appliance_power_limit.sql`) and `tooPowerful` in register-sample.
+The limit assumes the SSR-40DA sits on its heatsink with thermal paste.
+
+## Heating appliances (in plain words)
+
+- **Appliances that make heat get a shorter time limit.** A kettle may stay
+  on 15 minutes, a hair dryer 15, a microwave 30, an iron, air fryer or
+  heater 60, and a rice cooker 90. Other appliances keep
+  their normal limit.
+- **You still get the 60-second warning** before WisePlug turns it off, and
+  you can keep it on if you are there.
+- **You don't set anything:** WisePlug knows from the picture you chose when
+  you added the appliance (or from its name, like "heater").
+- **A water dispenser is not limited:** its hot water is made to stay on all
+  day.
+
+How it works: the `heating_safe_times` table (migration
+`20261105000000_heating_safe_times.sql`) holds the minutes for each type. A
+heating type's default is its limit, and an appliance is never allowed more
+(a shorter time stays shorter). Changing a row updates every type and
+appliance. Why these numbers: docs/scope.md, section 3.
 
 ## Deployment
 

@@ -23,7 +23,7 @@
 import { deviceIdOf, firebaseUser, requireOwner } from "../_shared/auth.ts";
 import { db } from "../_shared/db.ts";
 import { HttpError, json, readJson, serve } from "../_shared/http.ts";
-import { type Appliance, confirmedCutoffS } from "../_shared/matching.ts";
+import { type Appliance, confirmedCutoffS, tooPowerful } from "../_shared/matching.ts";
 import {
   insertSample,
   loadAppliance,
@@ -48,6 +48,11 @@ serve(async (req) => {
   // A registration sample needs the full measurement (power variation, cycling).
   if (session.stage < 2) throw new HttpError(409, "Keep it running: WisePlug finishes measuring about 60 s after switch-on.");
   const features = sessionFeatures(session);
+  // Above what the plug can carry: never registered (the plug cuts it off).
+  if (tooPowerful(features, config)) {
+    throw new HttpError(409, `This appliance uses ${Math.round(features.avg_power_w!)} W, more than WisePlug ` +
+      `can safely power (${config.maxApplianceW} W). Unplug it: it cannot be registered.`);
+  }
   // The appliance: an existing one (its next plug-in), or a new one.
   let appliance: Appliance;
   if (body.applianceId) {

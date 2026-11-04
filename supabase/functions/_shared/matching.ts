@@ -94,6 +94,8 @@ export interface Config {
   learnedMargin: number;
   minLearnedCutoffS: number;
   minSessionS: number;
+  /** recognition_config.max_appliance_w: above it an appliance is not registered. */
+  maxApplianceW: number;
 }
 
 type Row = Record<string, unknown>;
@@ -136,6 +138,8 @@ export function configFromRow(r: Row): Config {
     learnedMargin: n("learned_margin"),
     minLearnedCutoffS: n("min_learned_cutoff_minutes") * 60,
     minSessionS: n("min_session_s"),
+    // Older rows (and the tools' fixed settings) without it: the plug's limit.
+    maxApplianceW: Number.isFinite(Number(r.max_appliance_w)) ? Number(r.max_appliance_w) : 1760,
   };
 }
 
@@ -249,6 +253,13 @@ export function evaluateProfile(x: Features, a: Appliance, p: Profile, stage: St
     voltageCorrected: power !== x.avg_power_w,
   };
 }
+
+/**
+ * Too much for WisePlug's hardware (above max_appliance_w, 80 % of the
+ * plug's 10 A): such an appliance is not registered.
+ */
+export const tooPowerful = (x: Features, c: Config): boolean =>
+  has(x.avg_power_w) && x.avg_power_w > c.maxApplianceW;
 
 /** A profile is matched only after its registration plug-ins are complete. */
 export const isReady = (p: Profile, c: Config) => p.sampleCount >= c.registrationSamples && has(p.mean.avg_power_w);

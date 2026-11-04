@@ -93,12 +93,17 @@ constexpr uint64_t RECOGNITION_RETRY_MS = 5000;
 constexpr uint32_t MIN_SESSION_S = 10;           // shorter runs are not reported as usage
 constexpr float OVERRIDE_BUFFER = 0.20f;         // override: +20% safety buffer
 // Electrical trips lock the outlet out at once: no countdown, no override.
-// MAX_CURRENT_A is the hardware rating (relay/SSR contacts, wiring, socket);
-// lower it to match the weakest part. A CONFIRMED appliance drawing
+// MAX_CURRENT_A is the hardware rating (socket 10 A 250 V, SSR, wiring): above
+// it the outlet is cut off on the first reading. CONTINUOUS_CURRENT_A is the
+// most a load may draw for longer than OVERLOAD_MS: 80 % of the rating, the
+// rule for loads that stay on (the SSR-40DA on its heatsink). A motor's
+// start-up surge is far shorter, so it does not count. Lower both to match the
+// weakest part. A CONFIRMED appliance drawing
 // ANOMALY_FACTOR x its own steady power (measured in this run) for
 // ANOMALY_SAMPLES readings in a row (~0.6 s, so a short surge does not count)
 // is a fault.
-constexpr float MAX_CURRENT_A = 10.0f, ANOMALY_FACTOR = 2.0f;
+constexpr float MAX_CURRENT_A = 10.0f, CONTINUOUS_CURRENT_A = 8.0f, ANOMALY_FACTOR = 2.0f;
+constexpr uint64_t OVERLOAD_MS = 10000;
 constexpr uint32_t ANOMALY_SAMPLES = 3;
 
 // Live telemetry for the app: devices/gadget-1/live_telemetry/outlet_N,
@@ -144,6 +149,7 @@ struct SocketChannel {
   uint8_t relayOn;  // pin level that switches the outlet on (SSR: HIGH)
   Snapshot data;
   uint32_t anomalySamples = 0;
+  uint64_t overloadSince = 0;  // first reading above CONTINUOUS_CURRENT_A in a row (0: none)
   uint64_t buttonChanged = 0, lastSnapshot = 0;
   bool rawButton = true, stableButton = true, storageOK = true;
   QueueHandle_t sensors, commands, snapshots;
@@ -383,7 +389,7 @@ void trip(SocketChannel& ch, const char* reason, const SensorSample& s, uint64_t
   snprintf(a.id, sizeof(a.id), "%s_%s_%lu", sessionID, ch.outlet, (unsigned long)ch.data.safety.revision + 1);
   strlcpy(a.type, reason, sizeof(a.type));
   a.trigger = a.expiry = n.at;
-  ch.anomalySamples = 0;
+  ch.anomalySamples = 0; ch.overloadSince = 0;
   Serial.printf("[%s] TRIP %s: %.1f W, %.2f A\n", ch.outlet, reason, s.power, s.current);
   reportSafety(ch, reason, a.id, s.power, s.current);
   ch.tripping = true;  // one report per trip, not a second LOCKED_OUT
@@ -393,6 +399,10 @@ void trip(SocketChannel& ch, const char* reason, const SensorSample& s, uint64_t
 // Checked on every reading while the relay is on, in any running state.
 bool electricalTrip(SocketChannel& ch, const SensorSample& s, uint64_t now) {
   if (s.current > MAX_CURRENT_A) { trip(ch, "OVERCURRENT", s, now); return true; }
+  // Too much for the hardware to carry for long (e.g. a 2,000 W kettle).
+  if (s.current <= CONTINUOUS_CURRENT_A) ch.overloadSince = 0;
+  else if (!ch.overloadSince) ch.overloadSince = now;
+  else if (now - ch.overloadSince >= OVERLOAD_MS) { trip(ch, "OVERCURRENT", s, now); return true; }
   // Only for a confirmed appliance, against its own steady power in this run
   // (a provisional or unknown load may legitimately change its draw).
   const auto& d = ch.data;
@@ -444,6 +454,7 @@ void handleSensor(SocketChannel& ch, const SensorSample& sample, uint64_t now) {
   }
   auto state = d.safety.state;
   if (relayEnergized(state) && electricalTrip(ch, sample, now)) return;
+  if (!relayEnergized(state)) ch.overloadSince = 0;  // counts only while it is on
   if (state == SocketState::Disabled || state == SocketState::LockedOut || state == SocketState::Warning) return;
   if (state == SocketState::Idle) {
     if (sample.power <= START_W_THRESHOLD) return;

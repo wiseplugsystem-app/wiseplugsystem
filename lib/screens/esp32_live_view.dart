@@ -14,7 +14,6 @@ import '../services/device_binding.dart';
 import '../services/esp32_service.dart';
 import '../services/recognition_service.dart';
 import '../widgets/wiseplug_logo.dart';
-import 'activity_screen.dart';
 import 'esp32_dashboard.dart';
 import 'recognition_prompt.dart';
 import 'registration_dialog.dart';
@@ -425,7 +424,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                     children: [
                       Expanded(
                         child: _tab == 0
-                            // Shrinks to make room for "History" on a phone.
+                            // Shrinks to fit a narrow phone at large text.
                             ? const FittedBox(
                                 fit: BoxFit.scaleDown,
                                 alignment: Alignment.centerLeft,
@@ -439,32 +438,6 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                                 ),
                               ),
                       ),
-                      if (_tab == 0) ...[
-                        // The history of everything that happened: a word
-                        // next to the bell, never the bell alone.
-                        // At most 45% of the row, at the right; it only
-                        // shrinks when the text is very large.
-                        ConstrainedBox(
-                          constraints: BoxConstraints(
-                            maxWidth: MediaQuery.sizeOf(context).width * .45,
-                          ),
-                          child: FittedBox(
-                            fit: BoxFit.scaleDown,
-                            alignment: Alignment.centerRight,
-                            child: TextButton.icon(
-                              onPressed: _openActivity,
-                              // The header's own text colour, not link blue.
-                              style: TextButton.styleFrom(
-                                foregroundColor: Theme.of(
-                                  context,
-                                ).colorScheme.onSurface,
-                              ),
-                              icon: const Icon(Icons.history),
-                              label: const Text('History'),
-                            ),
-                          ),
-                        ),
-                      ],
                     ],
                   ),
                   const SizedBox(height: 28),
@@ -1509,18 +1482,6 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
       ),
     ];
   }
-
-  // Live alerts are raised app-wide by SafetyAlertListener; the bell opens
-  // the persistent history.
-  void _openActivity() => Navigator.of(context).push(
-    MaterialPageRoute<void>(
-      builder: (_) => ActivityScreen(
-        service: widget.service,
-        // Appliance IDs in the history are Supabase appliance IDs.
-        nameFor: (id) => _appliancesNamed[id],
-      ),
-    ),
-  );
 
   void _openWifiSetup() => Navigator.of(context).push(
     MaterialPageRoute<void>(

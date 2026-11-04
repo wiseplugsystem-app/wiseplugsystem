@@ -79,6 +79,60 @@ const applianceKinds = <ApplianceKind>[
   ]),
 ];
 
+/// What WisePlug's hardware can carry (socket 10 A 250 V, SSR-40DA on a
+/// heatsink): 8 A for a load that stays on, 80 % of 10 A. The plug enforces
+/// it (CONTINUOUS_CURRENT_A in the firmware); the app says it in words.
+const maxApplianceWatts = 1760;
+
+/// [maxApplianceWatts] as people read it: "1,760 W".
+final maxApplianceText = '${wattsText(maxApplianceWatts)} W';
+
+/// The usual power of each type, lowest to highest setting (W), from the
+/// owner's appliance list (the chargers: typical adapter ratings). Unverified
+/// estimates, shown as a guide on the "What are you adding?" tiles; the label
+/// and WisePlug's own measurement decide. Only types listed here, and within
+/// [maxApplianceWatts], can be picked (see [canAdd]).
+const applianceWatts = <String, (int, int)>{
+  'fan': (30, 100),
+  'rice_cooker': (30, 700), // keep warm 30-50 W, cooking up to 700 W
+  'flat_iron': (400, 1500),
+  'microwave': (400, 1500),
+  'kettle': (1200, 3000),
+  'tv': (50, 150),
+  'phone_charger': (5, 30),
+  'laptop_charger': (30, 100),
+  'refrigerator': (100, 400),
+  'hair_dryer': (500, 3000),
+  'induction_cooker': (300, 3000),
+  'washing_machine': (300, 2200), // up to 2,200 W with its water heater
+  'aircon': (800, 2000),
+};
+
+/// "30–100 W", "1,200–3,000 W".
+String wattsText(int w) =>
+    w < 1000 ? '$w' : '${w ~/ 1000},${(w % 1000).toString().padLeft(3, '0')}';
+String? wattRangeText(String key) {
+  final r = applianceWatts[key];
+  return r == null ? null : '${wattsText(r.$1)}–${wattsText(r.$2)} W';
+}
+
+/// A standard type the user can pick in "What are you adding?": it has a
+/// listed range, within what WisePlug can carry. Anything else goes under
+/// "Other" (and is still refused if measured above the limit).
+bool canAdd(ApplianceKind kind) {
+  final range = applianceWatts[kind.key];
+  return range != null && range.$2 <= maxApplianceWatts;
+}
+
+/// Kinds WisePlug cannot power: their range goes above [maxApplianceWatts]
+/// (aircon, hair dryer, induction cooker, washing machine, electric kettle).
+/// They keep their icon (for names like "Aircon") but cannot be added; an
+/// appliance measured above the limit is refused too (register-sample).
+final unsupportedKinds = {
+  for (final MapEntry(:key, value: (_, max)) in applianceWatts.entries)
+    if (max > maxApplianceWatts) key,
+};
+
 /// Any other appliance: a general electrical icon.
 const otherKind = ApplianceKind(
   'other',
