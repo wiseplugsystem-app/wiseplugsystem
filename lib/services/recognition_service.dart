@@ -116,6 +116,8 @@ class RecognitionService {
     String? typeName,
     String? name,
     String? iconKey,
+    List<String>? levels,
+    String? level,
   }) async => RegistrationProgress.fromJson(
     await _invoke('register-sample', {
       'eventId': eventId,
@@ -123,6 +125,9 @@ class RecognitionService {
       'typeName': ?typeName,
       'name': ?name,
       'iconKey': ?iconKey,
+      // A new appliance's settings, and the one this sample is for.
+      'levels': ?levels,
+      'level': ?level,
     }),
   );
 

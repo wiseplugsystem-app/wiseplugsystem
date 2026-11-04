@@ -23,7 +23,7 @@
 import { deviceIdOf, firebaseUser, requireOwner } from "../_shared/auth.ts";
 import { db } from "../_shared/db.ts";
 import { HttpError, json, readJson, serve } from "../_shared/http.ts";
-import { type Appliance, confirmedCutoffS, tooPowerful } from "../_shared/matching.ts";
+import { type Appliance, confirmedCutoffS, type Profile, requiredSamples, tooPowerful } from "../_shared/matching.ts";
 import {
   insertSample,
   loadAppliance,
@@ -33,6 +33,23 @@ import {
 } from "../_shared/recognition_db.ts";
 
 const text = (v: unknown, max: number) => (typeof v === "string" && v.trim() ? v.trim().slice(0, max) : null);
+
+/** Settings in their list order; profiles without a place last. */
+const byLevel = (a: Profile, b: Profile) => (a.levelPosition ?? 99) - (b.levelPosition ?? 99);
+
+/** At most this many settings per appliance ("Speed 1" … ). */
+const MAX_LEVELS = 6;
+/** The settings of a new appliance, in order: unique names, 1..40 characters. */
+function levelNames(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  const out: string[] = [];
+  for (const x of v) {
+    const name = text(x, 40);
+    if (name && !out.some((o) => o.toLowerCase() === name.toLowerCase())) out.push(name);
+  }
+  if (out.length > MAX_LEVELS) throw new HttpError(400, `At most ${MAX_LEVELS} settings`);
+  return out;
+}
 
 serve(async (req) => {
   const body = await readJson(req);
@@ -85,26 +102,70 @@ serve(async (req) => {
     if (error?.code === "23505") throw new HttpError(409, `"${name}" already exists; choose another name.`);
     if (error) throw error;
     appliance = await loadAppliance(uid, created.id);
+    // Its settings ("Speed 1", "Speed 2"…, or "Cook", "Keep warm"): one
+    // profile each, samples_per_level samples each, in the order given.
+    const levels = levelNames(body.levels);
+    if (levels.length) {
+      const { error: levelError } = await db.from("appliance_profiles").insert(levels.map((l, i) => ({
+        appliance_id: created.id, mode_name: l, required_samples: config.samplesPerLevel, level_position: i,
+      })));
+      if (levelError) throw levelError;
+      appliance = await loadAppliance(uid, created.id);
+    }
   }
 
-  // The profile still collecting samples; a new appliance starts with "Normal".
-  let profile = appliance.profiles.find((p) => p.sampleCount < config.registrationSamples);
-  let profileId = profile?.id;
-  if (!profileId) {
-    if (appliance.profiles.length) {
-      throw new HttpError(409, `${appliance.name} is already fully registered.`);
-    }
-    const { data, error } = await db.from("appliance_profiles")
-      .insert({ appliance_id: appliance.id, mode_name: "Normal" }).select("id").single();
-    if (error) throw error;
-    profileId = data.id as string;
+  // Which setting this sample is for: the one the app names ("Speed 2"), a
+  // new one (an "Other" appliance's extra setting), or else the first still
+  // collecting. An appliance registered before settings starts with "Normal".
+  const need = (p: Profile) => requiredSamples(p, config);
+  const level = text(body.level, 40);
+  let profile: Profile | undefined = level
+    ? appliance.profiles.find((p) => p.modeName.toLowerCase() === level.toLowerCase())
+    : [...appliance.profiles].sort(byLevel).find((p) => p.sampleCount < need(p));
+  if (profile && profile.sampleCount >= need(profile)) {
+    throw new HttpError(409, `${appliance.name} already has its ${profile.modeName} sample.`);
   }
-  const modeName = profile?.modeName ?? "Normal";
+  let profileId = profile?.id;
+  let required = profile ? need(profile) : config.registrationSamples;
+  if (!profileId) {
+    if (level) {
+      if (appliance.profiles.length >= MAX_LEVELS) {
+        throw new HttpError(409, `${appliance.name} already has ${MAX_LEVELS} settings.`);
+      }
+      const { data, error } = await db.from("appliance_profiles").insert({
+        appliance_id: appliance.id, mode_name: level, required_samples: config.samplesPerLevel,
+        level_position: Math.min(9, appliance.profiles.length),
+      }).select("id").single();
+      if (error) throw error;
+      profileId = data.id as string;
+      required = config.samplesPerLevel;
+    } else {
+      if (appliance.profiles.length) {
+        throw new HttpError(409, `${appliance.name} is already fully registered.`);
+      }
+      const { data, error } = await db.from("appliance_profiles")
+        .insert({ appliance_id: appliance.id, mode_name: "Normal" }).select("id").single();
+      if (error) throw error;
+      profileId = data.id as string;
+    }
+  }
+  const modeName = profile?.modeName ?? level ?? "Normal";
   if (!(await insertSample(profileId, features, "registration", session.event_id))) {
     throw new HttpError(409, "This run is already recorded for that appliance; unplug it and plug it in again.");
   }
   const stats = await recomputeProfile(profileId);
-  profile = { id: profileId, modeName: profile?.modeName ?? modeName, ...stats };
+  const before = profile;
+  profile = { ...before, id: profileId, modeName, ...stats, requiredSamples: required };
+  // Every setting and its samples, in order (this one updated).
+  const others = appliance.profiles.filter((p) => p.id !== profileId && p.requiredSamples != null);
+  const levels = [...others, profile].sort(byLevel).map((p) => ({
+    name: p.modeName,
+    collected: Math.min(p.sampleCount, need(p)),
+    required: need(p),
+  }));
+  const collected = levels.reduce((a, l) => a + l.collected, 0);
+  const requiredAll = levels.reduce((a, l) => a + l.required, 0);
+  const nextLevel = levels.find((l) => l.collected < l.required)?.name ?? null;
 
   // The user has just said what this load is: it is confirmed, and it is the
   // ground truth of this run for recognition_evaluation (even if it ended).
@@ -120,7 +181,7 @@ serve(async (req) => {
       profile_id: profileId,
       cutoff_s: cutoffS,
       sample_recorded: true,
-      prompt_text: `Registered ${appliance.name}: sample ${stats.sampleCount} of ${config.registrationSamples}.`,
+      prompt_text: `Registered ${appliance.name}: ${modeName}, sample ${collected} of ${requiredAll}.`,
       candidates: { candidates: [], applianceName: appliance.name, modeName: profile.modeName, reason: "Registered by the user" },
     }).eq("id", session.id);
     if (error?.code === "23505") {
@@ -135,9 +196,11 @@ serve(async (req) => {
   return json({
     appliance: { id: appliance.id, name: appliance.name, type: appliance.typeName },
     profile: { id: profileId, modeName: profile.modeName },
-    samplesCollected: stats.sampleCount,
-    samplesRequired: config.registrationSamples,
-    complete: stats.sampleCount >= config.registrationSamples,
+    samplesCollected: collected,
+    samplesRequired: requiredAll,
+    complete: collected >= requiredAll,
+    levels,
+    nextLevel,
     cutoffS,
   }, 201);
 });

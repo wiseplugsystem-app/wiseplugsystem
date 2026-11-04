@@ -175,8 +175,31 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
   String? _error;
   Timer? _timer;
 
+  /// A fan's number of speeds (1 to 4).
+  int _speeds = 3;
+
+  /// An "Other" appliance's own settings, after its first one.
+  final _extraLevels = <String>[];
+
+  /// The setting the next sample is for (null: the old 3-sample way).
+  String? _level;
+
   bool get _newAppliance => _appliance == null;
-  int get _required => widget.settings.registrationSamples;
+  int get _legacy => widget.settings.registrationSamples;
+
+  /// What is being added, from the picture chosen or the words typed.
+  ApplianceKind get _kind => kindForType(_type.text.trim());
+
+  /// The settings to sample, in order: the type's ("Speed 1", "Speed 2"…),
+  /// or, for one being finished, the ones it was registered with.
+  List<String> get _levels => _newAppliance
+      ? [...levelsFor(_kind, speeds: _speeds), ..._extraLevels]
+      : [for (final m in _appliance!.levels) m.name];
+
+  /// Samples in all: one for each setting (samples_per_level).
+  int get _required => _newAppliance
+      ? _levels.length * widget.settings.samplesPerLevel
+      : _appliance!.samplesNeeded(_legacy);
 
   @override
   void initState() {
@@ -212,11 +235,8 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
     setState(() {
       _applianceId = _appliance?.id;
       _applianceName = _appliance?.name ?? _name.text.trim();
-      _collected = _appliance == null
-          ? 0
-          : _appliance!.modes
-                .map((m) => m.sampleCount)
-                .fold(_required, (a, b) => a < b ? a : b);
+      _collected = _appliance == null ? 0 : _appliance!.samplesDone(_legacy);
+      _level = _newAppliance ? _levels.first : _appliance!.nextLevel;
       _tracker = RegistrationTracker(
         startedAt: DateTime.now().toUtc(),
         initialEventId: widget.fromSession?.eventId,
@@ -265,6 +285,8 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
         name: first ? _name.text.trim() : null,
         // Its type's icon (lib/models/appliance_icons.dart).
         iconKey: first ? kindForType(_type.text.trim()).key : null,
+        levels: first ? _levels : null,
+        level: _level,
       );
       tracker.recorded(run.eventId);
       if (!mounted) return;
@@ -273,6 +295,7 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
         _applianceName = progress.applianceName;
         _collected = progress.samplesCollected;
         _complete = progress.complete;
+        _level = progress.nextLevel;
         _step = RegistrationStep.switchOff;
         _error = null;
       });
@@ -357,8 +380,8 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
           child: OutlinedButton(
             onPressed: () => setState(() => _appliance = a),
             child: Text(
-              'It is ${a.name}: continue registering '
-              '(${a.modes.map((m) => m.sampleCount).fold(_required, (x, y) => x < y ? x : y)} of $_required)',
+              'It is ${a.name}: continue '
+              '(${a.samplesDone(_legacy)} of ${a.samplesNeeded(_legacy)} done)',
             ),
           ),
         ),
@@ -429,14 +452,16 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
                   ? 'Give it a name you will recognise'
                   : null,
             ),
+            ..._levelsSection(),
           ],
         ),
       ),
     ] else
       Text(
         'Turn ${_appliance!.name} on and off '
-        '${_required - _appliance!.modes.map((m) => m.sampleCount).fold(_required, (x, y) => x < y ? x : y)} '
-        'more times, so WisePlug knows it.',
+        '${_required - _appliance!.samplesDone(_legacy)} more '
+        '${_required - _appliance!.samplesDone(_legacy) == 1 ? 'time' : 'times'}, '
+        'so WisePlug knows it.',
       ),
     const SizedBox(height: 14),
     ..._howItWorks(),
@@ -478,20 +503,20 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
       step(3, Icons.power_off, 'Turn it off.'),
       const SizedBox(height: 10),
       Text(
-        'Do this $_required times. Each time, use a different setting:',
+        _required == 1
+            ? 'Do this 1 time.'
+            : _levels.length > 1
+            ? 'Do this $_required times, one time for each setting:'
+            : 'Do this $_required times.',
         style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
       ),
+      if (_levels.length > 1) ...[
+        const SizedBox(height: 4),
+        Text(_levels.join('  →  '), style: const TextStyle(fontSize: 16)),
+      ],
       const SizedBox(height: 4),
       Text(
-        [
-          for (var i = 1; i <= _required; i++)
-            '${_ordinal(i)} time: ${_settingWord(i)}',
-        ].join(' · '),
-        style: const TextStyle(fontSize: 16),
-      ),
-      const SizedBox(height: 4),
-      Text(
-        'Only one setting? Use it every time. Outlet A or B, both work.',
+        'Outlet A or B, both work.',
         style: TextStyle(color: context.muted, fontSize: 16),
       ),
       const SizedBox(height: 6),
@@ -576,24 +601,84 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
     );
   }
 
-  /// The setting for sample [n]: lowest first, highest last, so WisePlug
-  /// sees every way the appliance runs.
-  String _settingWord(int n) => n == 1
-      ? 'low'
-      : n >= _required
-      ? 'high'
-      : 'medium';
-  String _settingHint(int n) => n == 1
-      ? 'Use the lowest setting, like Low or 1'
-      : n >= _required
-      ? 'Use the highest setting, like High or 3'
-      : 'Use a middle setting, like Medium or 2';
-  static String _ordinal(int n) => switch (n) {
-    1 => '1st',
-    2 => '2nd',
-    3 => '3rd',
-    _ => '${n}th',
+  /// What to do for the setting [level], before "(sample 1 of 3)".
+  static String _levelHint(String? level) => switch (level) {
+    null || 'Normal' => '',
+    'Charging' => 'Charge a phone or laptop with it. ',
+    _ => 'Set it to $level. ',
   };
+
+  /// The settings WisePlug will take a sample of: a fan's number of speeds
+  /// can be chosen, and an "Other" appliance can get more settings.
+  List<Widget> _levelsSection() {
+    if (_type.text.trim().isEmpty && !_otherType) return const [];
+    final kind = _kind;
+    final fan = kind.key == 'fan';
+    final charger = kind.key == 'laptop_charger' || kind.key == 'phone_charger';
+    final canAddMore = kind == otherKind && _levels.length < maxLevels;
+    return [
+      const SizedBox(height: 16),
+      Text(
+        fan ? 'How many speeds does it have?' : 'Its settings:',
+        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+      ),
+      const SizedBox(height: 8),
+      if (fan)
+        Wrap(
+          spacing: 8,
+          children: [
+            for (var n = 1; n <= 4; n++)
+              ChoiceChip(
+                label: Text('$n'),
+                selected: _speeds == n,
+                onSelected: (_) => setState(() => _speeds = n),
+              ),
+          ],
+        ),
+      if (fan) const SizedBox(height: 8),
+      Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: [
+          for (final l in _levels)
+            Chip(
+              label: Text(l),
+              onDeleted: _extraLevels.contains(l)
+                  ? () => setState(() => _extraLevels.remove(l))
+                  : null,
+            ),
+        ],
+      ),
+      if (charger)
+        Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: Text(
+            'A charger picks its speed by itself, so 1 sample is enough.',
+            style: TextStyle(color: context.muted, fontSize: 16),
+          ),
+        ),
+      if (canAddMore)
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton.icon(
+            onPressed: _addLevel,
+            icon: const Icon(Icons.add),
+            label: const Text('Add another setting'),
+          ),
+        ),
+    ];
+  }
+
+  /// "Other": the user names one more setting (e.g. High).
+  Future<void> _addLevel() async {
+    final name = await showDialog<String>(
+      context: context,
+      builder: (_) => const _AddLevelDialog(),
+    );
+    if (name == null || name.isEmpty || !mounted) return;
+    if (_levels.any((l) => l.toLowerCase() == name.toLowerCase())) return;
+    setState(() => _extraLevels.add(name));
+  }
 
   /// "the fan" -> "The fan", at the start of a sentence.
   static String _cap(String s) =>
@@ -607,7 +692,7 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
         : switch (_step) {
             RegistrationStep.plugIn => (
               Icons.power,
-              'Turn $name on. ${_settingHint(sample)} '
+              'Turn $name on. ${_levelHint(_level)}'
                   '(sample $sample of $_required).',
             ),
             RegistrationStep.restart => (
@@ -623,8 +708,8 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
             ),
             RegistrationStep.switchOff => (
               Icons.power_off,
-              'Sample $_collected of $_required done! Now turn $name off. '
-                  'Next time, use a different setting.',
+              'Sample $_collected of $_required done! Now turn $name off.'
+                  '${_level == null || _level == 'Normal' ? '' : ' Next: $_level.'}',
             ),
             RegistrationStep.tooShort => (
               Icons.timer_off_outlined,
@@ -696,4 +781,48 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
         ),
     ];
   }
+}
+
+/// Asks for the name of one more setting. It owns its text field, so the
+/// field lives until the dialog has finished closing.
+class _AddLevelDialog extends StatefulWidget {
+  const _AddLevelDialog();
+  @override
+  State<_AddLevelDialog> createState() => _AddLevelDialogState();
+}
+
+class _AddLevelDialogState extends State<_AddLevelDialog> {
+  final _text = TextEditingController();
+
+  @override
+  void dispose() {
+    _text.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    scrollable: true,
+    title: const Text('Another setting'),
+    content: TextField(
+      controller: _text,
+      autofocus: true,
+      maxLength: 40,
+      decoration: const InputDecoration(
+        labelText: 'Its name',
+        hintText: 'e.g. High',
+        border: OutlineInputBorder(),
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(
+        onPressed: () => Navigator.pop(context, _text.text.trim()),
+        child: const Text('Add'),
+      ),
+    ],
+  );
 }

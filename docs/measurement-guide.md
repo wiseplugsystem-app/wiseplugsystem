@@ -172,12 +172,12 @@ Record them anyway; it is a real limit of the meter.
 5. Repeat steps 2–4 for each mode (the registration rows of a later mode are
    that mode's first 3 runs).
 
-   **The app's own registration** asks for a different setting each time
-   (low, then medium, then high), so the appliance's profile in the app
-   covers all its settings. Do the app's 3 plug-ins that way, and write each
-   one's real setting in the `mode` column. For the later modes' runs, tap
-   **Not now** if the app asks to register again; the analysis still builds one
-   profile per mode from the sheet.
+   **The app's own registration** takes one sample of each setting (fan:
+   each speed; iron: Low, Medium, High; rice cooker: Cook, Keep warm;
+   chargers: one), each its own profile. Do those plug-ins in the order the
+   app asks and write each one's setting in the `mode` column. Your extra
+   registration runs (3 per mode for the analysis) are recorded in the sheet:
+   tap **Not now** if the app asks to register again.
 6. **Long log** (if listed): start the logger first, then switch the
    appliance on:
 

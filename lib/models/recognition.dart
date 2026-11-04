@@ -113,10 +113,16 @@ class ApplianceMode {
   final int sampleCount;
   final double? meanPowerW, meanPf;
 
+  /// A setting registered by level ("Speed 2"): the samples it needs and its
+  /// place in the list. Null for profiles made the old way (3 samples).
+  final int? requiredSamples, levelPosition;
+
   ApplianceMode.fromRow(Map<String, dynamic> r)
     : id = r['id'].toString(),
       name = r['mode_name']?.toString() ?? 'Normal',
       sampleCount = (r['sample_count'] as num?)?.toInt() ?? 0,
+      requiredSamples = (r['required_samples'] as num?)?.toInt(),
+      levelPosition = (r['level_position'] as num?)?.toInt(),
       meanPowerW = sensorNumber(r['avg_power_w_mean']),
       meanPf = sensorNumber(r['avg_pf_mean']);
 }
@@ -154,21 +160,59 @@ class RegisteredAppliance {
   /// What it is, for its icon (lib/models/appliance_icons.dart).
   ApplianceKind get kind => kindForType(typeName, iconKey: typeIconKey);
 
-  /// It can be recognised once one of its modes has all its registration samples.
-  bool isReady(int requiredSamples) =>
-      modes.any((m) => m.sampleCount >= requiredSamples);
+  /// Its settings, registered by level, in order (empty: registered the old
+  /// way, 3 samples in one profile).
+  List<ApplianceMode> get levels => [
+    ...modes.where((m) => m.requiredSamples != null),
+  ]..sort((a, b) => (a.levelPosition ?? 99).compareTo(b.levelPosition ?? 99));
+
+  /// Samples registration needs in all, and has ([legacy]: the old count).
+  int samplesNeeded(int legacy) => levels.isEmpty
+      ? legacy
+      : levels.fold(0, (sum, m) => sum + m.requiredSamples!);
+  int samplesDone(int legacy) => levels.isEmpty
+      ? (modes.isEmpty
+            ? 0
+            : modes.map((m) => m.sampleCount).reduce((x, y) => x < y ? x : y))
+      : levels.fold(
+          0,
+          (sum, m) =>
+              sum +
+              (m.sampleCount < m.requiredSamples!
+                  ? m.sampleCount
+                  : m.requiredSamples!),
+        );
+
+  /// The setting the next sample is for, or null.
+  String? get nextLevel {
+    for (final m in levels) {
+      if (m.sampleCount < m.requiredSamples!) return m.name;
+    }
+    return null;
+  }
+
+  /// Registration is finished: every setting has its sample (or, the old way,
+  /// a mode has all [requiredSamples]).
+  bool isReady(int requiredSamples) => levels.isEmpty
+      ? modes.any((m) => m.sampleCount >= requiredSamples)
+      : nextLevel == null;
 }
 
 /// The numbers the app shows from recognition_config.
 class RecognitionSettings {
   final int registrationSamples, defaultCutoffMinutes, learningUses;
+
+  /// Samples for each setting when registering by level.
+  final int samplesPerLevel;
   const RecognitionSettings({
     this.registrationSamples = 3,
     this.defaultCutoffMinutes = 30,
     this.learningUses = 7,
+    this.samplesPerLevel = 1,
   });
   RecognitionSettings.fromRow(Map<String, dynamic> r)
     : registrationSamples = (r['registration_samples'] as num?)?.toInt() ?? 3,
+      samplesPerLevel = (r['samples_per_level'] as num?)?.toInt() ?? 1,
       defaultCutoffMinutes =
           (r['default_cutoff_minutes'] as num?)?.toInt() ?? 30,
       learningUses = (r['learning_uses'] as num?)?.toInt() ?? 7;
@@ -180,6 +224,9 @@ class RegistrationProgress {
   final int samplesCollected, samplesRequired;
   final bool complete;
 
+  /// The setting the next sample is for ("Speed 2"), or null.
+  final String? nextLevel;
+
   RegistrationProgress.fromJson(Map<String, dynamic> j)
     : applianceId = _map(j['appliance'])['id'].toString(),
       applianceName = _map(j['appliance'])['name'].toString(),
@@ -187,5 +234,6 @@ class RegistrationProgress {
       modeName = _map(j['profile'])['modeName']?.toString() ?? 'Normal',
       samplesCollected = (j['samplesCollected'] as num).toInt(),
       samplesRequired = (j['samplesRequired'] as num).toInt(),
-      complete = j['complete'] == true;
+      complete = j['complete'] == true,
+      nextLevel = j['nextLevel']?.toString();
 }

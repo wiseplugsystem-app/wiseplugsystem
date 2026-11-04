@@ -15,6 +15,7 @@ import {
   profileFromRow,
   profileFromSamples,
   type Sample,
+  requiredSamples,
 } from "./matching.ts";
 
 type Row = Record<string, unknown>;
@@ -154,7 +155,7 @@ export async function learnFromConfirmed(
     return { profileId: data.id, modeName, newMode: true };
   }
   if (!(await insertSample(fit.profile.id, x, "confirmed_match", eventId))) return null;
-  if (fit.profile.sampleCount + 1 <= config.registrationSamples) {
+  if (fit.profile.sampleCount + 1 <= requiredSamples(fit.profile, config)) {
     await recomputeProfile(fit.profile.id);
   } else {
     const updated = emaUpdate(fit.profile, x, await recentSamples(fit.profile.id), config);

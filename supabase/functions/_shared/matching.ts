@@ -54,6 +54,10 @@ export interface Profile {
   std: Partial<Record<Feature, number | null>>;
   registrationVoltage: number | null;
   sampleCount: number;
+  /** Samples this profile needs to be matched (a setting: samples_per_level); null: registration_samples. */
+  requiredSamples?: number | null;
+  /** A setting's place in its appliance's list (Low, Medium, High); null otherwise. */
+  levelPosition?: number | null;
 }
 
 export interface Appliance {
@@ -96,6 +100,8 @@ export interface Config {
   minSessionS: number;
   /** recognition_config.max_appliance_w: above it an appliance is not registered. */
   maxApplianceW: number;
+  /** recognition_config.samples_per_level: samples for each setting at registration. */
+  samplesPerLevel: number;
 }
 
 type Row = Record<string, unknown>;
@@ -140,6 +146,7 @@ export function configFromRow(r: Row): Config {
     minSessionS: n("min_session_s"),
     // Older rows (and the tools' fixed settings) without it: the plug's limit.
     maxApplianceW: Number.isFinite(Number(r.max_appliance_w)) ? Number(r.max_appliance_w) : 1760,
+    samplesPerLevel: Number.isFinite(Number(r.samples_per_level)) ? Number(r.samples_per_level) : 1,
   };
 }
 
@@ -262,7 +269,8 @@ export const tooPowerful = (x: Features, c: Config): boolean =>
   has(x.avg_power_w) && x.avg_power_w > c.maxApplianceW;
 
 /** A profile is matched only after its registration plug-ins are complete. */
-export const isReady = (p: Profile, c: Config) => p.sampleCount >= c.registrationSamples && has(p.mean.avg_power_w);
+export const requiredSamples = (p: Profile, c: Config) => p.requiredSamples ?? c.registrationSamples;
+export const isReady = (p: Profile, c: Config) => p.sampleCount >= requiredSamples(p, c) && has(p.mean.avg_power_w);
 
 /** Rule 3c: the best passing profile of an appliance (any mode matches the appliance). */
 export function bestProfile(x: Features, a: Appliance, stage: Stage, c: Config): ProfileResult | null {
@@ -575,6 +583,8 @@ export function profileFromRow(r: Row): Profile {
     std,
     registrationVoltage: num(r.registration_voltage_v),
     sampleCount: Number(r.sample_count ?? 0),
+    requiredSamples: num(r.required_samples),
+    levelPosition: num(r.level_position),
   };
 }
 

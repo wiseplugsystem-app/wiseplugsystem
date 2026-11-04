@@ -88,25 +88,40 @@ const maxApplianceWatts = 1760;
 final maxApplianceText = '${wattsText(maxApplianceWatts)} W';
 
 /// The usual power of each type, lowest to highest setting (W), from the
-/// owner's appliance list (the chargers: typical adapter ratings). Unverified
-/// estimates, shown as a guide on the "What are you adding?" tiles; the label
-/// and WisePlug's own measurement decide. Only types listed here, and within
-/// [maxApplianceWatts], can be picked (see [canAdd]).
+/// owner's appliance breakdown. Unverified estimates, shown as a guide on the
+/// "What are you adding?" tiles; the label and WisePlug's own measurement
+/// decide. Only types listed here, and within [maxApplianceWatts], can be
+/// picked (see [canAdd]): the fan, flat iron, rice cooker and the two
+/// chargers; anything else is "Other".
 const applianceWatts = <String, (int, int)>{
-  'fan': (30, 100),
-  'rice_cooker': (30, 700), // keep warm 30-50 W, cooking up to 700 W
-  'flat_iron': (400, 1500),
-  'microwave': (400, 1500),
+  'fan': (35, 65), // speed 1 to 3 (a DC-motor fan: from about 5 W)
+  'flat_iron': (1000, 1500), // while heating; 0 W while resting
+  'rice_cooker': (30, 750), // keep warm 30-50 W, cooking 300-750 W
+  'laptop_charger': (10, 140), // trickle 10-15 W, fast up to 140 W
+  'phone_charger': (5, 120), // standard 5-10 W, fast up to 120 W
+  // Not offered: their range goes above the limit.
   'kettle': (1200, 3000),
-  'tv': (50, 150),
-  'phone_charger': (5, 30),
-  'laptop_charger': (30, 100),
-  'refrigerator': (100, 400),
   'hair_dryer': (500, 3000),
   'induction_cooker': (300, 3000),
   'washing_machine': (300, 2200), // up to 2,200 W with its water heater
   'aircon': (800, 2000),
 };
+
+/// At most this many settings per appliance (register-sample's MAX_LEVELS).
+const maxLevels = 6;
+
+/// The settings WisePlug takes a sample of, one each, in order. A fan's
+/// speeds are chosen by the user ([speeds], 1 to 4); a flat iron's dial;
+/// a rice cooker's two modes. A charger picks its charging speed by itself,
+/// so it takes one sample, and so does anything else ("Other" can add more).
+List<String> levelsFor(ApplianceKind kind, {int speeds = 3}) =>
+    switch (kind.key) {
+      'fan' => [for (var i = 1; i <= speeds; i++) 'Speed $i'],
+      'flat_iron' => const ['Low', 'Medium', 'High'],
+      'rice_cooker' => const ['Cook', 'Keep warm'],
+      'laptop_charger' || 'phone_charger' => const ['Charging'],
+      _ => const ['Normal'],
+    };
 
 /// "30–100 W", "1,200–3,000 W".
 String wattsText(int w) =>

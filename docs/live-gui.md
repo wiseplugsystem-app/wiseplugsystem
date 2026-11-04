@@ -166,18 +166,35 @@ follow:
 2. **Leave it on for about 1 minute.** Don't touch the buttons.
 3. **Turn it off.**
 
-**Do this 3 times, each time on a different setting:** 1st time low, 2nd time
-medium, 3rd time high (an appliance with only one setting uses it every
-time). Outlet A or B, both work. This way WisePlug learns every way the
-appliance runs, so it knows the fan on speed 1 and on speed 3. Each time the app says what to
-do next ("Good! Leave it on.", "Sample 1 of 3 done! Now turn the fan off.",
-"Oops, that was too short."), and "All done!" at the end. Until then, WisePlug
-turns the appliance off after 30 minutes to keep you safe. You can stop and
-finish later: turn it on again and WisePlug will ask.
+**Do this one time for each setting** of the appliance:
 
-How it works: the texts are in `_howItWorks()` and `_progress()` in
-`lib/screens/registration_dialog.dart`; the steps themselves (3 samples, about
-60 s each) did not change.
+| Appliance | Its settings (one sample each) |
+|---|---|
+| Electric fan | Speed 1, Speed 2, Speed 3 (you choose: 1, 2, 3 or 4 speeds) |
+| Flat iron | Low, Medium, High |
+| Rice cooker | Cook, Keep warm |
+| Laptop charger, phone charger | 1 sample (a charger picks its speed by itself) |
+| Other | 1 sample; tap **Add another setting** if it has more (up to 6) |
+
+Outlet A or B, both work. Each time the app says which setting to use and
+what to do next ("Turn the fan on. Set it to Speed 2.", "Sample 2 of 3 done!
+Now turn the fan off. Next: Speed 3."), and "All done!" at the end. This way
+WisePlug knows the fan on every speed. Until then, WisePlug turns the
+appliance off after 30 minutes to keep you safe. You can stop and finish
+later: turn it on again and WisePlug will ask.
+
+The picture list has the electric fan (35–65 W), flat iron (1,000–1,500 W),
+rice cooker (30–750 W), laptop charger (10–140 W) and phone charger
+(5–120 W); anything else is **Other**.
+
+How it works: each setting is its own profile (`appliance_profiles`, with
+`required_samples` and `level_position`, migration
+`20261106000000_samples_per_level.sql`); `recognition_config.samples_per_level`
+(1) is the samples for each. Recognition already accepts an appliance when any
+of its settings matches. A setting with one sample starts strict (only the
+minimum allowance) and widens each time you confirm "Yes, it is the fan".
+Appliances registered before this keep their single 3-sample profile. The
+settings for each type are `levelsFor()` in `lib/models/appliance_icons.dart`.
 
 ## After a safety cutoff (in plain words)
 

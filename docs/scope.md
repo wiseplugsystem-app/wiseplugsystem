@@ -34,9 +34,12 @@ Wiring order per outlet: current transformer, SSR, PZEM, ESP32, socket.
 
 ### 1.3 Appliance recognition (rule-based, no machine learning)
 
-- **Registration:** the user plugs a new appliance in 3 times and picks what
-  it is from pictures ("What are you adding?"). The 3 runs become the
-  appliance's profile (mean and spread of each feature).
+- **Registration:** the user picks what the appliance is from pictures
+  ("What are you adding?") and runs it once on each of its settings: an
+  electric fan on each speed (1 to 4), a flat iron on Low, Medium and High, a
+  rice cooker on Cook and Keep warm, a charger once, "Other" once plus any
+  settings the user adds. Each setting becomes its own profile (mean and
+  spread of each feature), refined each time the user confirms a match.
 - **Recognition:** each new run is compared with every profile in two
   stages: about 10 s after the load settles (power, power factor, start-up)
   and at about 60 s (all seven features). A feature matches when it is
@@ -55,11 +58,9 @@ Wiring order per outlet: current transformer, SSR, PZEM, ESP32, socket.
 - **Overcurrent:** above 10 A the outlet is cut off at once, and above 8 A
   (about 1,760 W) after 10 seconds, so a motor's start-up surge does not
   count; it stays locked until the user resets it.
-- **What can be added:** the app offers only types with a listed usual power
-  within the limit: electric fan (30–100 W), rice cooker (30–700 W), flat iron
-  (400–1,500 W), microwave (400–1,500 W), TV (50–150 W), refrigerator
-  (100–400 W), phone charger (5–30 W) and laptop charger (30–100 W), plus
-  "Other". It leaves out every type whose usual range goes above 1,760 W
+- **What can be added:** the app offers the electric fan (35–65 W), flat iron
+  (1,000–1,500 W), rice cooker (30–750 W), laptop charger (10–140 W) and phone
+  charger (5–120 W), plus "Other". It leaves out every type whose usual range goes above 1,760 W
   (aircon, electric kettle, hair dryer, induction cooker, washing machine), and the server refuses to register any run it
   measures above `recognition_config.max_appliance_w` (1,760 W).
 - **Fault:** a confirmed appliance drawing twice its own steady power for

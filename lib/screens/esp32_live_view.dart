@@ -979,11 +979,11 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
   }
 
   String _registrationText(RegisteredAppliance a) {
-    final required = _recognitionSettings.registrationSamples;
-    final done = a.modes.isEmpty
-        ? 0
-        : a.modes.map((m) => m.sampleCount).reduce((x, y) => x < y ? x : y);
-    return 'Registering · $done of $required plug-ins. Plug it in again to continue.';
+    final legacy = _recognitionSettings.registrationSamples;
+    final next = a.nextLevel;
+    return 'Registering · ${a.samplesDone(legacy)} of '
+        '${a.samplesNeeded(legacy)} done. '
+        '${next == null ? 'Turn it on again' : 'Turn it on at $next'} to continue.';
   }
 
   /// As in the 19th commit: the learned limit once the typical use is known,
