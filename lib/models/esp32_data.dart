@@ -36,6 +36,9 @@ class OutletReading {
   /// Running on extra time granted by "Yes, Override", past its limit.
   final bool overridden;
 
+  /// Off after a safety reset: it stays off until the user turns it on again.
+  final bool safetyResetHold;
+
   OutletReading.fromMap(this.outlet, Map<String, dynamic> map)
     : currentState = map['currentState']?.toString() ?? '',
       sessionID = map['sessionID']?.toString() ?? '',
@@ -46,6 +49,8 @@ class OutletReading {
       safetyDeadline = deviceTime(map['safetyDeadline']),
       runtimeWarning = map['runtime_warning'] == true,
       overridden = map['overridden'] == true,
+      safetyResetHold =
+          map['safetyResetHold'] == true && map['currentState'] == 'DISABLED',
       appliance = map['appliance']?.toString() ?? 'Unknown',
       status = map['status']?.toString() ?? 'Unknown',
       voltage = sensorNumber(map['voltage_V']),

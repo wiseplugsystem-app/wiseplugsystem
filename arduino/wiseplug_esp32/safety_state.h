@@ -9,6 +9,10 @@ struct SafetyState {
   uint64_t started = 0, deadline = 0, warningStarted = 0;
   bool runtimeWarning = false;
   bool overridden = false;  // running on time the user granted past the limit
+  // Off after a safety reset: the outlet stays off until the user turns it on
+  // again on purpose (the app asks first), so a reset never restarts the
+  // appliance that just hit its limit.
+  bool resetHold = false;
   void begin(uint64_t now, uint32_t ceilingSeconds) {
     state = SocketState::Sampling; started = now;
     deadline = now + uint64_t(ceilingSeconds) * 1000;
@@ -36,19 +40,21 @@ struct SafetyState {
   bool remotePower(bool on) {
     if (state == SocketState::LockedOut || state == SocketState::Warning) return false;
     // An ON request while running must never restart the runtime timer.
-    if (on && state == SocketState::Disabled) { state = SocketState::Idle; ++revision; }
+    if (on && state == SocketState::Disabled) { state = SocketState::Idle; resetHold = false; ++revision; }
     if (!on && state != SocketState::Disabled) { state = SocketState::Disabled; ++revision; }
     return true;
   }
-  // App-requested reset: clears a safety trip back to normal monitoring.
+  // App-requested reset: clears the safety trip but keeps the outlet OFF
+  // (resetHold). Power comes back only with a separate TURN_ON.
   bool remoteReset() {
     if (state != SocketState::Warning && state != SocketState::LockedOut) return false;
-    state = SocketState::Idle; runtimeWarning = overridden = false; ++revision;
+    state = SocketState::Disabled; resetHold = true; runtimeWarning = overridden = false; ++revision;
     return true;
   }
+  // The plug's own button: someone is standing at it, so it switches on.
   void physicalPress() {
     state = (state == SocketState::LockedOut || state == SocketState::Disabled)
         ? SocketState::Idle : SocketState::Disabled;
-    ++revision;
+    resetHold = false; ++revision;
   }
 };

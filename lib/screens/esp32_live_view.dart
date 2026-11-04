@@ -808,7 +808,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                     // What the socket is doing, said plainly: on with
                     // nothing running is "ready", not "power on".
                     !reading.switchedOn
-                        ? reading.isLockedOut
+                        ? reading.isLockedOut || reading.safetyResetHold
                               ? 'Turned off for safety'
                               : 'Turned off'
                         : connected
@@ -1789,7 +1789,8 @@ class _PowerControlState extends State<_PowerControl> {
         content: Text(
           'Outlet ${widget.outlet} was switched off for safety. Check the '
           'appliance first: unplug it if it is hot, smells of burning or '
-          'looks damaged. Resetting switches the outlet back on.',
+          'looks damaged. Resetting unlocks the outlet, but it stays off '
+          'until you turn it on again.',
         ),
         actions: [
           TextButton(
@@ -1810,7 +1811,12 @@ class _PowerControlState extends State<_PowerControl> {
       await widget.service.resetSafety(reading);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Outlet ${widget.outlet} is back on.')),
+          SnackBar(
+            content: Text(
+              'Outlet ${widget.outlet} is unlocked and stays off. Turn it on '
+              'again when you are ready to use it.',
+            ),
+          ),
         );
       }
     } catch (error) {
@@ -1821,6 +1827,34 @@ class _PowerControlState extends State<_PowerControl> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  /// After a safety reset: power comes back only when the user confirms they
+  /// are there and want to use the appliance again.
+  Future<void> _turnOnAgain() async {
+    final name = widget.applianceName ?? 'The appliance';
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        scrollable: true,
+        title: Text('Turn on Outlet ${widget.outlet} again?'),
+        content: Text(
+          '$name on Outlet ${widget.outlet} hit its safety limit. Only turn '
+          'it on if you are there and want to use it again.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Keep it off'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Turn on'),
+          ),
+        ],
+      ),
+    );
+    if (ok == true && mounted) await _send('TURN_ON');
   }
 
   @override
@@ -1883,6 +1917,8 @@ class _PowerControlState extends State<_PowerControl> {
                               ? 'Unavailable'
                               : r.isLockedOut
                               ? 'Locked · switched off for safety'
+                              : r.safetyResetHold
+                              ? 'Off · safety reset done'
                               : on && !appliance
                               ? 'On · no appliance detected'
                               : on
@@ -1922,7 +1958,12 @@ class _PowerControlState extends State<_PowerControl> {
                 onChanged: canToggle
                     ? (value) {
                         HapticFeedback.selectionClick();
-                        _send(value ? 'TURN_ON' : 'TURN_OFF');
+                        // After a safety reset, turning on asks first.
+                        if (value && r?.safetyResetHold == true) {
+                          _turnOnAgain();
+                        } else {
+                          _send(value ? 'TURN_ON' : 'TURN_OFF');
+                        }
                       }
                     : null,
               ),
@@ -1944,6 +1985,33 @@ class _PowerControlState extends State<_PowerControl> {
                 ],
               ),
             ),
+          // Reset done: the outlet stays off until the user turns it on.
+          if (r != null && r.safetyResetHold && !_busy)
+            Container(
+              margin: const EdgeInsets.only(top: 10),
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: _amber.withValues(alpha: .12),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  const Text(
+                    'Safety reset done. The outlet stays off until you turn '
+                    'it on.',
+                    style: TextStyle(fontSize: 16, height: 1.35),
+                  ),
+                  FilledButton.icon(
+                    onPressed: r.canCommand(widget.now) ? _turnOnAgain : null,
+                    icon: const Icon(Icons.power_settings_new),
+                    label: const Text('Turn on again'),
+                  ),
+                ],
+              ),
+            ),
           if (r != null && r.isLockedOut)
             Container(
               margin: const EdgeInsets.only(top: 10),
@@ -1958,7 +2026,8 @@ class _PowerControlState extends State<_PowerControl> {
                   const SizedBox(width: 8),
                   const Expanded(
                     child: Text(
-                      'Inspect the appliance, then reset to switch it back on.',
+                      'Inspect the appliance, then reset. It stays off until '
+                      'you turn it on again.',
                       style: TextStyle(fontSize: 16, height: 1.35),
                     ),
                   ),

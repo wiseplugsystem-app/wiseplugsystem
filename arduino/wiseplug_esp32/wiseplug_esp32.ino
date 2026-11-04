@@ -635,6 +635,8 @@ void addOutlet(JsonDocument& root, int i, const Snapshot& s) {
   root[b + "currentState"] = stateName(st); root[b + "sessionID"] = sessionID;
   root[b + "revision"] = s.safety.revision; root[b + "runtime_warning"] = s.safety.runtimeWarning;
   root[b + "overridden"] = running && s.safety.overridden;
+  // Off after a safety reset, waiting for the user to turn it on again.
+  root[b + "safetyResetHold"] = st == SocketState::Disabled && s.safety.resetHold;
   // isLockedDown is not here: syncLockdown() writes it only on change, so the
   // app's unlock is not overwritten every second.
   root[String("devices/") + DEVICE_ID + "/outlets/" + ch.outlet + "/relayState"] = relayEnergized(st);

@@ -336,7 +336,7 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
                   const SizedBox(height: 10),
                   Text(
                     'The outlet was switched off for safety. Inspect the '
-                    'appliance, then reset to switch it back on.',
+                    'appliance, then reset. It stays off until you turn it on again.',
                     textAlign: TextAlign.center,
                     style: TextStyle(color: context.muted, height: 1.4),
                   ),

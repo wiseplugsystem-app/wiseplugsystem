@@ -157,6 +157,23 @@ OVERCURRENT reason, so the server and database are unchanged. In the app,
 `maxApplianceWatts`, `applianceWatts` (each type's usual range, from the owner's list) and `unsupportedKinds` (the types whose range goes above the limit) in `lib/models/appliance_icons.dart`; on the server, `recognition_config.max_appliance_w` (migration `20261105010000_appliance_power_limit.sql`) and `tooPowerful` in register-sample.
 The limit assumes the SSR-40DA sits on its heatsink with thermal paste.
 
+## After a safety cutoff (in plain words)
+
+- **Reset Safety unlocks the outlet, but keeps it off.** The appliance that
+  hit its limit does not start again by itself.
+- **To use it again, press Turn on again** (under Power Control) and confirm.
+  The app asks: "Only turn it on if you are there and want to use it again."
+  Choose **Keep it off** if you are not.
+- **The Power Control switch asks the same question** in this case. An outlet
+  you switched off yourself turns on without asking.
+- **The button on the plug** turns the outlet on straight away: you are
+  standing at it.
+
+How it works: `remoteReset()` in `safety_state.h` now leaves the outlet
+DISABLED with `resetHold`; the plug publishes `safetyResetHold` in
+telemetry_logs; only a TURN_ON (or the plug's button) clears it. The app
+(`_turnOnAgain` in esp32_live_view.dart) asks before sending TURN_ON.
+
 ## Heating appliances (in plain words)
 
 - **Appliances that make heat get a shorter time limit.** A kettle may stay

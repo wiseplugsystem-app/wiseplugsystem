@@ -76,7 +76,9 @@ Wiring order per outlet: current transformer, SSR, PZEM, ESP32, socket.
 - **Offline:** the plug keeps enforcing the limits without Wi-Fi or
   internet, and sends its records once it is back online.
 - **After a safety cutoff** the outlet stays off until the user resets it in
-  the app.
+  the app. Resetting only unlocks it: the outlet stays off until the user
+  presses **Turn on again** and confirms they are there to use the appliance
+  (the plug's own button turns it on directly, since someone is at the plug).
 
 ### 1.5 The app
 
