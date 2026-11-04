@@ -36,7 +36,7 @@ Wiring order per outlet: current transformer, SSR, PZEM, ESP32, socket.
 
 - **Registration:** the user picks what the appliance is from pictures
   ("What are you adding?") and runs it once on each of its settings: an
-  electric fan on each speed (1 to 4), a flat iron on Low, Medium and High, a
+  electric fan on each level (1 to 4), a flat iron on Low, Medium and High, a
   rice cooker on Cook and Keep warm, a charger once, "Other" once plus any
   settings the user adds. Each setting becomes its own profile (mean and
   spread of each feature), refined each time the user confirms a match.
@@ -148,7 +148,7 @@ Wiring order per outlet: current transformer, SSR, PZEM, ESP32, socket.
   their electricity: WisePlug asks the user, pre-selecting the one last used
   on that outlet.
 - The app registers the first mode of an appliance; other settings (fan
-  speeds, heat settings) are learned when the user confirms them, or tested
+  levels, heat settings) are learned when the user confirms them, or tested
   in the analysis from the recording sheet.
 - Heating appliances' settings often look the same in watts (the element is
   either fully on or off); the settings differ in how long the element stays
@@ -221,7 +221,7 @@ setting has the **same draw**, on for less of the time.
 
 | Appliance | Settings | Estimated range (unverified) | How the setting changes the power | Measured (WisePlug) |
 |---|---|---|---|---|
-| Electric fan | Speed 1 / 2 / 3 | 30–40 W / 45–60 W / 70–100 W | Motor speed: the draw itself changes | |
+| Electric fan | Level 1 / 2 / 3 | 30–40 W / 45–60 W / 70–100 W | Motor speed: the draw itself changes | |
 | Air conditioner | By horsepower; temperature and fan | 800–2,000 W+ | Compressor on/off (inverter: variable) | Not tested (out of scope) |
 | Hair dryer | Low / medium / high | 500–800 W / 1,000–1,500 W / 1,800–2,500 W+ | Heater and fan steps: the draw changes | Not supported |
 | Flat iron | Silk / cotton / linen dial | 1,000–1,500 W label | Thermostat: **same draw**, longer on at higher settings; low settings average less | Only irons labelled ≤ 1,760 W |

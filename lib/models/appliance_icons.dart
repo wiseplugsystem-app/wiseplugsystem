@@ -111,12 +111,13 @@ const applianceWatts = <String, (int, int)>{
 const maxLevels = 6;
 
 /// The settings WisePlug takes a sample of, one each, in order. A fan's
-/// speeds are chosen by the user ([speeds], 1 to 4); a flat iron's dial;
+/// levels are chosen by the user ([speeds], 1 to 4: Level 1 the slowest); a
+/// flat iron's dial;
 /// a rice cooker's two modes. A charger picks its charging speed by itself,
 /// so it takes one sample, and so does anything else ("Other" can add more).
 List<String> levelsFor(ApplianceKind kind, {int speeds = 3}) =>
     switch (kind.key) {
-      'fan' => [for (var i = 1; i <= speeds; i++) 'Speed $i'],
+      'fan' => [for (var i = 1; i <= speeds; i++) 'Level $i'],
       'flat_iron' => const ['Low', 'Medium', 'High'],
       'rice_cooker' => const ['Cook', 'Keep warm'],
       'laptop_charger' || 'phone_charger' => const ['Charging'],

@@ -115,7 +115,7 @@ identical fans): register each as its own appliance ("Fan 1", "Fan 2"). Two
 identical fans are expected to give "Which appliance is it?" questions; that
 is a result to report, not a mistake.
 
-**Time:** about 23 runs × 2 minutes per mode. A fan with 4 speeds, with and
+**Time:** about 23 runs × 2 minutes per mode. A fan with 4 levels, with and
 without oscillation, is 8 modes, about 6 hours. Order: **rice cooker and flat
 iron first**, then the fan, then the others as time allows.
 
@@ -130,7 +130,7 @@ Record each mode as its own row group in the sheet (the `mode` column):
 
 | Appliance | Modes to record | Long log |
 |---|---|---|
-| Electric fan | Each speed (e.g. Speed 1–4), each with and without oscillation ("Speed 2 + oscillation") | No |
+| Electric fan | Each level (Level 1–4), each with and without oscillation ("Level 2 + oscillation") | No |
 | Rice cooker | Cooking, Keep warm (always with rice or water inside) | Yes: keep warm |
 | Flat iron | Each heat setting | Yes: each setting, on/off cycling |
 | Air fryer | Preheat, Cooking | Yes: heating cycles |
@@ -173,7 +173,7 @@ Record them anyway; it is a real limit of the meter.
    that mode's first 3 runs).
 
    **The app's own registration** takes one sample of each setting (fan:
-   each speed; iron: Low, Medium, High; rice cooker: Cook, Keep warm;
+   each level; iron: Low, Medium, High; rice cooker: Cook, Keep warm;
    chargers: one), each its own profile. Do those plug-ins in the order the
    app asks and write each one's setting in the `mode` column. Your extra
    registration runs (3 per mode for the analysis) are recorded in the sheet:
@@ -203,7 +203,7 @@ One row per run. Columns:
 | `unit` | The name in the app: Fan 1, Fan 2 |
 | `brand`, `model` | From the label |
 | `nameplate_w` | Rated input power from the label (W) |
-| `mode` | Speed 2 + oscillation, Keep warm, High… (the same spelling every time) |
+| `mode` | Level 2 + oscillation, Keep warm, High… (the same spelling every time) |
 | `run_type` | registration, test or long_log |
 | `app_result` | What the app said (optional) |
 | `session_id` | Leave empty; fill it only if the analysis cannot match a row |

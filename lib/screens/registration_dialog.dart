@@ -402,21 +402,18 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
               style: TextStyle(fontSize: 16, color: context.muted),
             ),
             const SizedBox(height: 10),
-            // Every standard appliance, then the user's own types, then Other.
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                for (final k in applianceKinds)
-                  if (canAdd(k)) _typeTile(k.label, k),
-                for (final t in _types)
-                  if (!applianceKinds.any(
-                    (k) => k.label.toLowerCase() == t.toLowerCase(),
-                  ))
-                    _typeTile(t, kindForType(t)),
-                _typeTile(otherKind.label, otherKind, other: true),
-              ],
-            ),
+            // Every standard appliance, then the user's own types, then
+            // Other: cards of one size, in even columns.
+            _typeGrid([
+              for (final k in applianceKinds)
+                if (canAdd(k)) _typeTile(k.label, k),
+              for (final t in _types)
+                if (!applianceKinds.any(
+                  (k) => k.label.toLowerCase() == t.toLowerCase(),
+                ))
+                  _typeTile(t, kindForType(t)),
+              _typeTile(otherKind.label, otherKind, other: true),
+            ]),
             if (_typeError != null)
               Padding(
                 padding: const EdgeInsets.only(top: 6),
@@ -565,7 +562,6 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
           _type.text = other ? '' : label;
         }),
         child: Container(
-          width: 104,
           padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 6),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(16),
@@ -576,30 +572,85 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
               width: selected ? 2.5 : 1,
             ),
           ),
+          // The same room on every card: two lines for the name, one for
+          // the power, so all cards line up.
           child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
             children: [
               ApplianceIcon(kind, size: 48, label: label),
               const SizedBox(height: 6),
-              Text(
-                label,
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: selected ? FontWeight.w800 : FontWeight.w500,
+              SizedBox(
+                height: _lines(context, 16, 2),
+                child: Center(
+                  child: Text(
+                    label,
+                    textAlign: TextAlign.center,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 16,
+                      height: 1.2,
+                      fontWeight: selected ? FontWeight.w800 : FontWeight.w500,
+                    ),
+                  ),
                 ),
               ),
-              if (watts != null)
-                Text(
-                  watts,
+              SizedBox(
+                height: _lines(context, 14, 1),
+                child: Text(
+                  watts ?? (other ? 'Write its name' : ''),
                   textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 14, color: context.muted),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 14,
+                    height: 1.2,
+                    color: context.muted,
+                  ),
                 ),
+              ),
             ],
           ),
         ),
       ),
     );
   }
+
+  /// Height of [count] lines of [size] text at the phone's text size.
+  static double _lines(BuildContext context, double size, int count) =>
+      MediaQuery.textScalerOf(context).scale(size) * 1.2 * count + 2;
+
+  /// The cards in even columns (2 on a phone, 3 on a wider screen), every
+  /// card the same width, and each row as tall as its tallest card.
+  Widget _typeGrid(List<Widget> cards) => LayoutBuilder(
+    builder: (context, box) {
+      // 2 on a phone (room for "1,000–1,500 W"), 3 on a wider screen.
+      final columns = box.maxWidth >= 420 ? 3 : 2;
+      return Column(
+        children: [
+          for (var i = 0; i < cards.length; i += columns)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: IntrinsicHeight(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    for (var j = i; j < i + columns; j++) ...[
+                      if (j > i) const SizedBox(width: 8),
+                      Expanded(
+                        child: j < cards.length
+                            ? cards[j]
+                            : const SizedBox.shrink(),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+        ],
+      );
+    },
+  );
 
   /// What to do for the setting [level], before "(sample 1 of 3)".
   static String _levelHint(String? level) => switch (level) {
@@ -619,7 +670,7 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
     return [
       const SizedBox(height: 16),
       Text(
-        fan ? 'How many speeds does it have?' : 'Its settings:',
+        fan ? 'How many levels does it have?' : 'Its settings:',
         style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
       ),
       const SizedBox(height: 8),
@@ -635,7 +686,16 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
               ),
           ],
         ),
-      if (fan) const SizedBox(height: 8),
+      if (fan)
+        Padding(
+          padding: const EdgeInsets.only(top: 6, bottom: 8),
+          child: Text(
+            'Level 1 is the slowest. Pick how many levels your fan has: '
+            'WisePlug takes one sample at each level, so each level you add '
+            'is one more time to turn it on.',
+            style: TextStyle(color: context.muted, fontSize: 16),
+          ),
+        ),
       Wrap(
         spacing: 8,
         runSpacing: 8,

@@ -170,16 +170,16 @@ follow:
 
 | Appliance | Its settings (one sample each) |
 |---|---|
-| Electric fan | Speed 1, Speed 2, Speed 3 (you choose: 1, 2, 3 or 4 speeds) |
+| Electric fan | Level 1, Level 2, Level 3 (you choose: 1, 2, 3 or 4 levels; Level 1 is the slowest, and each level you add is one more sample) |
 | Flat iron | Low, Medium, High |
 | Rice cooker | Cook, Keep warm |
 | Laptop charger, phone charger | 1 sample (a charger picks its speed by itself) |
 | Other | 1 sample; tap **Add another setting** if it has more (up to 6) |
 
 Outlet A or B, both work. Each time the app says which setting to use and
-what to do next ("Turn the fan on. Set it to Speed 2.", "Sample 2 of 3 done!
-Now turn the fan off. Next: Speed 3."), and "All done!" at the end. This way
-WisePlug knows the fan on every speed. Until then, WisePlug turns the
+what to do next ("Turn the fan on. Set it to Level 2.", "Sample 2 of 3 done!
+Now turn the fan off. Next: Level 3."), and "All done!" at the end. This way
+WisePlug knows the fan on every level. Until then, WisePlug turns the
 appliance off after 30 minutes to keep you safe. You can stop and finish
 later: turn it on again and WisePlug will ask.
 
