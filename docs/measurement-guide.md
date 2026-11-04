@@ -171,6 +171,13 @@ Record them anyway; it is a real limit of the meter.
    Write what it said in `app_result` ("Fan 1", "Asked", "New appliance").
 5. Repeat steps 2–4 for each mode (the registration rows of a later mode are
    that mode's first 3 runs).
+
+   **The app's own registration** asks for a different setting each time
+   (low, then medium, then high), so the appliance's profile in the app
+   covers all its settings. Do the app's 3 plug-ins that way, and write each
+   one's real setting in the `mode` column. For the later modes' runs, tap
+   **Not now** if the app asks to register again; the analysis still builds one
+   profile per mode from the sheet.
 6. **Long log** (if listed): start the logger first, then switch the
    appliance on:
 

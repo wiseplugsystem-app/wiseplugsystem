@@ -291,8 +291,8 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
         ? ''
         : ' on Outlet ${widget.fromSession!.outletName}';
     final title = _newAppliance
-        ? 'New appliance detected$outlet'
-        : 'Continue registering ${_appliance!.name}';
+        ? 'Something new$outlet'
+        : 'Finish adding ${_appliance!.name}';
     return Dialog(
       insetPadding: const EdgeInsets.all(20),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
@@ -349,7 +349,7 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
 
   List<Widget> _formFields() => [
     if (_newAppliance) ...[
-      const Text('Register it so WisePlug recognises it next time.'),
+      const Text('Tell WisePlug what it is, so it knows it next time.'),
       // The new load may be an appliance whose registration was left unfinished.
       for (final a in widget.unfinished)
         Padding(
@@ -434,19 +434,74 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
       ),
     ] else
       Text(
-        '${_appliance!.name} still needs '
+        'Turn ${_appliance!.name} on and off '
         '${_required - _appliance!.modes.map((m) => m.sampleCount).fold(_required, (x, y) => x < y ? x : y)} '
-        'more plug-ins before WisePlug can recognise it.',
+        'more times, so WisePlug knows it.',
       ),
     const SizedBox(height: 14),
-    Text(
-      'WisePlug learns an appliance by measuring it $_required times: '
-      'this run, then you switch it off and on again (either outlet). '
-      'Until then it runs on the '
-      '${widget.settings.defaultCutoffMinutes}-minute safety limit.',
-      style: TextStyle(color: context.muted, fontSize: 16),
-    ),
+    ..._howItWorks(),
   ];
+
+  /// The whole job in three short steps, the same for everyone.
+  List<Widget> _howItWorks() {
+    Widget step(int n, IconData icon, String text) => Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Row(
+        children: [
+          CircleAvatar(
+            radius: 16,
+            backgroundColor: Theme.of(context).colorScheme.primary,
+            foregroundColor: Colors.white,
+            child: Text(
+              '$n',
+              style: const TextStyle(fontWeight: FontWeight.w800),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Icon(icon, size: 28, color: Theme.of(context).colorScheme.primary),
+          const SizedBox(width: 10),
+          Expanded(child: Text(text, style: const TextStyle(fontSize: 16))),
+        ],
+      ),
+    );
+    return [
+      const Text(
+        'How it works:',
+        style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+      ),
+      step(1, Icons.power, 'Turn it on.'),
+      step(
+        2,
+        Icons.timer_outlined,
+        'Leave it on for about 1 minute. Don\'t touch the buttons.',
+      ),
+      step(3, Icons.power_off, 'Turn it off.'),
+      const SizedBox(height: 10),
+      Text(
+        'Do this $_required times. Each time, use a different setting:',
+        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+      ),
+      const SizedBox(height: 4),
+      Text(
+        [
+          for (var i = 1; i <= _required; i++)
+            '${_ordinal(i)} time: ${_settingWord(i)}',
+        ].join(' · '),
+        style: const TextStyle(fontSize: 16),
+      ),
+      const SizedBox(height: 4),
+      Text(
+        'Only one setting? Use it every time. Outlet A or B, both work.',
+        style: TextStyle(color: context.muted, fontSize: 16),
+      ),
+      const SizedBox(height: 6),
+      Text(
+        'Until then, WisePlug turns it off after '
+        '${widget.settings.defaultCutoffMinutes} minutes to keep you safe.',
+        style: TextStyle(color: context.muted, fontSize: 16),
+      ),
+    ];
+  }
 
   // Side by side when they fit, stacked on a narrow phone.
   Widget _formActions() => OverflowBar(
@@ -521,40 +576,60 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
     );
   }
 
+  /// The setting for sample [n]: lowest first, highest last, so WisePlug
+  /// sees every way the appliance runs.
+  String _settingWord(int n) => n == 1
+      ? 'low'
+      : n >= _required
+      ? 'high'
+      : 'medium';
+  String _settingHint(int n) => n == 1
+      ? 'Use the lowest setting, like Low or 1'
+      : n >= _required
+      ? 'Use the highest setting, like High or 3'
+      : 'Use a middle setting, like Medium or 2';
+  static String _ordinal(int n) => switch (n) {
+    1 => '1st',
+    2 => '2nd',
+    3 => '3rd',
+    _ => '${n}th',
+  };
+
+  /// "the fan" -> "The fan", at the start of a sentence.
+  static String _cap(String s) =>
+      s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);
+
   List<Widget> _progress() {
     final name = _applianceName.isEmpty ? 'the appliance' : _applianceName;
     final sample = (_collected + 1).clamp(1, _required);
     final (icon, text) = _complete
-        ? (
-            Icons.check_circle,
-            '$name is registered. WisePlug will recognise it from now on.',
-          )
+        ? (Icons.check_circle, 'All done! WisePlug knows $name now.')
         : switch (_step) {
             RegistrationStep.plugIn => (
               Icons.power,
-              'Plug $name into Outlet A or B, or switch it on. If it is '
-                  'already running, switch it off and on again '
+              'Turn $name on. ${_settingHint(sample)} '
                   '(sample $sample of $_required).',
             ),
             RegistrationStep.restart => (
               Icons.restart_alt,
-              'It is already running. Switch it off for a few seconds, then on '
-                  'again, so WisePlug measures a fresh start.',
+              '${_cap(name)} is already on. Turn it off, count to 5, then turn '
+                  'it on again.',
             ),
             RegistrationStep.measuring || RegistrationStep.record => (
               Icons.speed,
-              'Measuring… keep it running for about a minute '
+              'Good! Leave it on. Don\'t change the setting now. WisePlug '
+                  'is learning it. This takes about 1 minute '
                   '(sample $sample of $_required).',
             ),
             RegistrationStep.switchOff => (
               Icons.power_off,
-              'Sample $_collected of $_required saved. Now switch it off or '
-                  'unplug it.',
+              'Sample $_collected of $_required done! Now turn $name off. '
+                  'Next time, use a different setting.',
             ),
             RegistrationStep.tooShort => (
               Icons.timer_off_outlined,
-              'That run was too short. Switch it on again and keep it running '
-                  'for about a minute.',
+              'Oops, that was too short. Turn it on again and leave it on for '
+                  'about 1 minute.',
             ),
           };
     return [
@@ -577,7 +652,7 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
       ),
       const SizedBox(height: 8),
       Text(
-        '$_collected of $_required samples',
+        '$_collected of $_required done',
         textAlign: TextAlign.center,
         style: TextStyle(color: context.muted),
       ),
@@ -614,8 +689,8 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
         ),
       if (!_complete && _collected > 0)
         Text(
-          'To continue later, plug it in again: the pop-up will offer it. '
-          'Until all samples are saved, WisePlug cannot recognise it yet.',
+          'You can finish later. Just turn it on again and WisePlug will ask '
+          'you. WisePlug knows it only after all $_required.',
           textAlign: TextAlign.center,
           style: TextStyle(fontSize: 16, color: context.muted),
         ),

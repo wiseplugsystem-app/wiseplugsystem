@@ -157,6 +157,28 @@ OVERCURRENT reason, so the server and database are unchanged. In the app,
 `maxApplianceWatts`, `applianceWatts` (each type's usual range, from the owner's list) and `unsupportedKinds` (the types whose range goes above the limit) in `lib/models/appliance_icons.dart`; on the server, `recognition_config.max_appliance_w` (migration `20261105010000_appliance_power_limit.sql`) and `tooPowerful` in register-sample.
 The limit assumes the SSR-40DA sits on its heatsink with thermal paste.
 
+## Adding an appliance (in plain words)
+
+The app shows the same three steps to everyone, in short words a child can
+follow:
+
+1. **Turn it on.**
+2. **Leave it on for about 1 minute.** Don't touch the buttons.
+3. **Turn it off.**
+
+**Do this 3 times, each time on a different setting:** 1st time low, 2nd time
+medium, 3rd time high (an appliance with only one setting uses it every
+time). Outlet A or B, both work. This way WisePlug learns every way the
+appliance runs, so it knows the fan on speed 1 and on speed 3. Each time the app says what to
+do next ("Good! Leave it on.", "Sample 1 of 3 done! Now turn the fan off.",
+"Oops, that was too short."), and "All done!" at the end. Until then, WisePlug
+turns the appliance off after 30 minutes to keep you safe. You can stop and
+finish later: turn it on again and WisePlug will ask.
+
+How it works: the texts are in `_howItWorks()` and `_progress()` in
+`lib/screens/registration_dialog.dart`; the steps themselves (3 samples, about
+60 s each) did not change.
+
 ## After a safety cutoff (in plain words)
 
 - **Reset Safety unlocks the outlet, but keeps it off.** The appliance that

@@ -24,7 +24,9 @@ const _blue = Color(0xFF00A4EF);
 const _green = Color(0xFF00B744);
 const _amber = Color(0xFFF5B800);
 const _safetyNote =
-    'Disabled and locked outlets are switched off by their relay. Inspect the appliance before resetting a locked outlet with Reset Safety in Power Control or its physical button.';
+    'An outlet turned off for safety stays off. Check the appliance, press '
+    'Reset Safety, then Turn on again when you want to use it. The button on '
+    'the plug turns it on too.';
 
 /// How long a run has lasted, exact to the second: "4:07" or "1:02:15".
 /// The outlet card's timer, in words: "45 s", "12 min 34 s", "1 h 02 min".
@@ -1694,6 +1696,51 @@ class _Badge extends StatelessWidget {
   );
 }
 
+/// A Power Control safety note: an icon and a short message, with its one
+/// action as a full-width button underneath (fits any phone and text size).
+class _SafetyPanel extends StatelessWidget {
+  final Color color;
+  final IconData icon;
+  final String text;
+  final Widget button;
+  const _SafetyPanel({
+    required this.color,
+    required this.icon,
+    required this.text,
+    required this.button,
+  });
+  @override
+  Widget build(BuildContext context) => Container(
+    margin: const EdgeInsets.only(top: 12),
+    padding: const EdgeInsets.all(12),
+    decoration: BoxDecoration(
+      color: color.withValues(alpha: .10),
+      borderRadius: BorderRadius.circular(14),
+      border: Border.all(color: color.withValues(alpha: .45)),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(icon, size: 24, color: context.readable(color)),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                text,
+                style: const TextStyle(fontSize: 16, height: 1.35),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        button,
+      ],
+    ),
+  );
+}
+
 class _PowerControl extends StatefulWidget {
   final Esp32Service service;
   final OutletReading? reading;
@@ -1986,68 +2033,45 @@ class _PowerControlState extends State<_PowerControl> {
               ),
             ),
           // Reset done: the outlet stays off until the user turns it on.
-          if (r != null && r.safetyResetHold && !_busy)
-            Container(
-              margin: const EdgeInsets.only(top: 10),
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: _amber.withValues(alpha: .12),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  const Text(
-                    'Safety reset done. The outlet stays off until you turn '
-                    'it on.',
-                    style: TextStyle(fontSize: 16, height: 1.35),
-                  ),
-                  FilledButton.icon(
-                    onPressed: r.canCommand(widget.now) ? _turnOnAgain : null,
-                    icon: const Icon(Icons.power_settings_new),
-                    label: const Text('Turn on again'),
-                  ),
-                ],
+          if (r != null && r.safetyResetHold)
+            _SafetyPanel(
+              color: _amber,
+              icon: Icons.power_off,
+              text:
+                  'Safety reset done. The outlet stays off until you turn it '
+                  'on.',
+              button: FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: readableOn(_green, Colors.white),
+                  foregroundColor: Colors.white,
+                ),
+                onPressed: !_busy && r.canCommand(widget.now)
+                    ? _turnOnAgain
+                    : null,
+                icon: const Icon(Icons.power_settings_new),
+                label: const Text('Turn on again'),
               ),
             ),
           if (r != null && r.isLockedOut)
-            Container(
-              margin: const EdgeInsets.only(top: 10),
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: Colors.red.withValues(alpha: .08),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.lock_outline, size: 18, color: Colors.red),
-                  const SizedBox(width: 8),
-                  const Expanded(
-                    child: Text(
-                      'Inspect the appliance, then reset. It stays off until '
-                      'you turn it on again.',
-                      style: TextStyle(fontSize: 16, height: 1.35),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  FilledButton(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: Colors.red,
-                      foregroundColor: Colors.white,
-                    ),
-                    // Needs live data from the plug: it checks the reset
-                    // against its current session.
-                    onPressed:
-                        !_busy &&
-                            r.isFresh(widget.now) &&
-                            r.sessionID.isNotEmpty
-                        ? _reset
-                        : null,
-                    child: const Text('Reset Safety'),
-                  ),
-                ],
+            _SafetyPanel(
+              color: Colors.red,
+              icon: Icons.lock_outline,
+              text:
+                  'Inspect the appliance, then reset. It stays off until you '
+                  'turn it on again.',
+              button: FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: Colors.red.shade700,
+                  foregroundColor: Colors.white,
+                ),
+                // Needs live data from the plug: it checks the reset
+                // against its current session.
+                onPressed:
+                    !_busy && r.isFresh(widget.now) && r.sessionID.isNotEmpty
+                    ? _reset
+                    : null,
+                icon: const Icon(Icons.lock_open),
+                label: const Text('Reset Safety'),
               ),
             ),
           if (r?.isWarning == true)
