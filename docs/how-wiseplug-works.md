@@ -182,16 +182,37 @@ the thesis.
 
 - **No Wi-Fi or no internet:** the plug keeps measuring and keeps every
   safety rule (safe times, warnings, cutoffs). Appliances it cannot
-  recognise without the internet get the 30-minute default. Its records wait
-  in a queue and are sent when the internet is back. After a minute without
-  the home Wi-Fi it opens "wisewp" again, and keeps retrying the home
-  network every 2 minutes.
+  recognise without the internet get the 30-minute default. Its run records
+  and safety reports are **saved on the plug's own memory (flash)** and sent
+  when the internet is back, so even a long outage or a power cut loses
+  nothing. After a minute without the home Wi-Fi it opens "wisewp" again,
+  and keeps retrying the home network every 2 minutes.
 - **Power cut:** if the power goes off while an appliance was running, that
   outlet comes back **off and locked** ("Power cut" in the app), so nothing
   restarts while nobody is watching. Reset, then Turn on again. An outlet
   that was idle comes back as it was.
 
-*Firmware: store-and-forward queues, setup(); Supabase: ingest-batch.*
+*Firmware: store-and-forward on flash (report_store.h), setup().*
+
+## Step 11b. Looking after itself (no one has to restart it)
+
+- **Connection trouble:** if the plug cannot reach the cloud 10 times in a
+  row while Wi-Fi works, it opens a fresh connection by itself.
+- **Self-restart, only when safe:** if that does not help, if its memory gets
+  too broken up, or if part of its program stops, it restarts itself, but
+  **only while both outlets are idle or off**, so a running appliance is
+  never cut. It also refreshes itself once a week the same way. After a
+  restart because the internet was down, it waits 6 hours before trying
+  that again.
+- **Watchdog:** if the safety program ever froze, a built-in timer restarts
+  the plug; a running outlet then comes back off and locked, as after a
+  power cut.
+- **Updates over Wi-Fi:** new firmware can be sent from the Arduino IDE over
+  Wi-Fi (with a password), only while both outlets are idle or off.
+- **Health check:** the plug reports how long it has been running, its free
+  memory and why it last restarted (Firebase: status/health).
+
+*Firmware: healthCheck(), noteCloud(), enableLoopWDT(), ArduinoOTA.*
 
 ## Step 12. What is kept, and for what
 

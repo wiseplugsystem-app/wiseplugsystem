@@ -267,6 +267,36 @@ firmware; the notice text in `sendNotices()`; the push text in
 for the thesis:
 `select occurred_at, outlet, appliance_name, power_w, current_a from alert_logs where alert_type = 'OVERCURRENT' order by occurred_at;`
 
+## Keeping the plug running (in plain words)
+
+WisePlug looks after itself, so nobody has to unplug it to "restart" it:
+
+- **If the internet connection keeps failing**, the plug closes and reopens
+  its connection to the cloud by itself.
+- **If that does not help, or its memory gets too cut up, or after 7 days**,
+  it restarts itself, but **only while both outlets are idle or off**, so a
+  running appliance is never interrupted. After a restart for a lasting
+  internet problem it waits 6 hours before trying that again.
+- **If the safety part ever froze**, a hardware watchdog restarts it; an
+  outlet that was running then comes back off and locked, like after a power
+  cut.
+- **Run summaries and safety reports are saved on the plug's flash** until
+  the server has them, so a long Wi-Fi outage or a power cut loses nothing.
+- **Updates over Wi-Fi:** new firmware can be sent from the Arduino IDE
+  without a cable, only while both outlets are idle or off.
+- **Safer connections:** the plug now checks the servers' certificates.
+
+How it works: the SELF-HEALING section of the firmware (cloud health,
+heartbeats, `healthCheck()` in the safety loop, `enableLoopWDT()`); the
+store-and-forward section (`report_store.h`, `event_store.h`, a 64 KB file
+`/reports.bin`); Arduino OTA when `OTA_PASSWORD` is set in `secrets.h`;
+`useBuiltinCACertBundle()`. The plug reports `devices/gadget-1/status/health`
+(uptime, free memory, largest free block, last self-restart) in Firebase.
+
+**Arduino IDE setting (once):** Tools → Partition Scheme → **Minimal SPIFFS
+(1.9MB APP with OTA/128KB SPIFFS)**. The firmware no longer fits the default
+layout with room to spare.
+
 ## Deployment
 
 Deploy the updated database rules to permit each signed-in user to read/write their alert preferences. Deploy the updated functions to honor those preferences for safety push delivery. These changes do not alter device ownership requirements.

@@ -29,19 +29,23 @@
 #include <vector>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include <ArduinoOTA.h>
 // Exact 64-bit millisecond timestamps (doubles would be rounded in JSON).
 #define ARDUINOJSON_USE_LONG_LONG 1
 #include <ArduinoJson.h>
 #include <esp_timer.h>
+#include <esp_heap_caps.h>
 #include <time.h>
 #include "secrets.h"        // FIREBASE_HOST, FIREBASE_AUTH. Never commit or share.
 #include "safety_state.h"   // shared state machine, unit-tested in test/
 #include "recognition_window.h"  // per-run features for recognize-appliance
+#include "report_store.h"       // flash store for reports (event_store.h, unit-tested)
 
 // ==========================================
 // CONFIGURATION
 // ==========================================
-constexpr const char* DEVICE_ID = "gadget-1";  // must match the app's DeviceBinding
+#define DEVICE_ID_TEXT "gadget-1"
+constexpr const char* DEVICE_ID = DEVICE_ID_TEXT;  // must match the app's DeviceBinding
 
 // Outlet switches: one solid-state relay (SSR "DA", DC input) per outlet,
 // + to the GPIO, - to GND. An SSR conducts while its input is HIGH, and both
@@ -226,6 +230,8 @@ struct RecognitionReply {
   char status[24] = {}, applianceID[64] = {}, name[64] = {};
 };
 QueueHandle_t sessionReports, safetyReports, recognitionReports, recognitionReplies;
+// One cloud connection's health: consecutive failed calls and fresh starts.
+struct CloudHealth { uint32_t fails = 0, resets = 0; };
 
 // ==========================================
 // TIME HELPERS (never block waiting for NTP)
@@ -251,6 +257,8 @@ bool persistSafety(SocketChannel& ch) {
   bool hazardous = state == SocketState::Sampling || state == SocketState::Active || state == SocketState::Warning || state == SocketState::LockedOut;
   bool ok = ch.prefs.putBool("hazard", hazardous) == 1;
   ok = (ch.prefs.putBool("disabled", state == SocketState::Disabled) == 1) && ok;
+  // Off after a safety reset: still off, and still asking first, after a restart.
+  ok = (ch.prefs.putBool("hold", state == SocketState::Disabled && ch.data.safety.resetHold) == 1) && ok;
   if (ch.data.alert.id[0]) ok = (ch.prefs.putBytes("alert", &ch.data.alert, sizeof(AlertRecord)) == sizeof(AlertRecord)) && ok;
   if (!ok) { ch.storageOK = false; ch.data.safety.state = SocketState::LockedOut; ++ch.data.lockSeq; }
   applyRelay(ch);
@@ -583,20 +591,141 @@ void sensorTask(void*) {
 }
 
 // ==========================================
+// SELF-HEALING: nobody should have to restart the plug by hand
+// ==========================================
+// Safety (limits, warnings, cutoffs) runs in loop() and never needs the
+// cloud. These keep the cloud side working for weeks:
+//  A. Cloud calls need one large free block of memory for TLS. After
+//     CLOUD_FAILS_TO_RESET failed calls in a row while Wi-Fi is up, the TLS
+//     connection is closed and opened fresh (its buffers are freed).
+//  B. A self-restart, only while BOTH outlets are idle or off (a restart
+//     during a run would lock that outlet): when the cloud still fails after
+//     CLOUD_RESETS_TO_RESTART fresh connections, when the largest free block
+//     stays below LOW_BLOCK_BYTES for LOW_MEMORY_MS, when a network task has
+//     not run for TASK_STUCK_MS, or as a preventive restart after
+//     PREVENTIVE_RESTART_MS (then only with nothing waiting to be sent).
+//  D. Watchdogs: the hardware watchdog restarts the plug if the safety loop
+//     itself ever freezes (a running outlet then comes back locked, as after
+//     a power cut); a frozen network task is caught by B's heartbeat check.
+// The reason of the last self-restart is kept and reported in the status.
+constexpr uint32_t CLOUD_FAILS_TO_RESET = 10, CLOUD_RESETS_TO_RESTART = 3;
+constexpr size_t LOW_BLOCK_BYTES = 20 * 1024;
+constexpr uint64_t LOW_MEMORY_MS = 10 * 60 * 1000ULL, TASK_STUCK_MS = 10 * 60 * 1000ULL;
+constexpr uint64_t PREVENTIVE_RESTART_MS = 7ULL * 24 * 3600 * 1000;
+constexpr uint64_t CLOUD_RESTART_BACKOFF_MS = 6ULL * 3600 * 1000;
+
+enum RestartWhy : int { NoRestart = 0, CloudFailing, LowMemory, TaskStuck, Preventive };
+const char* restartText(int why) {
+  switch (why) {
+    case CloudFailing: return "cloud calls kept failing";
+    case LowMemory: return "memory too fragmented";
+    case TaskStuck: return "a network task stopped";
+    case Preventive: return "preventive (7 days)";
+    default: return "";
+  }
+}
+std::atomic<int> restartWhy{NoRestart};
+// What the last self-restart was for (kept in NVS), reported in the status.
+char lastRestart[40] = "";
+// The first reason wins; a preventive restart never replaces a fault.
+void requestRestart(int why) {
+  // Restarting again cannot fix what a restart did not fix (e.g. the
+  // internet is down): at most one such restart every CLOUD_RESTART_BACKOFF_MS.
+  if (why == CloudFailing && strcmp(lastRestart, restartText(CloudFailing)) == 0 &&
+      monotonicMs() < CLOUD_RESTART_BACKOFF_MS) return;
+  int none = NoRestart;
+  if (restartWhy.compare_exchange_strong(none, why)) Serial.printf("Self-restart requested: %s\n", restartText(why));
+}
+// Heartbeats of the network tasks (monotonic ms of their last loop).
+std::atomic<uint64_t> netBeat{0}, supaBeat{0};
+
+// Counts a call made while Wi-Fi was up. Returns true when the TLS
+// connection should be closed and opened fresh.
+bool noteCloud(CloudHealth& h, int code, const char* name) {
+  if (code > 0) { h.fails = h.resets = 0; return false; }  // any HTTP answer: the link works
+  if (++h.fails < CLOUD_FAILS_TO_RESET) return false;
+  h.fails = 0;
+  Serial.printf("%s: %lu failed calls, opening a fresh connection (largest free block %u)\n", name,
+                (unsigned long)CLOUD_FAILS_TO_RESET, (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+  if (++h.resets >= CLOUD_RESETS_TO_RESTART) requestRestart(CloudFailing);
+  return true;
+}
+
+// Nothing is waiting to be sent (a preventive restart must not drop records).
+bool queuesEmpty() {
+  for (QueueHandle_t q : {events, notices, sessionReports, safetyReports, recognitionReports}) {
+    if (q && uxQueueMessagesWaiting(q)) return false;
+  }
+  return true;
+}
+
+// Called from loop() (the safety task). Checks memory and the heartbeats,
+// and restarts only while both outlets are idle or off.
+void healthCheck(uint64_t now) {
+  static uint64_t lastCheck = 0, lowSince = 0;
+  if (now - lastCheck < 1000) return;
+  lastCheck = now;
+  if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < LOW_BLOCK_BYTES) {
+    if (!lowSince) lowSince = now;
+    else if (now - lowSince >= LOW_MEMORY_MS) requestRestart(LowMemory);
+  } else {
+    lowSince = 0;
+  }
+  uint64_t nb = netBeat.load(), sb = supaBeat.load();
+  if ((nb && now - nb >= TASK_STUCK_MS) || (sb && now - sb >= TASK_STUCK_MS)) requestRestart(TaskStuck);
+  if (now >= PREVENTIVE_RESTART_MS) requestRestart(Preventive);
+  int why = restartWhy.load();
+  if (why == NoRestart) return;
+  for (auto& ch : outlets) {
+    auto st = ch.data.safety.state;
+    if ((st != SocketState::Idle && st != SocketState::Disabled) || ch.sessionOpen) return;  // wait: a run is on
+  }
+  if (why == Preventive && !queuesEmpty()) return;
+  Preferences p;
+  if (p.begin("health", false)) { p.putString("last", restartText(why)); p.end(); }
+  Serial.printf("Self-restart now (both outlets idle or off): %s\n", restartText(why));
+  Serial.flush();
+  ESP.restart();
+}
+
+// ==========================================
 // FIREBASE REST (network task only)
 // ==========================================
 WiFiClientSecure tls;
 HTTPClient http;
 String firebaseHost;
+CloudHealth firebaseHealth;
 int firebaseRequest(const char* method, const String& path, const String& body = "", String* response = nullptr) {
   if (WiFi.status() != WL_CONNECTED) return -1;
-  if (!http.begin(tls, "https://" + firebaseHost + "/" + path + ".json?auth=" + FIREBASE_AUTH)) return -1;
-  http.setTimeout(5000);
-  int code;
-  if (strcmp(method, "GET") == 0) code = http.GET();
-  else { http.addHeader("Content-Type", "application/json"); code = http.sendRequest(method, body); }
-  if (response && code == HTTP_CODE_OK) *response = http.getString();
-  http.end();  // keeps the TLS connection open for reuse
+  int code = -1;
+  if (http.begin(tls, "https://" + firebaseHost + "/" + path + ".json?auth=" + FIREBASE_AUTH)) {
+    http.setTimeout(5000);
+    if (strcmp(method, "GET") == 0) code = http.GET();
+    else { http.addHeader("Content-Type", "application/json"); code = http.sendRequest(method, body); }
+    if (response && code == HTTP_CODE_OK) *response = http.getString();
+    http.end();  // keeps the TLS connection open for reuse
+  }
+  if (noteCloud(firebaseHealth, code, "Firebase")) tls.stop();  // A: a fresh connection next time
+  return code;
+}
+// C: the once-a-second update is written into this fixed buffer instead of a
+// new String each time, so the heap is not cut into pieces over the weeks.
+char patchBuffer[6144];
+int firebasePatch(const JsonDocument& root) {
+  if (WiFi.status() != WL_CONNECTED) return -1;
+  size_t n = serializeJson(root, patchBuffer, sizeof patchBuffer);
+  if (n == 0 || n >= sizeof patchBuffer - 1) {  // too big for the buffer (not expected): as before
+    String body; serializeJson(root, body);
+    return firebaseRequest("PATCH", "", body);
+  }
+  int code = -1;
+  if (http.begin(tls, "https://" + firebaseHost + "/.json?auth=" + FIREBASE_AUTH)) {
+    http.setTimeout(5000);
+    http.addHeader("Content-Type", "application/json");
+    code = http.sendRequest("PATCH", reinterpret_cast<uint8_t*>(patchBuffer), n);
+    http.end();
+  }
+  if (noteCloud(firebaseHealth, code, "Firebase")) tls.stop();
   return code;
 }
 
@@ -694,6 +823,12 @@ void addStatus(JsonDocument& root, const Snapshot* s) {
   root[b + "powerDraw"] = draw; root[b + "connectionStatus"] = "Online";
   root[b + "safetyTriggered"] = triggered; root[b + "lastSeen"][".sv"] = "timestamp";
   root[b + "wifiSSID"] = WiFi.SSID();  // lets the app confirm a Wi-Fi change
+  // Health, for checking a plug that runs for weeks (not shown in the app).
+  JsonObject h = root[b + "health"].to<JsonObject>();
+  h["uptimeS"] = uint32_t(monotonicMs() / 1000);
+  h["freeHeap"] = ESP.getFreeHeap();
+  h["largestBlock"] = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  h["lastRestart"] = lastRestart;
   if (remainingMs >= 0) root[b + "remainingLimit"] = double(remainingMs) / 1000.0;
   else root[b + "remainingLimit"] = nullptr;  // null deletes the field
 }
@@ -725,14 +860,18 @@ void addLiveTelemetry(JsonDocument& root, int i, const Snapshot& s) {
 WiFiClientSecure supaTls;
 HTTPClient supaHttp;
 
+CloudHealth supabaseHealth;
 int supabasePost(const char* function, const String& body, String* response = nullptr) {
-  if (!supaHttp.begin(supaTls, String(SUPABASE_FUNCTIONS_URL) + "/" + function)) return -1;
-  supaHttp.setTimeout(8000);
-  supaHttp.addHeader("Content-Type", "application/json");
-  supaHttp.addHeader("x-device-key", SUPABASE_DEVICE_KEY);
-  int code = supaHttp.POST(body);
-  if (response && code > 0) *response = supaHttp.getString();
-  supaHttp.end();
+  int code = -1;
+  if (supaHttp.begin(supaTls, String(SUPABASE_FUNCTIONS_URL) + "/" + function)) {
+    supaHttp.setTimeout(8000);
+    supaHttp.addHeader("Content-Type", "application/json");
+    supaHttp.addHeader("x-device-key", SUPABASE_DEVICE_KEY);
+    code = supaHttp.POST(body);
+    if (response && code > 0) *response = supaHttp.getString();
+    supaHttp.end();
+  }
+  if (WiFi.status() == WL_CONNECTED && noteCloud(supabaseHealth, code, "Supabase")) supaTls.stop();
   return code;
 }
 // Sent, a duplicate (already stored) or rejected as malformed: either way done.
@@ -784,25 +923,105 @@ bool sendRecognition(const RecognitionReport& r) {
 
 // Each kind of report has its own retry time, so a failing one never holds
 // up the others: safety reports first, then recognition, then session logs.
-void sendSupabase() {
-  static uint64_t safetyRetryAt = 0, recognitionRetryAt = 0, sessionRetryAt = 0;
-  uint64_t now = monotonicMs();
+// ---- Store and forward ----
+// Run summaries and safety reports are written to a file on flash before
+// they are sent, and deleted only once Supabase has them, so a long Wi-Fi
+// outage or a restart (power cut, self-restart) loses nothing. Only this
+// task touches the store, and the safety loop never writes to flash: it
+// queues reports in RAM as before, and they move to flash here within a
+// second, once their time is known (a report from before the clock was set
+// waits in RAM: its time could not be worked out after a restart).
+// Safety reports are critical: the last to be replaced if the store is full.
+ReportStore reportStore;
+FileIO reportFile;
+RamIO reportRam;  // if the flash cannot be used: a few slots in RAM, as before
+bool reportsOnFlash = false;
+static_assert(sizeof(SafetyReport) <= ReportStore::MAX_PAYLOAD, "SafetyReport must fit a store slot");
+static_assert(sizeof(SessionSummary) <= ReportStore::MAX_PAYLOAD, "SessionSummary must fit a store slot");
+
+void beginReportStore() {
+  reportsOnFlash = LittleFS.begin(true) &&
+      reportFile.open("/reports.bin", STORE_SLOT_BYTES * STORE_SLOTS) && reportStore.begin(&reportFile);
+  if (!reportsOnFlash) reportStore.begin(&reportRam);
+  Serial.printf("Report store: %s, %lu waiting\n", reportsOnFlash ? "flash" : "RAM only",
+                (unsigned long)reportStore.pending());
+}
+
+// Moves dated reports from the RAM queues to the store (oldest first).
+void storeQueued() {
   SafetyReport r;
-  while (now >= safetyRetryAt && xQueuePeek(safetyReports, &r, 0) == pdTRUE) {
+  while (xQueuePeek(safetyReports, &r, 0) == pdTRUE) {
     int64_t at = datedAt(r.at, r.mono);
     if (!at) break;
-    JsonDocument doc;
-    doc["deviceId"] = DEVICE_ID; doc["outlet"] = OUTLET_HW[r.outlet].key;
-    doc["eventId"] = r.eventID; doc["type"] = r.type; doc["occurredAt"] = at;
-    doc["profileId"] = ""; doc["applianceName"] = r.name;
-    doc["runtimeS"] = r.runtimeS; doc["limitS"] = r.limitS; doc["baselineS"] = 0;
-    doc["learned"] = false; doc["sessionCount"] = 0;
-    doc["powerW"] = r.power; doc["currentA"] = r.current;
-    String body; serializeJson(doc, body);
-    if (!supabaseDone(supabasePost("evaluate-safety-alert", body))) { safetyRetryAt = monotonicMs() + 30000; break; }
+    r.at = at;
+    if (!reportStore.push(KIND_SAFETY, true, &r, sizeof r)) break;  // flash busy: next time
     xQueueReceive(safetyReports, &r, 0);
   }
-  // Before the session log of the same run, which closes its outlet session.
+  SessionSummary s;
+  while (xQueuePeek(sessionReports, &s, 0) == pdTRUE) {
+    int64_t end = datedAt(s.endEpoch, s.endMono);
+    if (!end) break;
+    s.endEpoch = end;
+    if (!s.startEpoch) s.startEpoch = end - int64_t(s.durationS) * 1000;
+    if (!reportStore.push(KIND_SESSION, false, &s, sizeof s)) break;
+    xQueueReceive(sessionReports, &s, 0);
+  }
+}
+
+int postSafety(const SafetyReport& r) {
+  JsonDocument doc;
+  doc["deviceId"] = DEVICE_ID; doc["outlet"] = OUTLET_HW[r.outlet].key;
+  doc["eventId"] = r.eventID; doc["type"] = r.type; doc["occurredAt"] = r.at;
+  doc["profileId"] = ""; doc["applianceName"] = r.name;
+  doc["runtimeS"] = r.runtimeS; doc["limitS"] = r.limitS; doc["baselineS"] = 0;
+  doc["learned"] = false; doc["sessionCount"] = 0;
+  doc["powerW"] = r.power; doc["currentA"] = r.current;
+  String body; serializeJson(doc, body);
+  return supabasePost("evaluate-safety-alert", body);
+}
+
+int postSession(const SessionSummary& s) {
+  JsonDocument doc;
+  doc["deviceId"] = DEVICE_ID; doc["outlet"] = OUTLET_HW[s.outlet].key;
+  doc["profileId"] = ""; doc["applianceName"] = s.name;
+  doc["startedAt"] = s.startEpoch; doc["endedAt"] = s.endEpoch;
+  doc["durationS"] = s.durationS; doc["endReason"] = s.reason;
+  doc["energyWh"] = s.energyWh; doc["peakCurrentA"] = s.peakCurrent; doc["peakPowerW"] = s.peakPower;
+  // The 7-use learning is done by Supabase (log-session) for confirmed appliances.
+  JsonObject learning = doc["learning"].to<JsonObject>();
+  learning["sessionCount"] = 0; learning["learned"] = false; learning["limitS"] = s.limitS;
+  learning["countsTowardLearning"] = false;
+  String body; serializeJson(doc, body);
+  return supabasePost("log-session", body);
+}
+
+// Sends the oldest stored report. Returns false to try again later.
+bool sendStored() {
+  int32_t slot;
+  if (reportStore.oldest(&slot, 1) == 0) return true;
+  static uint8_t payload[ReportStore::MAX_PAYLOAD];
+  uint8_t kind; uint32_t seq, size;
+  if (!reportStore.read(slot, kind, seq, payload, size)) { reportStore.done(slot); return true; }  // unreadable
+  int code;
+  if (kind == KIND_SAFETY && size == sizeof(SafetyReport)) {
+    SafetyReport r; memcpy(&r, payload, sizeof r); code = postSafety(r);
+  } else if (kind == KIND_SESSION && size == sizeof(SessionSummary)) {
+    SessionSummary s; memcpy(&s, payload, sizeof s); code = postSession(s);
+  } else {
+    reportStore.done(slot);  // from another firmware version: drop it
+    return true;
+  }
+  if (!supabaseDone(code)) return false;
+  reportStore.done(slot);
+  return true;
+}
+
+// Each kind of report has its own retry time, so a failing one never holds
+// up the others: recognition first (a run is waiting for its cutoff), then
+// the stored reports, oldest first.
+void sendSupabase() {
+  static uint64_t recognitionRetryAt = 0, storeRetryAt = 0;
+  storeQueued();
   RecognitionReport f;
   while (monotonicMs() >= recognitionRetryAt && xQueuePeek(recognitionReports, &f, 0) == pdTRUE) {
     // A run that has ended needs no cutoff, and Stage 2 replaces Stage 1.
@@ -812,23 +1031,8 @@ void sendSupabase() {
     recognitionRetryAt = monotonicMs() + RECOGNITION_RETRY_MS;
     break;
   }
-  SessionSummary s;
-  while (monotonicMs() >= sessionRetryAt && xQueuePeek(sessionReports, &s, 0) == pdTRUE) {
-    int64_t end = datedAt(s.endEpoch, s.endMono);
-    if (!end) break;
-    JsonDocument doc;
-    doc["deviceId"] = DEVICE_ID; doc["outlet"] = OUTLET_HW[s.outlet].key;
-    doc["profileId"] = ""; doc["applianceName"] = s.name;
-    doc["startedAt"] = s.startEpoch ? s.startEpoch : end - int64_t(s.durationS) * 1000;
-    doc["endedAt"] = end; doc["durationS"] = s.durationS; doc["endReason"] = s.reason;
-    doc["energyWh"] = s.energyWh; doc["peakCurrentA"] = s.peakCurrent; doc["peakPowerW"] = s.peakPower;
-    // The 7-use learning is done by Supabase (log-session) for confirmed appliances.
-    JsonObject learning = doc["learning"].to<JsonObject>();
-    learning["sessionCount"] = 0; learning["learned"] = false; learning["limitS"] = s.limitS;
-    learning["countsTowardLearning"] = false;
-    String body; serializeJson(doc, body);
-    if (!supabaseDone(supabasePost("log-session", body))) { sessionRetryAt = monotonicMs() + 30000; break; }
-    xQueueReceive(sessionReports, &s, 0);
+  while (monotonicMs() >= storeRetryAt && reportStore.pending()) {
+    if (!sendStored()) { storeRetryAt = monotonicMs() + 30000; break; }
   }
 }
 #endif
@@ -1100,13 +1304,40 @@ void syncLockdown(const Snapshot* latest) {
 // ==========================================
 // NETWORK TASK (core 0): never blocks the safety loop
 // ==========================================
+// E: firmware updates over Wi-Fi from the Arduino IDE (Arduino OTA), only when
+// OTA_PASSWORD is set in secrets.h, and only while both outlets are idle or
+// off: an update restarts the plug, which would lock a running outlet.
+#ifdef OTA_PASSWORD
+bool otaStarted = false;
+void handleOta(bool connected, const Snapshot* latest, bool available) {
+  if (!connected) return;
+  if (!otaStarted) {
+    ArduinoOTA.setHostname("wiseplug-" DEVICE_ID_TEXT);
+    ArduinoOTA.setPassword(OTA_PASSWORD);
+    ArduinoOTA.onStart([] { Serial.println("Update over Wi-Fi: starting"); });
+    ArduinoOTA.onEnd([] { Serial.println("Update over Wi-Fi: done, restarting"); });
+    ArduinoOTA.onError([](ota_error_t e) { Serial.printf("Update over Wi-Fi failed (%d)\n", int(e)); });
+    ArduinoOTA.begin();
+    otaStarted = true;
+  }
+  if (!available) return;
+  for (int i = 0; i < 2; ++i) {
+    auto st = latest[i].safety.state;
+    if (st != SocketState::Idle && st != SocketState::Disabled) return;  // a run is on: later
+  }
+  ArduinoOTA.handle();
+}
+#endif
+
 void networkTask(void*) {
   firebaseHost = FIREBASE_HOST;
   firebaseHost.replace("https://", ""); firebaseHost.replace("http://", "");
   while (firebaseHost.endsWith("/")) firebaseHost.remove(firebaseHost.length() - 1);
-  tls.setInsecure();  // TODO: pin Google's root CA before production use
+  // G: the servers' certificates are checked against the trusted root
+  // certificates built into the ESP32 core (no longer setInsecure).
+  tls.useBuiltinCACertBundle();
 #ifdef SUPABASE_FUNCTIONS_URL
-  supaTls.setInsecure();  // TODO: pin the Supabase root CA before production use
+  supaTls.useBuiltinCACertBundle();
 #endif
   wifiPrefs.begin("wifi", false); appliedConfig = wifiPrefs.getLong64("applied", 0);
   savedSsid = wifiPrefs.getString("ssid", ""); savedPass = wifiPrefs.getString("pass", "");
@@ -1120,6 +1351,7 @@ void networkTask(void*) {
   uint64_t lastCommands = 0, lastPublish = 0, lastConfig = 0, lastLive = 0;
   for (;;) {
     uint64_t now = monotonicMs();
+    netBeat = now;  // D: the safety loop checks this heartbeat
     updateWifi(now);
     bool connected = netMode == NetMode::Online && WiFi.status() == WL_CONNECTED;
     for (int i = 0; i < 2; ++i) {
@@ -1139,13 +1371,15 @@ void networkTask(void*) {
           if (live) addLiveTelemetry(root, i, latest[i]);
         }
         addStatus(root, latest);
-        String body; serializeJson(root, body);
-        if (firebaseRequest("PATCH", "", body) == HTTP_CODE_OK && live) lastLive = now;
+        if (firebasePatch(root) == HTTP_CODE_OK && live) lastLive = now;
       }
       if (now - lastConfig >= 10000) { lastConfig = now; checkWifiConfig(); }
       sendNotices();  // safety first
       sendEvents();
     }
+#ifdef OTA_PASSWORD
+    handleOta(connected, latest, available[0] && available[1]);
+#endif
     vTaskDelay(pdMS_TO_TICKS(netMode == NetMode::Setup ? 10 : 100));  // snappy setup page
   }
 }
@@ -1156,7 +1390,9 @@ void networkTask(void*) {
 // Firebase task that froze telemetry_logs, so the app saw stale outlets and
 // refused Reset Safety while the device's commands went unread.
 void supabaseTask(void*) {
+  beginReportStore();
   for (;;) {
+    supaBeat = monotonicMs();  // D: the safety loop checks this heartbeat
     if (netMode == NetMode::Online && WiFi.status() == WL_CONNECTED) sendSupabase();
     vTaskDelay(pdMS_TO_TICKS(1000));
   }
@@ -1196,7 +1432,10 @@ void setup() {
     ch.data.alert.id[79] = 0; ch.data.alert.type[39] = 0; ch.data.alert.resolution[15] = 0;
     // A reboot during a running session (e.g. power cut) locks out: nothing restarts unattended.
     if (!ch.storageOK || ch.prefs.getBool("hazard", false)) lock(ch);
-    else if (ch.prefs.getBool("disabled", false)) ch.data.safety.state = SocketState::Disabled;
+    else if (ch.prefs.getBool("disabled", false)) {
+      ch.data.safety.state = SocketState::Disabled;
+      ch.data.safety.resetHold = ch.prefs.getBool("hold", false);
+    }
     applyRelay(ch);
   }
   configASSERT(xTaskCreatePinnedToCore(sensorTask, "meters", 4096, nullptr, 1, nullptr, 0) == pdPASS);
@@ -1204,6 +1443,18 @@ void setup() {
 #ifdef SUPABASE_FUNCTIONS_URL
   configASSERT(xTaskCreatePinnedToCore(supabaseTask, "supabase", 12288, nullptr, 1, nullptr, 0) == pdPASS);
 #endif
+  {
+    Preferences p;  // B: why the plug last restarted itself (shown once in the status)
+    if (p.begin("health", false)) {
+      strlcpy(lastRestart, p.getString("last", "").c_str(), sizeof(lastRestart));
+      p.remove("last"); p.end();
+    }
+    if (!lastRestart[0] && esp_reset_reason() == ESP_RST_TASK_WDT) strlcpy(lastRestart, "watchdog", sizeof(lastRestart));
+    if (!lastRestart[0] && esp_reset_reason() == ESP_RST_BROWNOUT) strlcpy(lastRestart, "brownout", sizeof(lastRestart));
+    if (!lastRestart[0] && esp_reset_reason() == ESP_RST_PANIC) strlcpy(lastRestart, "crash", sizeof(lastRestart));
+  }
+  // D: the hardware watchdog restarts the plug if the safety loop freezes.
+  enableLoopWDT();
   // 1 = power-on, 3 = software reset, 4/5 = crash, 6/7 = watchdog, 9 = brownout.
   // Any reboot while a session runs locks both outlets ("Power cut" in the app).
   Serial.printf("SYSTEM READY (reset reason %d, free heap %u)\n", int(esp_reset_reason()), ESP.getFreeHeap());
@@ -1279,5 +1530,6 @@ void loop() {
       xQueueOverwrite(ch.snapshots, &d);
     }
   }
+  healthCheck(now);  // A/B/D: memory, heartbeats, safe self-restart
   delay(10);
 }
