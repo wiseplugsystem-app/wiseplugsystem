@@ -35,7 +35,8 @@ export interface Evaluation {
 }
 
 const minutes = (s: number) => `${Math.max(1, Math.round(s / 60))} min`;
-const outletName = (o: string) => (o === "outlet_1" ? "Outlet 1" : "Outlet 2");
+// As the app names them.
+const outletName = (o: string) => (o === "outlet_1" ? "Outlet A" : "Outlet B");
 
 export function evaluate(a: AlertInput): Evaluation {
   const where = `${a.applianceName} on ${outletName(a.outlet)}`;
@@ -44,9 +45,9 @@ export function evaluate(a: AlertInput): Evaluation {
     case "OVERCURRENT":
       return {
         severity: "critical",
-        title: "WisePlug: overcurrent, outlet locked",
-        message: `${where} drew ${a.currentA.toFixed(2)} A, above the outlet's rating. ` +
-          "Unplug it and inspect it before resetting.",
+        title: "This appliance uses too much power for WisePlug",
+        message: `${where} used too much power for WisePlug (${a.currentA.toFixed(1)} A), ` +
+          "so the outlet was turned off to stay safe. Unplug it before resetting.",
         baselineRatio: ratio,
       };
     case "POWER_ANOMALY":

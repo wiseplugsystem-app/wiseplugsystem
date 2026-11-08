@@ -1062,9 +1062,11 @@ void sendNotices() {
     doc["type"] = "SAFETY_TRIP"; doc["reason"] = n.reason;
     doc["outlet"] = OUTLET_HW[n.outlet].letter; doc["appliance"] = n.appliance;
     doc["power_W"] = n.power; doc["current_A"] = n.current;
-    doc["message"] = String(n.appliance) + (strcmp(n.reason, "OVERCURRENT") == 0
-        ? " drew more current than the outlet is rated for" : " drew far more power than it normally does") +
-        ". Outlet " + OUTLET_HW[n.outlet].letter + " was locked down.";
+    doc["message"] = strcmp(n.reason, "OVERCURRENT") == 0
+        ? String("This appliance uses too much power for WisePlug. Outlet ") + OUTLET_HW[n.outlet].letter +
+              " was turned off to stay safe."
+        : String(n.appliance) + " drew far more power than it normally does. Outlet " +
+              OUTLET_HW[n.outlet].letter + " was turned off to stay safe.";
     // Tripped before the clock was set: date it from the monotonic clock now.
     int64_t at = n.at ? n.at : epochMs() ? epochMs() - int64_t(monotonicMs() - n.mono) : 0;
     if (at) doc["time"] = at; else doc["time"][".sv"] = "timestamp";

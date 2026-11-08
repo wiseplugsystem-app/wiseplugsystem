@@ -232,6 +232,41 @@ heating type's default is its limit, and an appliance is never allowed more
 (a shorter time stays shorter). Changing a row updates every type and
 appliance. Why these numbers: docs/scope.md, section 3.
 
+## Heatsinks and too much power (in plain words)
+
+Each solid-state relay (SSR) sits on its own aluminium heatsink. The relay
+gets warm while it gives power (about 1.6 V × the current: roughly 13 W at
+8 A), and the heatsink carries that heat away. WisePlug has no temperature
+sensor, so the heatsinks are checked by hand.
+
+**Fitting the heatsinks (with the plug unplugged from the wall):**
+
+1. A thin, even layer of thermal paste (non-conductive, like CPU paste)
+   between the relay's metal base and the heatsink.
+2. Two M4 screws per relay, tightened a little at a time, firm but not
+   forced (the relay's tabs are plastic). Spring washers keep them tight.
+3. Fins pointing up and down, so warm air rises out.
+4. Vent holes in the box, low on one side and high on the other.
+5. The heatsink touches no screw terminal, bare wire or the current
+   clamp; route the wires away from the fins.
+6. The ESP32 and the meters beside or below the heatsinks, not above them
+   in the warm air.
+
+**Touch check:** run something big (a rice cooker or an iron) for 10
+minutes, then touch the heatsink. Warm is fine. Too hot to keep a finger on
+means the paste or the airflow is wrong: unplug it and fix that first.
+
+**Too much power:** WisePlug turns the outlet off at once above 10 A, or
+after 10 seconds above 8 A (about 1,760 W). The phone then says: *"This
+appliance uses too much power for WisePlug. Outlet A was turned off to stay
+safe."* Unplug that appliance before resetting.
+
+How it works: `MAX_CURRENT_A`, `CONTINUOUS_CURRENT_A` and `OVERLOAD_MS` in the
+firmware; the notice text in `sendNotices()`; the push text in
+`supabase/functions/_shared/safety.ts`. Every trip is logged in `alert_logs`
+for the thesis:
+`select occurred_at, outlet, appliance_name, power_w, current_a from alert_logs where alert_type = 'OVERCURRENT' order by occurred_at;`
+
 ## Deployment
 
 Deploy the updated database rules to permit each signed-in user to read/write their alert preferences. Deploy the updated functions to honor those preferences for safety push delivery. These changes do not alter device ownership requirements.
