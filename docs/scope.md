@@ -15,7 +15,7 @@ This document sets what the study covers (scope) and what it does not
 | Part | What is used | Role |
 |---|---|---|
 | Microcontroller | ESP32 (Wi-Fi) | Reads the meters, runs the safety rules, switches the outlets |
-| Energy meters | 2 × PZEM-004T v3.0, 100 A version (external current transformer), one per outlet on its own UART (A: GPIO 32/33, B: GPIO 25/26) | Voltage, current, power, power factor, frequency, energy |
+| Energy meters | 2 × PZEM-004T v3.0, 100 A version (external current transformer), one per outlet on its own UART (A: GPIO 25/26, B: GPIO 32/33) | Voltage, current, power, power factor, frequency, energy |
 | Switches | 2 × SSR-40DA solid-state relay (40 A at 24–380 V AC, 3–32 V DC input), A on GPIO 13, B on GPIO 12, each on an aluminium heatsink with thermal paste | Turns each outlet on and off |
 | Sockets | 2 outlets (A and B), 10 A 250 V | Where appliances plug in |
 | Rating | **10 A per outlet** (the socket); **8 A (about 1,760 W)** for loads that stay on | Above 10 A the outlet is cut off at once; above 8 A after 10 seconds (`CONTINUOUS_CURRENT_A`) |

@@ -2,6 +2,10 @@
   "rules": {
     ".read": false,
     ".write": false,
+    "device_accounts": {
+      ".read": false,
+      ".write": false
+    },
     "device_owners": {
       ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid",
       "$outlet": {
@@ -9,7 +13,8 @@
       }
     },
     "telemetry_logs": {
-      ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid"
+      ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid",
+      ".write": "auth != null && auth.uid === root.child('device_accounts/gadget-1').val()"
     },
     "appliance_profiles": {
       ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid"
@@ -27,9 +32,11 @@
       }
     },
     "alerts": {
-      ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid"
+      ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid",
+      ".write": "auth != null && auth.uid === root.child('device_accounts/gadget-1').val()"
     },
     "commands": {
+      ".read": "auth != null && auth.uid === root.child('device_accounts/gadget-1').val()",
       "$outlet": {
         ".read": "auth != null && root.child('device_owners').child($outlet).val() === auth.uid",
         ".write": "auth != null && root.child('device_owners').child($outlet).val() === auth.uid && ($outlet === 'outlet_A' || $outlet === 'outlet_B') && newData.exists() && (root.child('telemetry_logs').child($outlet).child('currentState').val() !== 'LOCKED_OUT' || newData.child('type').val() === 'RESET_SAFETY')",
@@ -79,6 +86,7 @@
       }
     },
     "command_results": {
+      ".write": "auth != null && auth.uid === root.child('device_accounts/gadget-1').val()",
       "$outlet": {
         ".read": "auth != null && root.child('device_owners').child($outlet).val() === auth.uid"
       }
@@ -86,10 +94,12 @@
     "devices": {
       "gadget-1": {
         "status": {
-          ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid"
+          ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid",
+          ".write": "auth != null && auth.uid === root.child('device_accounts/gadget-1').val()"
         },
         "outlets": {
-          ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid",
+          ".read": "(auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid) || (auth != null && auth.uid === root.child('device_accounts/gadget-1').val())",
+          ".write": "auth != null && auth.uid === root.child('device_accounts/gadget-1').val()",
           "$outlet": {
             "isLockedDown": {
               ".write": "auth != null && root.child('device_owners').child($outlet).val() === auth.uid && data.val() === true && newData.val() === false"
@@ -97,19 +107,23 @@
           }
         },
         "live_telemetry": {
-          ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid"
+          ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid",
+          ".write": "auth != null && auth.uid === root.child('device_accounts/gadget-1').val()"
         },
         "notifications": {
-          ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid"
+          ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid",
+          ".write": "auth != null && auth.uid === root.child('device_accounts/gadget-1').val()"
         },
         "wifiConfig": {
-          ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid",
-          ".write": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid",
-          ".validate": "newData.hasChildren(['ssid', 'password', 'updatedAt', 'updatedBy'])",
+          ".read": "(auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid) || (auth != null && auth.uid === root.child('device_accounts/gadget-1').val())",
+          ".write": "(auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid) || (auth != null && auth.uid === root.child('device_accounts/gadget-1').val())",
+          ".validate": "newData.hasChildren(['ssid', 'updatedAt', 'updatedBy'])",
           "ssid": { ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 32" },
           "password": { ".validate": "newData.isString() && (newData.val().length === 0 || (newData.val().length >= 8 && newData.val().length <= 63))" },
           "updatedAt": { ".validate": "newData.val() === now" },
           "updatedBy": { ".validate": "newData.val() === auth.uid" },
+          "receivedAt": { ".validate": "newData.isNumber() && auth != null && auth.uid === root.child('device_accounts/gadget-1').val()" },
+          "ackAt": { ".validate": "newData.isNumber() && auth != null && auth.uid === root.child('device_accounts/gadget-1').val()" },
           "$other": { ".validate": false }
         }
       }
@@ -135,7 +149,7 @@
     },
     "activity_log": {
       ".read": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid",
-      ".write": "auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid && !newData.exists()",
+      ".write": "(auth != null && root.child('device_owners/outlet_A').val() === auth.uid && root.child('device_owners/outlet_B').val() === auth.uid && !newData.exists()) || (auth != null && auth.uid === root.child('device_accounts/gadget-1').val())",
       ".indexOn": ".key"
     },
     "acknowledgments": {

@@ -297,6 +297,38 @@ store-and-forward section (`report_store.h`, `event_store.h`, a 64 KB file
 (1.9MB APP with OTA/128KB SPIFFS)**. The firmware no longer fits the default
 layout with room to spare.
 
+## The plug's own login (in plain words)
+
+The plug used to talk to Firebase with the **database secret**, a master key
+that can read and change everything. If someone read it from the chip, the
+whole database was open. Now the plug can sign in with **its own account**,
+like the app does, and the database rules let that account do only what the
+plug does: write its readings, alerts and results, read the app's commands
+and the new Wi-Fi network. It cannot read other users' data or change who
+owns the plug. Its login lasts an hour and the plug renews it by itself.
+If the login fails, safety is not affected: the outlets keep working and the
+plug tries again every minute.
+
+Set it up once, in this order:
+
+1. **Firebase console → Authentication → Users → Add user:** an email such
+   as `plug-gadget-1@<your domain>` (it does not need to be a real mailbox)
+   and a long password. Copy the **User UID** it shows.
+2. **Realtime Database → Data:** at the top level add `device_accounts` with
+   the child `gadget-1` = that UID. (Only the console can change it.)
+3. **Deploy the rules:** `firebase deploy --only database --project wise-46f92`.
+   The plug keeps working on the old secret meanwhile.
+4. **secrets.h:** add `FIREBASE_API_KEY` (Project settings → General → Web
+   API key), `FIREBASE_DEVICE_EMAIL` and `FIREBASE_DEVICE_PASSWORD`, then flash.
+5. Check that the app still shows live readings and that a command (turn off,
+   turn on) works.
+6. Then **Project settings → Service accounts → Database secrets:** delete the
+   old secret, and remove `FIREBASE_AUTH` from `secrets.h`.
+
+How it works: `haveLogin()` in the firmware (Identity Toolkit sign-in,
+Secure Token renewal, `?auth=<ID token>`); `device_accounts/gadget-1` in
+`database.rules.json`.
+
 ## Deployment
 
 Deploy the updated database rules to permit each signed-in user to read/write their alert preferences. Deploy the updated functions to honor those preferences for safety push delivery. These changes do not alter device ownership requirements.

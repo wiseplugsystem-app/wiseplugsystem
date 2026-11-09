@@ -36,7 +36,7 @@
 #include <esp_timer.h>
 #include <esp_heap_caps.h>
 #include <time.h>
-#include "secrets.h"        // FIREBASE_HOST, FIREBASE_AUTH. Never commit or share.
+#include "secrets.h"        // FIREBASE_HOST and the plug's login. Never commit or share.
 #include "safety_state.h"   // shared state machine, unit-tested in test/
 #include "recognition_window.h"  // per-run features for recognize-appliance
 #include "report_store.h"       // flash store for reports (event_store.h, unit-tested)
@@ -66,8 +66,8 @@ struct OutletHw {
   HardwareSerial& port; int rx, tx;        // the outlet's PZEM-004T, on its own UART
 };
 const OutletHw OUTLET_HW[2] = {
-  {"outlet_A", "outlet_1", "A", "apps_a", 13, HIGH, 4, Serial2, 32, 33},
-  {"outlet_B", "outlet_2", "B", "apps_b", 12, HIGH, 5, Serial1, 25, 26},
+  {"outlet_A", "outlet_1", "A", "apps_a", 13, HIGH, 4, Serial2, 25, 26},
+  {"outlet_B", "outlet_2", "B", "apps_b", 12, HIGH, 5, Serial1, 32, 33},
 };
 
 // Plug-in: power above START_W_THRESHOLD. Unplug / switched off: power below
@@ -695,16 +695,86 @@ WiFiClientSecure tls;
 HTTPClient http;
 String firebaseHost;
 CloudHealth firebaseHealth;
+
+// G: the plug's own login. With FIREBASE_DEVICE_EMAIL in secrets.h the plug
+// signs in to its own Firebase account, which the database rules let write
+// only what the plug writes (database.rules.json, device_accounts). The login
+// lasts an hour and is renewed 5 minutes before it ends. Without it the old
+// database secret (FIREBASE_AUTH) is used, which can read and change
+// everything. A login problem never touches safety: the outlets keep working.
+#ifdef FIREBASE_DEVICE_EMAIL
+String idToken, refreshToken;
+uint64_t tokenUntil = 0, tokenRetryAt = 0;
+constexpr uint64_t TOKEN_EARLY_MS = 5 * 60 * 1000, TOKEN_RETRY_MS = 60 * 1000;
+
+// One login request (sign in, or renew); the connection is closed before and
+// after because it goes to a different server.
+bool loginRequest(const String& url, const char* type, const String& body) {
+  http.end(); tls.stop();
+  int code = -1; String reply;
+  if (http.begin(tls, url)) {
+    http.setTimeout(8000);
+    http.addHeader("Content-Type", type);
+    code = http.POST(body);
+    if (code == HTTP_CODE_OK) reply = http.getString();
+    http.end();
+  }
+  tls.stop();
+  JsonDocument doc;
+  if (code != HTTP_CODE_OK || deserializeJson(doc, reply)) {
+    Serial.printf("Firebase login failed (%d)\n", code);
+    if (code == 400) refreshToken = "";  // renewal refused: sign in again next time
+    return false;
+  }
+  // Sign-in and renewal name the same values differently.
+  idToken = doc["idToken"] | doc["id_token"] | "";
+  const char* r = doc["refreshToken"] | doc["refresh_token"] | "";
+  if (*r) refreshToken = r;
+  uint32_t lifeS = atoi(doc["expiresIn"] | doc["expires_in"] | "3600");
+  tokenUntil = monotonicMs() + uint64_t(lifeS) * 1000;
+  return idToken.length() > 0;
+}
+
+bool haveLogin() {
+  uint64_t now = monotonicMs();
+  if (idToken.length() && now + TOKEN_EARLY_MS < tokenUntil) return true;
+  if (now < tokenRetryAt) return idToken.length() && now < tokenUntil;
+  bool ok = false;
+  if (refreshToken.length()) {
+    ok = loginRequest(String("https://securetoken.googleapis.com/v1/token?key=") + FIREBASE_API_KEY,
+                      "application/x-www-form-urlencoded",
+                      "grant_type=refresh_token&refresh_token=" + refreshToken);
+  }
+  if (!ok) {
+    JsonDocument req;
+    req["email"] = FIREBASE_DEVICE_EMAIL; req["password"] = FIREBASE_DEVICE_PASSWORD;
+    req["returnSecureToken"] = true;
+    String body; serializeJson(req, body);
+    ok = loginRequest(String("https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=") +
+                      FIREBASE_API_KEY, "application/json", body);
+  }
+  if (!ok) { tokenRetryAt = now + TOKEN_RETRY_MS; idToken = ""; }
+  return ok;
+}
+const String& firebaseAuth() { return idToken; }
+void loginRejected(int code) { if (code == 401) tokenUntil = 0; }  // renew at the next call
+#else
+bool haveLogin() { return true; }
+String firebaseAuth() { return FIREBASE_AUTH; }
+void loginRejected(int) {}
+#endif
+
 int firebaseRequest(const char* method, const String& path, const String& body = "", String* response = nullptr) {
-  if (WiFi.status() != WL_CONNECTED) return -1;
+  if (WiFi.status() != WL_CONNECTED || !haveLogin()) return -1;
   int code = -1;
-  if (http.begin(tls, "https://" + firebaseHost + "/" + path + ".json?auth=" + FIREBASE_AUTH)) {
+  if (http.begin(tls, "https://" + firebaseHost + "/" + path + ".json?auth=" + firebaseAuth())) {
     http.setTimeout(5000);
     if (strcmp(method, "GET") == 0) code = http.GET();
     else { http.addHeader("Content-Type", "application/json"); code = http.sendRequest(method, body); }
     if (response && code == HTTP_CODE_OK) *response = http.getString();
     http.end();  // keeps the TLS connection open for reuse
   }
+  loginRejected(code);
   if (noteCloud(firebaseHealth, code, "Firebase")) tls.stop();  // A: a fresh connection next time
   return code;
 }
@@ -712,19 +782,20 @@ int firebaseRequest(const char* method, const String& path, const String& body =
 // new String each time, so the heap is not cut into pieces over the weeks.
 char patchBuffer[6144];
 int firebasePatch(const JsonDocument& root) {
-  if (WiFi.status() != WL_CONNECTED) return -1;
+  if (WiFi.status() != WL_CONNECTED || !haveLogin()) return -1;
   size_t n = serializeJson(root, patchBuffer, sizeof patchBuffer);
   if (n == 0 || n >= sizeof patchBuffer - 1) {  // too big for the buffer (not expected): as before
     String body; serializeJson(root, body);
     return firebaseRequest("PATCH", "", body);
   }
   int code = -1;
-  if (http.begin(tls, "https://" + firebaseHost + "/.json?auth=" + FIREBASE_AUTH)) {
+  if (http.begin(tls, "https://" + firebaseHost + "/.json?auth=" + firebaseAuth())) {
     http.setTimeout(5000);
     http.addHeader("Content-Type", "application/json");
     code = http.sendRequest("PATCH", reinterpret_cast<uint8_t*>(patchBuffer), n);
     http.end();
   }
+  loginRejected(code);
   if (noteCloud(firebaseHealth, code, "Firebase")) tls.stop();
   return code;
 }
