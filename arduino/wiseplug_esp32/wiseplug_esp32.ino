@@ -66,8 +66,8 @@ struct OutletHw {
   HardwareSerial& port; int rx, tx;        // the outlet's PZEM-004T, on its own UART
 };
 const OutletHw OUTLET_HW[2] = {
-  {"outlet_A", "outlet_1", "A", "apps_a", 13, HIGH, 4, Serial2, 25, 26},
-  {"outlet_B", "outlet_2", "B", "apps_b", 12, HIGH, 5, Serial1, 32, 33},
+  {"outlet_A", "outlet_1", "A", "apps_a", 13, HIGH, 4, Serial2, 32, 33},
+  {"outlet_B", "outlet_2", "B", "apps_b", 12, HIGH, 5, Serial1, 25, 26},
 };
 
 // Plug-in: power above START_W_THRESHOLD. Unplug / switched off: power below
