@@ -3,10 +3,11 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 
+import '../services/device_binding.dart';
+
 import '../theme.dart';
 
 import '../models/gadget_status.dart';
-import '../services/device_binding.dart';
 import '../services/esp32_service.dart';
 import '../services/local_provisioning.dart';
 
@@ -39,9 +40,10 @@ class _WifiConfigScreenState extends State<WifiConfigScreen> {
 
   bool get _online => _status?.isOnline(DateTime.now()) == true;
 
-  /// Nearby setup unless the user picked otherwise; the default follows the
-  /// plug: online -> over the internet, offline -> nearby.
-  bool get _nearby => _nearbyChoice ?? (_status != null && !_online);
+  /// The app picks the way by itself, from the plug's state when the screen
+  /// opens: online -> over the internet, offline (or unknown) -> nearby. It
+  /// is fixed then, so a plug coming online mid-setup does not switch it.
+  bool get _nearby => _nearbyChoice ?? !_online;
 
   @override
   void initState() {
@@ -56,7 +58,11 @@ class _WifiConfigScreenState extends State<WifiConfigScreen> {
       )
       ..add(
         widget.service.streamGadgetStatus().listen((value) {
-          if (mounted) setState(() => _status = value);
+          if (!mounted) return;
+          setState(() {
+            _status = value;
+            _nearbyChoice ??= !_online;
+          });
         }, onError: (Object _) {}),
       );
   }
@@ -94,37 +100,26 @@ class _WifiConfigScreenState extends State<WifiConfigScreen> {
   Widget build(BuildContext context) {
     final current = _status?.wifiSSID;
     return Scaffold(
-      appBar: AppBar(title: const Text('Wi-Fi Configuration')),
+      appBar: AppBar(title: const Text('Change Wi-Fi')),
       body: ListView(
         padding: const EdgeInsets.all(22),
         children: [
           Text(
             _online
-                ? '${DeviceBinding.gadgetId} is online${current == null ? '' : ' on "$current"'}'
-                : '${DeviceBinding.gadgetId} is offline',
+                ? '${DeviceBinding.displayName} is online${current == null ? '' : ' on "$current"'}'
+                : '${DeviceBinding.displayName} is offline',
             style: TextStyle(
               fontWeight: FontWeight.w700,
               color: _online ? Colors.green : Colors.grey,
             ),
           ),
-          const SizedBox(height: 16),
-          SegmentedButton<bool>(
-            segments: const [
-              ButtonSegment(
-                value: true,
-                icon: Icon(Icons.wifi_tethering),
-                label: Text('Nearby setup'),
-              ),
-              ButtonSegment(
-                value: false,
-                icon: Icon(Icons.cloud_outlined),
-                label: Text('Over the internet'),
-              ),
-            ],
-            selected: {_nearby},
-            onSelectionChanged: _busy
-                ? null
-                : (value) => setState(() => _nearbyChoice = value.single),
+          const SizedBox(height: 6),
+          Text(
+            _nearby
+                ? 'Stand next to your WisePlug and follow these steps.'
+                : 'Type the new Wi-Fi name and password. Your WisePlug gets '
+                      'them over the internet.',
+            style: TextStyle(color: context.muted),
           ),
           const SizedBox(height: 20),
           if (_nearby)
@@ -142,15 +137,6 @@ class _WifiConfigScreenState extends State<WifiConfigScreen> {
   Widget _internetForm() => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
-      if (_status != null && !_online)
-        Padding(
-          padding: const EdgeInsets.only(bottom: 16),
-          child: Text(
-            'The WisePlug is offline, so it cannot receive settings over the '
-            'internet. Use "Nearby setup".',
-            style: TextStyle(color: context.readable(Colors.orange)),
-          ),
-        ),
       TextFormField(
         controller: _ssid,
         enabled: !_busy,
@@ -163,7 +149,7 @@ class _WifiConfigScreenState extends State<WifiConfigScreen> {
             value == null ||
                 value.trim().isEmpty ||
                 utf8.encode(value).length > 32
-            ? 'Enter a network name up to 32 bytes.'
+            ? 'Type the Wi-Fi name (it can be at most 32 letters).'
             : null,
       ),
       const SizedBox(height: 16),
@@ -265,14 +251,14 @@ class WifiProvisioningDialog extends StatelessWidget {
                 Colors.red,
                 'No response',
                 'The WisePlug did not pick up the settings. It must be online to receive '
-                    'them; if it is offline, use "Nearby setup".',
+                    'them. If it is offline, open Change Wi-Fi again next to the plug.',
               ),
               WifiProvisionStage.noReconnect => (
                 Icons.timer_off,
                 Colors.red,
                 'Not back online',
                 'The WisePlug received the settings but has not come back online. If it '
-                    'stays offline, use "Nearby setup".',
+                    'stays offline, open Change Wi-Fi again next to the plug.',
               ),
             };
       final done = snapshot.hasError || update?.isFinal == true;
@@ -407,7 +393,7 @@ class _NearbySetupPanelState extends State<NearbySetupPanel> {
               : 'Join the "${SetupNetwork.ssid}" Wi-Fi',
           detail: _joined
               ? null
-              : 'Open the Wi-Fi settings of this phone (or computer) and tap '
+              : 'Open the Wi-Fi settings on this phone and tap '
                     '"${SetupNetwork.ssid}". No password is needed. Then come back: '
                     'this page notices by itself.\n'
                     'Tip: a WisePlug page may open on its own; you can finish there too.',

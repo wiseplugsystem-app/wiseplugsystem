@@ -42,15 +42,19 @@ system that does each step, for readers who want to look it up.
 
 - Each meter reads its outlet **about once a second**: voltage, current,
   power (watts) and power factor.
-- The app's **Home** screen shows each outlet's power and a plain status:
-  **Ready to use** (on, nothing running), **In use**, **Turned off**,
-  **Turned off for safety**, or **Off until the meter works again**. It
-  refreshes every few seconds.
+- The app's **Home** screen shows one card per outlet: one big status and
+  one sentence saying what to do. The status is **Ready to use** (on,
+  nothing running), **In use** (with the appliance, its watts, how long it
+  has been on and when it turns off), **Not ready** (the meter is not
+  answering), **Turned off**, **Turned off for safety**, **Safety warning**
+  or **No connection**. Start time, safety limit and last update are under
+  **Details** on a running outlet. It refreshes every few seconds.
 - **A meter that stops answering:** the plug cannot time or protect that
   outlet, so after **15 seconds** of silence with nothing running it switches
   that outlet off, and back on by itself as soon as the meter answers. A short
   blip changes nothing. If something was running, the usual 60-second warning
-  applies instead.
+  applies instead. From the first missed reading the card says
+  **Not ready**, never "Ready to use".
 
 *Firmware: sensor task; Firebase: live_telemetry, telemetry_logs.*
 
@@ -149,9 +153,9 @@ appliance's fingerprint, so recognition gets better with use.
 1. When the safe time is reached, the phone shows a **60-second countdown**
    with a warning sound that cannot be muted.
 2. You choose:
-   - **Yes, Override**: it gets extra time (20 % of how long it has run,
+   - **Keep it on**: it gets extra time (20 % of how long it has run,
      between 1 minute and 1 hour);
-   - **Turn Off Now**.
+   - **Turn off now**.
 3. If nobody answers in 60 seconds, the plug **turns that outlet off**. Only
    that outlet; the other keeps working.
 
@@ -194,7 +198,7 @@ the thesis.
   nothing. After a minute without the home Wi-Fi it opens "wisewp" again,
   and keeps retrying the home network every 2 minutes.
 - **Power cut:** if the power goes off while an appliance was running, that
-  outlet comes back **off and locked** ("Power cut" in the app), so nothing
+  outlet comes back **off and locked** ("Turned off for safety" in the app), so nothing
   restarts while nobody is watching. Reset, then Turn on again. An outlet
   that was idle comes back as it was.
 
@@ -249,8 +253,8 @@ Confirm ("Yes, it is …") ─► its own safe time (shorter for heating applian
         │
 Running ──► too much power / fault ─► turned off at once ─┐
         │                                                 │
-Safe time reached ─► 60-second warning ─► Yes, Override ─► more time
-        │                              └► no answer / Turn Off Now
+Safe time reached ─► 60-second warning ─► Keep it on ─► more time
+        │                              └► no answer / Turn off now
         ▼                                                 │
 Outlet turned off for safety ◄────────────────────────────┘
         │

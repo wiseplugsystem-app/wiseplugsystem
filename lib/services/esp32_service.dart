@@ -105,7 +105,7 @@ class DeviceRejection implements Exception {
           '"Erase All Flash Before Sketch Upload" enabled.',
     'REJECTED_STALE' =>
       'The outlet changed state before the command arrived. Try again.',
-    'REJECTED_PHYSICAL_RESET_REQUIRED' => 'This outlet is locked. Use Reset Safety in Power Control or the outlet\'s button.',
+    'REJECTED_PHYSICAL_RESET_REQUIRED' => 'This outlet was turned off for safety. Use Reset Safety in Power Control or the outlet\'s button.',
     'REJECTED_INVALID' => 'The outlet cannot do that in its current state.',
     'REJECTED_NO_APPLIANCE' => 'No appliance is plugged into this outlet, so there is nothing to switch.',
     _ => 'The WisePlug refused the command ($code).',
@@ -357,7 +357,7 @@ class Esp32Service {
                   'online, then try again.'
             : reading.sessionID.isEmpty
             ? 'Outlet ${reading.outlet}: the WisePlug has not reported a session yet.'
-            : 'Outlet ${reading.outlet} is locked. Use Reset Safety.',
+            : 'Outlet ${reading.outlet} was turned off for safety. Press Reset Safety first.',
       );
     }
     // Interlock (also enforced by the ESP32): an empty outlet is not switched
@@ -369,7 +369,7 @@ class Esp32Service {
     }
     if (type == 'SMART_OVERRIDE' &&
         (!reading.isWarning || reading.secondsRemaining(now) == 0)) {
-      throw StateError('The override window has expired.');
+      throw StateError('The time to answer has run out.');
     }
     final id = database.ref().push().key!;
     final receipt = database.ref(

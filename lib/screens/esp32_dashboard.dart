@@ -2,8 +2,9 @@ import 'esp32_live_view.dart';
 
 import 'package:flutter/material.dart';
 
-import '../models/esp32_data.dart';
 import '../services/device_binding.dart';
+
+import '../models/esp32_data.dart';
 import '../services/esp32_service.dart';
 import '../services/recognition_service.dart';
 import '../services/session_service.dart';
@@ -91,7 +92,7 @@ class _ClaimProblem extends StatelessWidget {
               const SizedBox(height: 16),
               Text(
                 ownedByOther
-                    ? 'This WisePlug (${DeviceBinding.gadgetId}) is already linked to another account. Sign in with that account, or delete it from its User Profile to release the device.'
+                    ? 'This WisePlug (${DeviceBinding.unitCode}) is already linked to another account. Sign in with that account, or delete it from its User Profile to release the device.'
                     : 'Could not link this WisePlug to your account. Check your internet connection and try again.',
                 textAlign: TextAlign.center,
               ),

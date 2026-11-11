@@ -6,7 +6,7 @@
 - User names and types are stored in `appliance_registrations/OUTLET_A/{profileID}` (or `OUTLET_B`) and merged with the firmware-owned catalog. Deploy `database.rules.json` before using this update; otherwise the profile stream reports a permissions error. Firmware catalog publications cannot overwrite these names and types.
 - Registration requires a learned signature in `appliance_profiles`; telemetry alone cannot reliably identify an appliance. Existing firmware recognition remains per outlet. Shared recognition and relay changes are outside this UI update.
 - Profile editing saves firmware runtime limits through the existing command receipt flow, then saves display metadata. A metadata error keeps the editor open; the runtime command may already have succeeded.
-- Safety warnings are raised app-wide by `SafetyAlertListener` from `devices/gadget-1/status` (`safetyTriggered` or `remainingLimit <= 0`), with the WisePlug warning sound (see "Warning sounds" below). Turn Off Now sends TURN_OFF (the relay cuts power); Reset Safety sends RESET_SAFETY; During the countdown there is no Dismiss and no mute: the warning ends with Turn Off Now, Yes, Override or the cutoff. After a power cut, Dismiss closes the pop-up.
+- Safety warnings are raised app-wide by `SafetyAlertListener` from `devices/gadget-1/status` (`safetyTriggered` or `remainingLimit <= 0`), with the WisePlug warning sound (see "Warning sounds" below). Turn off now sends TURN_OFF (the relay cuts power); Reset Safety sends RESET_SAFETY; During the countdown there is no Dismiss and no mute: the warning ends with Turn off now, Keep it on or the cutoff. After a cutoff, Close closes the pop-up.
 - Validate with `flutter test test/live_popups_test.dart test/esp32_live_view_test.dart test/esp32_data_test.dart` and `flutter analyze`.
 
 The default ESP32 dashboard implements the supplied Home, Profiles, profile-detail and Settings references. Screenshot names, wattages, times, identifiers and session counts are not production fixtures.
@@ -30,7 +30,7 @@ The default ESP32 dashboard implements the supplied Home, Profiles, profile-deta
 - **When the power is cut** (also right away for an electrical fault): one
   long beep, then silence.
 - **No mute, no dismiss.** During the countdown the sound stops only when
-  you answer (Turn Off Now, or Yes, Override to keep it running) or when the
+  you answer (Turn off now, or Keep it on) or when the
   power is cut.
 - **App closed or in the background:** the safety notification plays the
   same sound on Android (once the app has been opened once). iPhones play
@@ -336,9 +336,11 @@ that outlet's meter is working. So:
 
 - **A short blip does nothing.** If the meter is silent for a moment (a motor
   starting, a loose contact), the plug first restarts the meter's connection
-  by itself.
+  by itself. The card already says **"Not ready"** (never "Ready to
+  use") while it waits.
 - **Silent for 15 seconds, with nothing running:** the plug switches that
-  outlet **off**. The card says **"Off until the meter works again"**.
+  outlet **off**. The card still says **"Not ready"**: the plug cannot
+  measure it, so it keeps it off.
 - **The meter answers again:** the outlet comes back **on by itself**. There's
   nothing to press, and the other outlet is never touched.
 - **Something is running when the meter stops:** the usual 60-second warning
@@ -364,6 +366,58 @@ How it works: `meterGuard()` and `METER_SILENT_OFF_MS` in the firmware;
 - **No paid Firebase features:** the old Firebase Cloud Function
   (`functions/`) was removed. It needed the paid Blaze plan, and Supabase
   already sends the phone alerts.
+
+## The outlet card (in plain words)
+
+Each outlet card says one thing in big letters and one sentence on what to
+do. Nothing else when nothing is running.
+
+| Card says | Means | The sentence under it |
+|---|---|---|
+| **Ready to use** | On, nothing running | Plug in an appliance. |
+| **In use** | An appliance runs: its name, watts, "On for…" and "Turns off in…" with a bar | (Start time, safety limit and last update are under **Details**) |
+| **Not ready** | The meter is not answering | Check that the WisePlug is plugged into the wall. This outlet turns back on by itself. |
+| **Turned off** | Switched off by the user | Turn it on below when you want to use it. |
+| **Turned off for safety** | Locked after a cutoff, or waiting after a reset | Press Reset Safety / Turn on again below |
+| **Safety warning** | The 60-second countdown is on | Answer the warning, or this outlet turns off. |
+| **No connection** | No recent reading from the plug | Last seen …. Check that the WisePlug is plugged into the wall and your Wi-Fi is on. |
+
+The switch under **Power Control** is greyed out (cannot be pressed) while
+the outlet cannot be used from the app: the plug is offline, or the outlet
+is **Not ready** (its meter is not answering). It says "Check that the
+WisePlug is plugged into the wall. This switch works again by itself."
+An outlet the user turned off can
+still be turned on.
+
+The app names the plug like a product label: **WisePlug WP-001** (product
+name and unit code) on Home, Settings, My account and Wi-Fi setup, and
+**Model WP-2 (2 outlets)** in Settings and My account. The unit code comes
+from the technical ID (`gadget-1` → WP-001, `gadget-2` → WP-002), which is
+not shown but is still used inside the app and the cloud. The names are set
+in one place: `DeviceBinding` in `lib/services/device_binding.dart`.
+
+`_cardState` and `_running` in `lib/screens/esp32_live_view.dart`; the
+switch is `_PowerControl` (`ready`).
+
+## Simpler screens and the same words everywhere (in plain words)
+
+- **Home:** only the two outlet cards and Power Control. The "Total draw"
+  and "Outlets active" boxes are gone; each card shows its own watts.
+- **The warning pop-up:** one red bar ("Safe time is up"), one question
+  ("Still using the fan?"), the seconds left, and two buttons: **Turn off
+  now** and **Keep it on**. After a cutoff it says **Turned off for
+  safety** with **Close** and **Reset Safety**.
+- **Appliances tab** (was Profiles): an appliance's page shows only
+  **Where**, **Safe time**, **Learning** (3 of 7 uses) and **Power use**,
+  then Edit and Delete.
+- **Settings:** **My account**, **Change Wi-Fi**, **Dark mode**, the plug
+  (online or offline), **Sign out**, and the app version in small print.
+- **Change Wi-Fi:** no choice to make. If the plug is online it gets the
+  new Wi-Fi over the internet; if it is offline the app shows the steps to
+  do next to the plug.
+- **One word for each idea:** the time an appliance may stay on is its
+  **safe time**; an outlet the plug cut is **turned off for safety**;
+  extra time after the warning is **Keep it on**.
 
 ## Deployment
 

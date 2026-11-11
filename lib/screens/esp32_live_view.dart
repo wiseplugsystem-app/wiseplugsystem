@@ -110,7 +110,7 @@ String profileStatus(
 String _status(OutletReading? reading, DateTime now) {
   if (reading == null) return 'Waiting';
   if (!reading.isFresh(now)) return 'Offline';
-  if (reading.isLockedOut) return 'Locked out';
+  if (reading.isLockedOut) return 'Turned off for safety';
   if (reading.isWarning) return 'Safety warning';
   if (reading.sensorValid == false) return 'Unavailable';
   if (reading.currentState == 'DISABLED') return 'Disabled';
@@ -124,13 +124,13 @@ String _status(OutletReading? reading, DateTime now) {
 /// Shown on the outlet card after "Yes, Override": the appliance keeps
 /// running on a 20% safety buffer past its limit.
 const _overrideNote =
-    'Override active: past its safety limit, now running on a 20% safety '
-    'buffer. You will be asked again when Remaining reaches 0.';
+    'Kept on after its safe time, with a little extra time. WisePlug will '
+    'ask you again when it runs out.';
 
 Color _statusColor(String status) => switch (status) {
   'Active' => _green,
   'Near limit' || 'Recognizing' || 'Registering' => _amber,
-  'Locked out' || 'Safety warning' => Colors.red,
+  'Turned off for safety' || 'Safety warning' => Colors.red,
   _ => Colors.grey,
 };
 
@@ -245,9 +245,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
         case ConfirmChoice(:final applianceId, :final name):
           try {
             await recognition.confirm(session.eventId, applianceId);
-            _notify(
-              'Confirmed: $name. Its own safe operating time applies now.',
-            );
+            _notify('Confirmed: $name. Its own safe time applies now.');
           } catch (error) {
             _notify('$error'.replaceFirst('Bad state: ', ''));
           }
@@ -433,7 +431,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                                 child: WisePlugLogo(fontSize: 34),
                               )
                             : Text(
-                                _tab == 1 ? 'Appliance Profiles' : 'Settings',
+                                _tab == 1 ? 'My appliances' : 'Settings',
                                 style: const TextStyle(
                                   fontSize: 30,
                                   fontWeight: FontWeight.w800,
@@ -472,7 +470,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
             NavigationDestination(
               icon: Icon(Icons.devices_other_outlined),
               selectedIcon: Icon(Icons.devices_other, color: _blue),
-              label: 'Profiles',
+              label: 'Appliances',
             ),
             NavigationDestination(
               icon: Icon(Icons.settings_outlined),
@@ -503,7 +501,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
         children: [
           _StatusChip(online: gadget != null),
           Text(
-            '${DeviceBinding.gadgetId} · Dual outlet',
+            DeviceBinding.displayName,
             style: TextStyle(color: context.muted, fontWeight: FontWeight.w600),
           ),
         ],
@@ -532,27 +530,6 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                   children: [cards[0], const SizedBox(height: 16), cards[1]],
                 );
         },
-      ),
-      const SizedBox(height: 24),
-      Row(
-        children: [
-          Expanded(
-            child: _metric(
-              measurement(gadget?.powerDraw, 'W', 0),
-              'Total draw',
-            ),
-          ),
-          const SizedBox(width: 16),
-          Expanded(
-            child: _metric(
-              // Outlets running an appliance, not outlets whose relay is on.
-              gadget != null && !_readError
-                  ? '${_readings.values.where((r) => r.hasConnectedAppliance(now)).length} / 2'
-                  : '— / 2',
-              'Outlets active',
-            ),
-          ),
-        ],
       ),
       const SizedBox(height: 24),
       _Panel(
@@ -649,7 +626,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
             ),
             const SizedBox(height: 4),
             const Text(
-              'Confirm it so WisePlug uses its own safety limit and counts this use.',
+              'Confirm it so WisePlug uses its own safe time and counts this use.',
               style: TextStyle(fontSize: 16),
             ),
             const SizedBox(height: 10),
@@ -718,32 +695,90 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
     try {
       await widget.recognition!.confirm(session.eventId, session.applianceId!);
       _notify(
-        'Confirmed: ${session.applianceName}. Its own safety limit applies now.',
+        'Confirmed: ${session.applianceName}. Its own safe time applies now.',
       );
     } catch (error) {
       _notify('$error'.replaceFirst('Bad state: ', ''));
     }
   }
 
+  /// What an outlet card says when nothing is running: one headline, one
+  /// plain sentence saying what to do, an icon and a colour.
+  ({String headline, String hint, IconData icon, Color color}) _cardState(
+    OutletReading? reading,
+    DateTime now,
+  ) {
+    if (_readError || reading == null || !reading.isFresh(now)) {
+      final seen = reading?.lastUpdated;
+      return (
+        headline: reading == null && !_readError
+            ? 'Waiting for the plug'
+            : 'No connection',
+        hint: seen == null
+            ? 'Check that the WisePlug is plugged into the wall and your '
+                  'Wi-Fi is on.'
+            : 'Last seen ${_clockTime(seen, now)}. Check that the WisePlug '
+                  'is plugged into the wall and your Wi-Fi is on.',
+        icon: Icons.cloud_off,
+        color: Colors.grey,
+      );
+    }
+    if (reading.isLockedOut) {
+      return (
+        headline: 'Turned off for safety',
+        hint: 'Check the appliance, then press Reset Safety below.',
+        icon: Icons.block,
+        color: Colors.red,
+      );
+    }
+    if (reading.isWarning) {
+      return (
+        headline: 'Safety warning',
+        hint: 'Answer the warning, or this outlet turns off.',
+        icon: Icons.warning_amber_rounded,
+        color: Colors.red,
+      );
+    }
+    if (reading.sensorValid == false || reading.meterOff) {
+      return (
+        headline: 'Not ready',
+        hint:
+            'Check that the WisePlug is plugged into the wall. This outlet '
+            'turns back on by itself.',
+        icon: Icons.error_outline,
+        color: _amber,
+      );
+    }
+    if (reading.safetyResetHold) {
+      return (
+        headline: 'Turned off for safety',
+        hint: 'Press Turn on again below when you want to use it.',
+        icon: Icons.power_off,
+        color: Colors.grey,
+      );
+    }
+    if (reading.currentState == 'DISABLED') {
+      return (
+        headline: 'Turned off',
+        hint: 'Turn it on below when you want to use it.',
+        icon: Icons.power_off,
+        color: Colors.grey,
+      );
+    }
+    return (
+      headline: 'Ready to use',
+      hint: 'Plug in an appliance.',
+      icon: Icons.check_circle,
+      color: _green,
+    );
+  }
+
   Widget _summary(String key, DateTime now) {
     final reading = _readings[key];
     final connected =
         !_readError && reading?.hasConnectedAppliance(now) == true;
-    final session = connected ? _sessions[key] : null;
-    final status = _readError ? 'Offline' : _status(reading, now);
-    final color = _statusColor(status);
-    final fresh = !_readError && reading?.isFresh(now) == true;
-    final seconds = fresh && reading!.isActive && reading.safetyDeadline != null
-        ? reading.safetyDeadline!.difference(now).inSeconds.clamp(0, 604800)
-        : null;
-    final overridden = fresh && reading!.isActive && reading.overridden;
-    // The cutoff of this run (the safe default until the appliance is
-    // confirmed); after an override, the 20% buffer it granted.
-    final cutoff = session?.cutoffSeconds;
-    final limit = overridden && cutoff != null
-        ? overrideBufferSeconds(cutoff)
-        : cutoff;
-    final start = connected ? reading?.startTime?.toLocal() : null;
+    final idle = _cardState(reading, now);
+    final color = connected ? _statusColor(_status(reading, now)) : idle.color;
     return _Panel(
       border: color,
       padding: 15,
@@ -764,193 +799,191 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
               Icon(Icons.circle, size: 9, color: color),
             ],
           ),
-          const SizedBox(height: 16),
-          Row(
-            children: [
-              if (connected) ...[
-                ApplianceIcon(
-                  _outletKind(reading, now) ?? unknownKind,
-                  size: 48,
-                  label: _applianceName(reading, now),
-                ),
-                const SizedBox(width: 14),
-              ],
-              Expanded(
-                child: Text(
-                  connected
-                      ? _applianceName(reading, now)!
-                      : fresh && reading?.sensorValid == false
-                      ? 'Meter not responding'
-                      : fresh
-                      ? 'No appliance detected'
-                      : 'Waiting for device',
-                  style: const TextStyle(
-                    fontSize: 19,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 5),
-          Text(status, style: TextStyle(color: context.readable(color))),
-          // On or off, in words and with an icon (not by colour alone).
-          if (fresh) ...[
-            const SizedBox(height: 6),
+          const SizedBox(height: 14),
+          if (connected)
+            ..._running(key, reading!, now, color)
+          else ...[
             Row(
               children: [
-                Icon(
-                  reading!.switchedOn ? Icons.power : Icons.power_off,
-                  size: 22,
-                  color: context.muted,
-                ),
-                const SizedBox(width: 6),
-                Flexible(
+                Icon(idle.icon, size: 30, color: context.readable(idle.color)),
+                const SizedBox(width: 10),
+                Expanded(
                   child: Text(
-                    // What the socket is doing, said plainly: on with
-                    // nothing running is "ready", not "power on".
-                    !reading.switchedOn
-                        ? reading.isLockedOut || reading.safetyResetHold
-                              ? 'Turned off for safety'
-                              : reading.meterOff
-                              ? 'Off until the meter works again'
-                              : 'Turned off'
-                        : connected
-                        ? 'In use'
-                        : 'Ready to use',
-                    style: const TextStyle(fontWeight: FontWeight.w700),
+                    idle.headline,
+                    style: const TextStyle(
+                      fontSize: 21,
+                      fontWeight: FontWeight.w800,
+                    ),
                   ),
                 ),
               ],
             ),
+            const SizedBox(height: 8),
+            Text(
+              idle.hint,
+              style: TextStyle(fontSize: 16, color: context.muted),
+            ),
           ],
-          // How long the appliance has been on: a timer that counts up every
-          // second (the screen refreshes each second).
-          if (start != null)
-            Container(
-              margin: const EdgeInsets.only(top: 10),
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              decoration: BoxDecoration(
-                color: _blue.withValues(alpha: .10),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.timer_outlined, color: _blue, size: 22),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      'On for ${_onFor(now.difference(start))}',
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.w800,
-                        color: context.readable(_blue),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ?_recognitionBadge(session, connected),
-          const SizedBox(height: 20),
-          _Pair(
-            'Power draw',
-            measurement(
-              fresh && reading?.sensorValid != false
-                  ? reading?.activePower
-                  : null,
-              'W',
-            ),
-          ),
-          Text(
-            reading == null
-                ? 'No reading received for this outlet.'
-                : reading.lastUpdated == null
-                ? 'Last updated: unknown'
-                : 'Last updated: ${_clockTime(reading.lastUpdated!, now)}'
-                      '${fresh ? '' : ' · may be out of date'}',
-            style: TextStyle(fontSize: 16, color: context.muted),
-          ),
-          _Pair(
-            'Start',
-            start == null
-                ? '—'
-                : '${start.hour.toString().padLeft(2, '0')}:${start.minute.toString().padLeft(2, '0')}',
-          ),
-          _Pair(
-            'Safety limit',
-            cutoff == null
-                ? '—'
-                : session!.status == RecognitionStatus.confirmed
-                ? _duration(cutoff)
-                : '${_duration(cutoff)} (safe default)',
-          ),
-          _Pair(
-            'Remaining',
-            seconds == null ? '—' : _duration(seconds),
-            color: color,
-          ),
-          const SizedBox(height: 8),
-          LinearProgressIndicator(
-            value: seconds != null && limit != null
-                ? (1 - seconds / limit).clamp(0.0, 1.0)
-                : 0,
-            color: color,
-            backgroundColor: Colors.grey.withValues(alpha: .15),
-          ),
-          if (overridden)
-            Container(
-              margin: const EdgeInsets.only(top: 10),
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: _amber.withValues(alpha: .14),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Icon(
-                    Icons.warning_amber_rounded,
-                    size: 18,
-                    color: _amber,
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      _overrideNote,
-                      style: const TextStyle(fontSize: 16, height: 1.35),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          if (!fresh)
-            Padding(
-              padding: EdgeInsets.only(top: 8),
-              child: Text(
-                'Live data unavailable',
-                style: TextStyle(fontSize: 16, color: context.muted),
-              ),
-            ),
         ],
       ),
     );
   }
 
-  Widget _metric(String value, String label) => _Panel(
-    child: Column(
-      children: [
-        FittedBox(
-          child: Text(
-            value,
-            style: const TextStyle(fontSize: 30, fontWeight: FontWeight.w900),
+  /// The card of an outlet with an appliance running: what it is, its power,
+  /// how long it has been on and when it turns off. Start time and the
+  /// safety limit are under "Details".
+  List<Widget> _running(
+    String key,
+    OutletReading reading,
+    DateTime now,
+    Color color,
+  ) {
+    final session = _sessions[key];
+    final seconds = reading.isActive && reading.safetyDeadline != null
+        ? reading.safetyDeadline!.difference(now).inSeconds.clamp(0, 604800)
+        : null;
+    final overridden = reading.isActive && reading.overridden;
+    // The cutoff of this run (the safe default until the appliance is
+    // confirmed); after an override, the 20% buffer it granted.
+    final cutoff = session?.cutoffSeconds;
+    final limit = overridden && cutoff != null
+        ? overrideBufferSeconds(cutoff)
+        : cutoff;
+    final start = reading.startTime?.toLocal();
+    final recognizing = reading.currentState == 'SAMPLING';
+    return [
+      Row(
+        children: [
+          ApplianceIcon(
+            _outletKind(reading, now) ?? unknownKind,
+            size: 48,
+            label: _applianceName(reading, now),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Text(
+              _applianceName(reading, now)!,
+              style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w800),
+            ),
+          ),
+        ],
+      ),
+      const SizedBox(height: 8),
+      Wrap(
+        spacing: 10,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          Text(
+            recognizing ? 'Finding out what it is…' : 'In use',
+            style: TextStyle(
+              fontWeight: FontWeight.w700,
+              color: context.readable(color),
+            ),
+          ),
+          Text(
+            measurement(reading.activePower, 'W'),
+            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+          ),
+        ],
+      ),
+      // How long the appliance has been on: a timer that counts up every
+      // second (the screen refreshes each second).
+      if (start != null)
+        Container(
+          margin: const EdgeInsets.only(top: 10),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: _blue.withValues(alpha: .10),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.timer_outlined, color: _blue, size: 22),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'On for ${_onFor(now.difference(start))}',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w800,
+                    color: context.readable(_blue),
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
-        const SizedBox(height: 8),
-        Text(label, style: TextStyle(color: context.muted)),
+      if (seconds != null) ...[
+        const SizedBox(height: 10),
+        Text(
+          seconds == 0
+              ? 'Turning off now'
+              : 'Turns off in ${_duration(seconds)}',
+          style: TextStyle(
+            fontWeight: FontWeight.w700,
+            color: context.readable(color),
+          ),
+        ),
+        const SizedBox(height: 6),
+        LinearProgressIndicator(
+          value: limit != null ? (1 - seconds / limit).clamp(0.0, 1.0) : 0,
+          color: color,
+          backgroundColor: Colors.grey.withValues(alpha: .15),
+        ),
       ],
-    ),
-  );
+      ?_recognitionBadge(session, true),
+      if (overridden)
+        Container(
+          margin: const EdgeInsets.only(top: 10),
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: _amber.withValues(alpha: .14),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Icon(Icons.warning_amber_rounded, size: 18, color: _amber),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  _overrideNote,
+                  style: const TextStyle(fontSize: 16, height: 1.35),
+                ),
+              ),
+            ],
+          ),
+        ),
+      // The numbers behind the countdown, for those who want them.
+      Theme(
+        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+        child: ExpansionTile(
+          tilePadding: EdgeInsets.zero,
+          childrenPadding: EdgeInsets.zero,
+          expandedCrossAxisAlignment: CrossAxisAlignment.start,
+          title: Text('Details', style: TextStyle(color: context.muted)),
+          children: [
+            _Pair(
+              'Start',
+              start == null
+                  ? '—'
+                  : '${start.hour.toString().padLeft(2, '0')}:${start.minute.toString().padLeft(2, '0')}',
+            ),
+            _Pair(
+              'Safe time',
+              cutoff == null
+                  ? '—'
+                  : session!.status == RecognitionStatus.confirmed
+                  ? _duration(cutoff)
+                  : '${_duration(cutoff)} (safe default)',
+            ),
+            if (reading.lastUpdated != null)
+              _Pair('Last updated', _clockTime(reading.lastUpdated!, now)),
+          ],
+        ),
+      ),
+    ];
+  }
 
   /// " · 12:34" while the run on [outlet] has a start time, else "".
   String _runningFor(String outlet, DateTime now) {
@@ -988,19 +1021,15 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
         '${next == null ? 'Turn it on again' : 'Turn it on at $next'} to continue.';
   }
 
-  /// As in the 19th commit: the learned limit once the typical use is known,
-  /// "Learning · n of 7 uses" until then (the type's limit still applies).
-  String _limitText(RegisteredAppliance a) => a.isLearned
-      ? _duration(a.cutoffMinutes * 60)
-      : 'Learning · ${_sessionsText(a)} (max ${_duration(a.cutoffMinutes * 60)})';
-
-  /// Usage sessions counted by the 7-use learning: "2 of 7 uses", then
-  /// "Learned from 7 uses".
-  String _sessionsText(RegisteredAppliance a) {
+  /// The 7-use learning, in plain words: "3 of 7 uses", then "Done: it is
+  /// usually on for 45 min".
+  String _learningText(RegisteredAppliance a) {
     final total = _recognitionSettings.learningUses;
-    return a.isLearned
-        ? 'Learned from $total uses'
-        : '${a.useCount.clamp(0, total)} of $total uses';
+    if (!a.isLearned) return '${a.useCount.clamp(0, total)} of $total uses';
+    final usual = a.baselineRuntimeSeconds;
+    return usual == null
+        ? 'Done'
+        : 'Done: it is usually on for ${_duration(usual)}';
   }
 
   /// "Not plugged in · last used on Outlet A" (or never used yet).
@@ -1160,7 +1189,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                   icon: const Icon(Icons.chevron_left, color: _blue),
                 ),
                 title: const Text(
-                  'Appliance Profile',
+                  'Appliance',
                   style: TextStyle(fontWeight: FontWeight.w800),
                 ),
                 centerTitle: true,
@@ -1223,9 +1252,9 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                             fontWeight: FontWeight.w800,
                           ),
                         ),
-                        const SizedBox(height: 8),
+                        const SizedBox(height: 4),
                         Text(
-                          'Type of Appliance: ${a.typeName}',
+                          a.typeName,
                           style: TextStyle(color: context.muted),
                         ),
                         // Under the name, so a long name keeps its width.
@@ -1243,26 +1272,23 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                 labelWidth: 150,
                 child: Column(
                   children: [
-                    _Pair('Saved name', a.name, color: _blue),
                     _Pair(
-                      'Plugged into',
-                      outlet == null ? 'Not plugged in' : 'Outlet $outlet',
+                      'Where',
+                      outlet != null
+                          ? 'Running on Outlet $outlet'
+                          : a.lastOutlet == null
+                          ? 'Not plugged in'
+                          : 'Not plugged in (last on Outlet ${outletLetter(a.lastOutlet!)})',
                     ),
-                    if (a.lastOutlet != null)
-                      _Pair(
-                        'Last used on',
-                        'Outlet ${outletLetter(a.lastOutlet!)}',
-                      ),
                     // Set by WisePlug: the type's default, then the learned
                     // typical use x 1.5.
-                    _Pair('Safety limit', _limitText(a), color: _green),
-                    // The 7-use learning: uses recorded so far.
-                    _Pair('Usage sessions', _sessionsText(a)),
-                    if (a.isLearned && a.baselineRuntimeSeconds != null)
-                      _Pair('Typical use', _duration(a.baselineRuntimeSeconds)),
-                    _Pair('Status', _applianceStatus(a, now)),
-                    // Confirmed uses (the count the 7-use learning keeps).
-                    _Pair('Total sessions', '${a.useCount}'),
+                    _Pair(
+                      'Safe time',
+                      _duration(a.cutoffMinutes * 60),
+                      color: _green,
+                    ),
+                    // The 7-use learning.
+                    _Pair('Learning', _learningText(a)),
                     // The power signature WisePlug recognises. Only the main
                     // one: extra modes WisePlug adds by itself ("Mode 2", e.g.
                     // another fan speed) still count for recognition, unshown.
@@ -1270,7 +1296,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                       _Pair(
                         'Power use',
                         m.sampleCount < _recognitionSettings.registrationSamples
-                            ? 'Still learning (${m.sampleCount} of ${_recognitionSettings.registrationSamples} plug-ins)'
+                            ? 'Not known yet'
                             : m.meanPowerW == null
                             ? 'Not known yet'
                             : 'About ${m.meanPowerW!.round()} W',
@@ -1287,22 +1313,12 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                   style: TextStyle(fontSize: 16, color: context.muted),
                 ),
               ),
-            const SizedBox(height: 16),
-            _Panel(
-              border: _amber,
-              child: const Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Icon(Icons.shield_outlined, color: _amber),
-                  SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      'WisePlug sets the safety limit itself and learns this '
-                      'appliance\'s typical use. $_safetyNote',
-                      style: TextStyle(fontSize: 16),
-                    ),
-                  ),
-                ],
+            Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: Text(
+                'WisePlug sets the safe time by itself and adjusts it after '
+                '${_recognitionSettings.learningUses} uses.',
+                style: TextStyle(fontSize: 16, color: context.muted),
               ),
             ),
             const SizedBox(height: 20),
@@ -1415,8 +1431,8 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
           children: [
             ListTile(
               leading: const Icon(Icons.account_circle_outlined),
-              title: const Text('User Profile'),
-              subtitle: const Text('Account, bound device, delete account'),
+              title: const Text('My account'),
+              subtitle: const Text('Email, delete account'),
               trailing: const Icon(Icons.chevron_right),
               onTap: () => Navigator.of(context).push(
                 MaterialPageRoute<void>(
@@ -1427,8 +1443,8 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
             const Divider(height: 1),
             ListTile(
               leading: const Icon(Icons.router_outlined),
-              title: const Text('Wi-Fi Configuration'),
-              subtitle: const Text('Send home Wi-Fi details to the WisePlug'),
+              title: const Text('Change Wi-Fi'),
+              subtitle: const Text('Connect your WisePlug to another Wi-Fi'),
               trailing: const Icon(Icons.chevron_right),
               onTap: () => Navigator.of(context).push(
                 MaterialPageRoute<void>(
@@ -1438,39 +1454,25 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
             ),
             const Divider(height: 1),
             SwitchListTile(
-              title: const Text('Dark Mode'),
-              subtitle: const Text('Reduce eye strain during night use'),
+              title: const Text('Dark mode'),
               value: widget.darkMode,
               onChanged: widget.onDarkModeChanged,
             ),
             const Divider(height: 1),
             ListTile(
               leading: const Icon(Icons.wifi),
-              title: const Text('Connected Device'),
+              title: Text(DeviceBinding.displayName),
               subtitle: Text(
                 connected
-                    ? 'WisePlug Dual Outlet · ${DeviceBinding.gadgetId} · Online'
-                    : '${DeviceBinding.gadgetId} · Offline',
+                    ? 'Online · ${DeviceBinding.modelText}'
+                    : 'Offline · check that it is plugged into the wall',
               ),
               trailing: Icon(
                 connected ? Icons.check_circle : Icons.wifi_off,
                 color: connected ? _green : Colors.grey,
               ),
             ),
-            const Divider(height: 1),
-            ListTile(
-              leading: const Icon(Icons.info_outline),
-              title: const Text('App Version'),
-              subtitle: Text(_version),
-            ),
           ],
-        ),
-      ),
-      Padding(
-        padding: EdgeInsets.only(top: 16),
-        child: Text(
-          'Device changes and newly learned appliances appear while the app is open. Safety push notifications require mobile notification permission.',
-          style: TextStyle(color: context.muted, fontSize: 16),
         ),
       ),
       const SizedBox(height: 24),
@@ -1483,6 +1485,12 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
         onPressed: widget.onSignOut,
         icon: const Icon(Icons.logout),
         label: const Text('Sign out'),
+      ),
+      const SizedBox(height: 16),
+      Text(
+        'App version $_version',
+        textAlign: TextAlign.center,
+        style: TextStyle(color: context.muted, fontSize: 14),
       ),
     ];
   }
@@ -1836,7 +1844,7 @@ class _PowerControlState extends State<_PowerControl> {
       builder: (context) => AlertDialog(
         title: const Text('Reset safety?'),
         content: Text(
-          'Outlet ${widget.outlet} was switched off for safety. Check the '
+          'Outlet ${widget.outlet} was turned off for safety. Check the '
           'appliance first: unplug it if it is hot, smells of burning or '
           'looks damaged. Resetting unlocks the outlet, but it stays off '
           'until you turn it on again.',
@@ -1862,7 +1870,7 @@ class _PowerControlState extends State<_PowerControl> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              'Outlet ${widget.outlet} is unlocked and stays off. Turn it on '
+              'Outlet ${widget.outlet} is reset and stays off. Turn it on '
               'again when you are ready to use it.',
             ),
           ),
@@ -1888,7 +1896,7 @@ class _PowerControlState extends State<_PowerControl> {
         scrollable: true,
         title: Text('Turn on Outlet ${widget.outlet} again?'),
         content: Text(
-          '$name on Outlet ${widget.outlet} hit its safety limit. Only turn '
+          '$name on Outlet ${widget.outlet} was turned off for safety. Only turn '
           'it on if you are there and want to use it again.',
         ),
         actions: [
@@ -1925,10 +1933,19 @@ class _PowerControlState extends State<_PowerControl> {
     final appliance = r?.hasConnectedAppliance(widget.now) == true;
     // Only the switch shows the state: green = power on (live relay state).
     final lit = r != null && r.isFresh(widget.now) && !r.isLockedOut && on;
+    // The plug answers and can measure this outlet. Otherwise the switch is
+    // greyed out: the plug cannot act on it, or keeps the outlet off itself
+    // until its meter answers (METER_SILENT_OFF_MS).
+    final ready =
+        r != null &&
+        r.isFresh(widget.now) &&
+        r.sensorValid != false &&
+        !r.meterOff;
     final canToggle =
         !_busy &&
-        r?.isLockedOut != true &&
-        r?.isWarning != true &&
+        ready &&
+        r.isLockedOut != true &&
+        !r.isWarning &&
         (!on || appliance);
     return Container(
       padding: const EdgeInsets.all(12),
@@ -1963,16 +1980,18 @@ class _PowerControlState extends State<_PowerControl> {
                           (_busy
                               ? 'Waiting for your WisePlug…'
                               : r == null || !r.isFresh(widget.now)
-                              ? 'Unavailable'
+                              ? 'No connection'
                               : r.isLockedOut
-                              ? 'Locked · switched off for safety'
+                              ? 'Turned off for safety'
                               : r.safetyResetHold
-                              ? 'Off · safety reset done'
+                              ? 'Off · reset done'
+                              : !ready
+                              ? 'Not ready'
                               : on && !appliance
-                              ? 'On · no appliance detected'
+                              ? 'On · nothing plugged in'
                               : on
-                              ? 'On · monitoring enabled'
-                              : 'Off · monitoring disabled'),
+                              ? 'On'
+                              : 'Off'),
                       style: TextStyle(color: context.muted),
                     ),
                   ],
@@ -2008,7 +2027,7 @@ class _PowerControlState extends State<_PowerControl> {
                     ? (value) {
                         HapticFeedback.selectionClick();
                         // After a safety reset, turning on asks first.
-                        if (value && r?.safetyResetHold == true) {
+                        if (value && r.safetyResetHold) {
                           _turnOnAgain();
                         } else {
                           _send(value ? 'TURN_ON' : 'TURN_OFF');
@@ -2018,7 +2037,15 @@ class _PowerControlState extends State<_PowerControl> {
               ),
             ],
           ),
-          if (lit && !appliance && !_busy)
+          if (r != null && r.isFresh(widget.now) && !ready && !_busy)
+            Padding(
+              padding: const EdgeInsets.only(top: 8, left: 4),
+              child: Text(
+                'Check that the WisePlug is plugged into the wall. This switch works again by itself.',
+                style: TextStyle(fontSize: 16, color: context.muted),
+              ),
+            ),
+          if (lit && ready && !appliance && !_busy)
             Padding(
               padding: EdgeInsets.only(top: 8, left: 4),
               child: Row(
@@ -2059,8 +2086,8 @@ class _PowerControlState extends State<_PowerControl> {
               color: Colors.red,
               icon: Icons.lock_outline,
               text:
-                  'Inspect the appliance, then reset. It stays off until you '
-                  'turn it on again.',
+                  'Check the appliance, then press Reset Safety. It stays off '
+                  'until you turn it on again.',
               button: FilledButton.icon(
                 style: FilledButton.styleFrom(
                   backgroundColor: Colors.red.shade700,
@@ -2080,14 +2107,10 @@ class _PowerControlState extends State<_PowerControl> {
             Wrap(
               spacing: 8,
               children: [
-                Text('${r!.secondsRemaining(widget.now)} s until lockout'),
-                TextButton(
-                  onPressed: null,
-                  child: const Text('Override unavailable'),
-                ),
+                Text('Turns off in ${r!.secondsRemaining(widget.now)} s'),
                 TextButton(
                   onPressed: enabled ? () => _send('TURN_OFF') : null,
-                  child: const Text('Lock now'),
+                  child: const Text('Turn off now'),
                 ),
               ],
             ),

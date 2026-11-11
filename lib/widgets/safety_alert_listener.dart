@@ -248,8 +248,7 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
           const SnackBar(
             duration: Duration(seconds: 8),
             content: Text(
-              'Override accepted. The appliance keeps running on a 20% safety '
-              'buffer, but it is near its limit.',
+              'OK, it stays on a little longer. WisePlug will ask you again.',
             ),
           ),
         );
@@ -297,9 +296,20 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const _Header(),
-                const SizedBox(height: 28),
+                _Header(warning: warning),
+                const SizedBox(height: 24),
                 if (warning) ...[
+                  Text(
+                    triggered.length == 1
+                        ? 'Still using the ${_nameOf(triggered.single)}?'
+                        : 'Still using them?',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  const SizedBox(height: 18),
                   // The countdown is the focus: big, centered, alone.
                   Text(
                     '$seconds',
@@ -315,28 +325,14 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
                   ),
                   const SizedBox(height: 6),
                   const Text(
-                    'Seconds Remaining',
+                    'seconds until it turns off',
                     textAlign: TextAlign.center,
                     style: TextStyle(fontSize: 18),
                   ),
-                  const SizedBox(height: 26),
-                  const Text(
-                    'Are you still using the Appliance?',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 19, fontWeight: FontWeight.w700),
-                  ),
                 ] else ...[
-                  const Icon(Icons.power_off, size: 84, color: Colors.red),
-                  const SizedBox(height: 8),
-                  const Text(
-                    'Power cut',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 28, fontWeight: FontWeight.w800),
-                  ),
-                  const SizedBox(height: 10),
                   Text(
-                    'The outlet was switched off for safety. Inspect the '
-                    'appliance, then reset. It stays off until you turn it on again.',
+                    'Check the appliance first. After Reset Safety it stays '
+                    'off until you turn it on again.',
                     textAlign: TextAlign.center,
                     style: TextStyle(color: context.muted, height: 1.4),
                   ),
@@ -380,12 +376,12 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
                   children: warning
                       ? [
                           _choice(
-                            'Turn Off Now',
+                            'Turn off now',
                             () => _send('TURN_OFF', (r) => r.isWarning),
                           ),
                           const SizedBox(width: 14),
                           _choice(
-                            'Yes, Override',
+                            'Keep it on',
                             () => _send(
                               'SMART_OVERRIDE',
                               (r) => r.isWarning,
@@ -394,7 +390,7 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
                           ),
                         ]
                       : [
-                          _choice('Dismiss', widget.onDismiss),
+                          _choice('Close', widget.onDismiss),
                           const SizedBox(width: 14),
                           _choice(
                             'Reset Safety',
@@ -406,8 +402,8 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
                           ),
                         ],
                 ),
-                // No Dismiss during the countdown: the warning (and its
-                // sound) ends only with Turn Off Now, Yes, Override or the
+                // No Close during the countdown: the warning (and its
+                // sound) ends only with Turn off now, Keep it on or the
                 // cutoff.
               ],
             ),
@@ -449,36 +445,32 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
   );
 }
 
+/// One red bar with one line: what happened, in plain words.
 class _Header extends StatelessWidget {
-  const _Header();
+  final bool warning;
+  const _Header({required this.warning});
   @override
   Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 12),
+    padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 12),
     decoration: BoxDecoration(
       color: const Color(0xFFFF1A1A),
       borderRadius: BorderRadius.circular(16),
     ),
-    child: const Column(
+    child: Column(
       children: [
-        Icon(Icons.warning_rounded, color: Colors.white, size: 44),
-        SizedBox(height: 4),
+        Icon(
+          warning ? Icons.warning_rounded : Icons.power_off,
+          color: Colors.white,
+          size: 44,
+        ),
+        const SizedBox(height: 4),
         FittedBox(
           child: Text(
-            'WARNING',
-            style: TextStyle(
+            warning ? 'Safe time is up' : 'Turned off for safety',
+            style: const TextStyle(
               color: Colors.white,
               fontWeight: FontWeight.w900,
-              fontSize: 30,
-            ),
-          ),
-        ),
-        FittedBox(
-          child: Text(
-            'Safety Limit Exceeded!',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 19,
-              fontWeight: FontWeight.w700,
+              fontSize: 26,
             ),
           ),
         ),

@@ -50,7 +50,7 @@ class UserProfileScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final user = _auth.currentUser;
     return Scaffold(
-      appBar: AppBar(title: const Text('User Profile')),
+      appBar: AppBar(title: const Text('My account')),
       body: ListView(
         padding: const EdgeInsets.all(22),
         children: [
@@ -67,10 +67,9 @@ class UserProfileScreen extends StatelessWidget {
                   future: (loadBinding ?? DeviceBinding.ensureBound)(),
                   builder: (context, snapshot) => ListTile(
                     leading: const Icon(Icons.memory),
-                    title: const Text('Bound device ID'),
+                    title: Text(DeviceBinding.displayName),
                     subtitle: Text(
-                      '${snapshot.data ?? DeviceBinding.gadgetId} · '
-                      'locked 1:1 (one app, one gadget)',
+                      '${DeviceBinding.modelText} · linked to this account only',
                     ),
                     trailing: const Icon(Icons.lock_outline),
                   ),

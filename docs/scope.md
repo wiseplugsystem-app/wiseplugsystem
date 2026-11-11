@@ -86,7 +86,7 @@ Wiring order per outlet: current transformer, SSR, PZEM, ESP32, socket.
 - Flutter app for Android phones (also runs in Chrome).
 - Home: both outlets with live power and a plain status (Ready to use, In
   use, Turned off, Turned off for safety), the running timer, and outlet on/off.
-- Appliance Profiles: each registered appliance with its picture, status,
+- My appliances (the Appliances tab): each registered appliance with its picture, status,
   safe time and learning progress; a screen for each appliance (rename,
   delete).
 - Registration and recognition questions, safety warnings with sound,

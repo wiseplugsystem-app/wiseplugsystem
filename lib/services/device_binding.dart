@@ -7,6 +7,16 @@ class DeviceBinding {
   static const gadgetId = 'gadget-1';
   static const prefsKey = 'boundDeviceId';
 
+  /// What people see, like a product label: product name, model and unit
+  /// code. The unit code comes from [gadgetId] (gadget-1 -> WP-001), so the
+  /// next plug (gadget-2) shows WP-002. Change the names here only.
+  static const productName = 'WisePlug';
+  static const modelCode = 'WP-2';
+  static const modelText = 'Model $modelCode (2 outlets)';
+  static String get unitCode =>
+      'WP-${gadgetId.split('-').last.padLeft(3, '0')}';
+  static String get displayName => '$productName $unitCode';
+
   static String get statusPath => 'devices/$gadgetId/status';
   static String get wifiConfigPath => 'devices/$gadgetId/wifiConfig';
   static String get liveTelemetryPath => 'devices/$gadgetId/live_telemetry';

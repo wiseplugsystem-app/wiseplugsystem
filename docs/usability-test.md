@@ -34,10 +34,10 @@ gives up twice.
 |---|---|---|
 | 1 | "Find out what is plugged into the WisePlug right now and how much power it is using." | They say the fan's name and the watts shown on Home. |
 | 2 | "Turn off the socket the fan is plugged into, then turn it back on." | Outlet A shows Turned off, then In use again. |
-| 3 | "Plug in this new appliance and add it to the app." | They answer "What are you adding?" and the appliance shows in Appliance Profiles. |
+| 3 | "Plug in this new appliance and add it to the app." | They answer "What are you adding?" and the appliance shows under Appliances. |
 | 4 | "The fan has been on a long time. When the phone warns you, decide what to do." | They read the warning and choose to keep it on or let it turn off, on purpose. |
 | 5 | "The WisePlug turned the fan off for safety. Turn it back on." | They reset the outlet and the fan runs again. |
-| 6 | "Find out how long the fan may stay on before WisePlug turns it off." | They open the fan in Appliance Profiles and read its Safety limit. |
+| 6 | "Find out how long the fan may stay on before WisePlug turns it off." | They open the fan under Appliances and read its Safe time. |
 
 ## What to write down for each task
 

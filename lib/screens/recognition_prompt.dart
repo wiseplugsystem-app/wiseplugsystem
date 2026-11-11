@@ -126,7 +126,7 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
       // No mode names ("Normal", "Mode 2"): they are WisePlug's own labels
       // for an appliance's power patterns and mean nothing to users.
       'WisePlug thinks this is ${s.applianceName}. '
-          'Confirm it to use its own safe operating time.',
+          'Confirm it to use its own safe time.',
     _ => s.promptText ?? 'New appliance detected. Register it?',
   };
 
@@ -267,7 +267,7 @@ class _SafetyBanner extends StatelessWidget {
         const SizedBox(width: 8),
         Expanded(
           child: Text(
-            'Using a $minutes-minute safety limit until you confirm what this is.',
+            'Safe time: $minutes minutes until you confirm what this is.',
             style: const TextStyle(fontSize: 16),
           ),
         ),
