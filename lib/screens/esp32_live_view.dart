@@ -812,6 +812,8 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                     !reading.switchedOn
                         ? reading.isLockedOut || reading.safetyResetHold
                               ? 'Turned off for safety'
+                              : reading.meterOff
+                              ? 'Off until the meter works again'
                               : 'Turned off'
                         : connected
                         ? 'In use'

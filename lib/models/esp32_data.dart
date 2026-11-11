@@ -39,6 +39,11 @@ class OutletReading {
   /// Off after a safety reset: it stays off until the user turns it on again.
   final bool safetyResetHold;
 
+  /// Off only because its meter is not answering: the plug cannot time or
+  /// protect it, so it holds the outlet off and turns it back on by itself
+  /// once the meter answers again.
+  final bool meterOff;
+
   OutletReading.fromMap(this.outlet, Map<String, dynamic> map)
     : currentState = map['currentState']?.toString() ?? '',
       sessionID = map['sessionID']?.toString() ?? '',
@@ -51,6 +56,7 @@ class OutletReading {
       overridden = map['overridden'] == true,
       safetyResetHold =
           map['safetyResetHold'] == true && map['currentState'] == 'DISABLED',
+      meterOff = map['meter_off'] == true,
       appliance = map['appliance']?.toString() ?? 'Unknown',
       status = map['status']?.toString() ?? 'Unknown',
       voltage = sensorNumber(map['voltage_V']),
@@ -80,9 +86,10 @@ class OutletReading {
       currentState == 'LOCKED_OUT' || status == 'LOCKED_OUT';
   bool get isWarning => currentState == 'WARNING';
 
-  /// The outlet gives power (the plug switches it off when it is turned off
-  /// or locked out for safety).
-  bool get switchedOn => currentState != 'DISABLED' && !isLockedOut;
+  /// The outlet gives power (the plug switches it off when it is turned off,
+  /// locked out for safety, or its meter is not answering).
+  bool get switchedOn =>
+      currentState != 'DISABLED' && !isLockedOut && !meterOff;
   int secondsRemaining(DateTime now) => countdownExpiry == null
       ? 0
       : ((countdownExpiry!.difference(now).inMilliseconds + 999) ~/ 1000).clamp(

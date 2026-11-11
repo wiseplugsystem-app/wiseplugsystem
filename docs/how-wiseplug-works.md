@@ -43,8 +43,14 @@ system that does each step, for readers who want to look it up.
 - Each meter reads its outlet **about once a second**: voltage, current,
   power (watts) and power factor.
 - The app's **Home** screen shows each outlet's power and a plain status:
-  **Ready to use** (on, nothing running), **In use**, **Turned off**, or
-  **Turned off for safety**. It refreshes every few seconds.
+  **Ready to use** (on, nothing running), **In use**, **Turned off**,
+  **Turned off for safety**, or **Off until the meter works again**. It
+  refreshes every few seconds.
+- **A meter that stops answering:** the plug cannot time or protect that
+  outlet, so after **15 seconds** of silence with nothing running it switches
+  that outlet off, and back on by itself as soon as the meter answers. A short
+  blip changes nothing. If something was running, the usual 60-second warning
+  applies instead.
 
 *Firmware: sensor task; Firebase: live_telemetry, telemetry_logs.*
 

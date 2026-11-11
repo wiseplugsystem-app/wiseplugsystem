@@ -329,6 +329,29 @@ How it works: `haveLogin()` in the firmware (Identity Toolkit sign-in,
 Secure Token renewal, `?auth=<ID token>`); `device_accounts/gadget-1` in
 `database.rules.json`.
 
+## When a meter stops answering (in plain words)
+
+The plug can only time an appliance and protect against too much power if
+that outlet's meter is working. So:
+
+- **A short blip does nothing.** If the meter is silent for a moment (a motor
+  starting, a loose contact), the plug first restarts the meter's connection
+  by itself.
+- **Silent for 15 seconds, with nothing running:** the plug switches that
+  outlet **off**. The card says **"Off until the meter works again"**.
+- **The meter answers again:** the outlet comes back **on by itself**. There's
+  nothing to press, and the other outlet is never touched.
+- **Something is running when the meter stops:** the usual 60-second warning
+  appears, then the outlet turns off for safety (as before).
+- **After the plug is switched on,** each outlet stays off until its meter
+  gives its first good reading (under a second when the wiring is good).
+
+If an outlet stays "Off until the meter works again", check that meter's
+5V, GND, TX and RX wires (see the wiring page), then run `pin_finder`.
+
+How it works: `meterGuard()` and `METER_SILENT_OFF_MS` in the firmware;
+`meter_off` in `telemetry_logs/<outlet>`; `OutletReading.meterOff` in the app.
+
 ## Fewer downloads, steadier clock (in plain words)
 
 - **Firebase free plan:** Firebase used to send every once-a-second update

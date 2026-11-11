@@ -88,6 +88,13 @@ constexpr uint64_t SENSOR_TIMEOUT_MS = 5000;
 // (again every METER_RESTART_MS while it stays silent): noise from a switching
 // load can leave the PZEM's UART stuck until then.
 constexpr uint64_t METER_RESTART_MS = 5000;
+// SAFETY: an outlet that cannot be measured cannot be timed or protected. An
+// idle outlet whose meter has not answered for METER_SILENT_OFF_MS is switched
+// off, and comes back on by itself at the meter's next good reading (no reset
+// needed). Short blips (a motor starting, the link restart above) are shorter
+// than this. A running outlet keeps the SENSOR_UNAVAILABLE warning instead.
+// After power-up the outlets stay off until their meter's first good reading.
+constexpr uint64_t METER_SILENT_OFF_MS = 15000;
 // A recognition upload that fails (e.g. Wi-Fi reconnecting) is retried every
 // RECOGNITION_RETRY_MS for as long as its run lasts; it is dropped once the run
 // ends or a later stage of the same run is waiting. Meanwhile the run keeps
@@ -145,6 +152,7 @@ struct Snapshot {
   AlertRecord alert;
   char commandID[64] = {}, commandResult[40] = {};
   uint32_t lockSeq = 0;  // counts lockouts, so an unlock applies to one only
+  bool meterOff = true;  // relay held off: no good reading yet, or meter silent (METER_SILENT_OFF_MS)
 };
 struct SocketChannel {
   Preferences prefs;
@@ -170,6 +178,7 @@ struct SocketChannel {
   double sessionWh = 0;
   float lastPower = 0, sessionPeakCurrent = 0, sessionPeakPower = 0;
   uint64_t lowSince = 0;  // first of the consecutive readings below IDLE_W_THRESHOLD
+  uint64_t lastValid = 0;  // last good meter reading (0: none since power-up)
   // The run's measurement for recognize-appliance (Stage 1 and Stage 2).
   RecognitionWindow rec;
   float standbyW = 0;  // smoothed draw while idle (an appliance's standby)
@@ -249,8 +258,21 @@ String timestamp(int64_t ms) {
 // SAFETY STATE & STORAGE (control loop only)
 // ==========================================
 bool relayEnergized(SocketState s) { return s != SocketState::Disabled && s != SocketState::LockedOut; }
+// Whether the outlet actually has power: its state allows it and its meter works.
+bool relayOnNow(const Snapshot& s) { return relayEnergized(s.safety.state) && !s.meterOff; }
 void applyRelay(SocketChannel& ch) {
-  digitalWrite(ch.relay, relayEnergized(ch.data.safety.state) ? ch.relayOn : !ch.relayOn);
+  digitalWrite(ch.relay, relayOnNow(ch.data) ? ch.relayOn : !ch.relayOn);
+}
+// METER_SILENT_OFF_MS: holds an idle outlet off while its meter is silent.
+void meterGuard(SocketChannel& ch, uint64_t now) {
+  auto& d = ch.data;
+  bool off = !ch.lastValid ||
+      (d.safety.state == SocketState::Idle && now - ch.lastValid >= METER_SILENT_OFF_MS);
+  if (off == d.meterOff) return;
+  d.meterOff = off;
+  if (off) Serial.printf("[%s] Meter silent for %llu s: outlet off until it answers\n", ch.outlet,
+                         (unsigned long long)(METER_SILENT_OFF_MS / 1000));
+  else Serial.printf("[%s] Meter answering: outlet may be on\n", ch.outlet);
 }
 bool persistSafety(SocketChannel& ch) {
   auto state = ch.data.safety.state;
@@ -561,8 +583,15 @@ void sensorTask(void*) {
   for (;;) {
     for (int i = 0; i < 2; ++i) {
       SensorSample s;
-      s.power = meters[i].power(); s.current = meters[i].current(); s.voltage = meters[i].voltage();
-      s.pf = meters[i].pf(); s.energy = meters[i].energy(); s.frequency = meters[i].frequency();
+      // A silent meter makes every getter wait for its own timeout; ask once
+      // and skip the rest, so the other outlet's readings are not delayed.
+      s.voltage = meters[i].voltage();
+      if (isnan(s.voltage)) {
+        s.power = s.current = s.pf = s.energy = s.frequency = NAN;
+      } else {
+        s.power = meters[i].power(); s.current = meters[i].current();
+        s.pf = meters[i].pf(); s.energy = meters[i].energy(); s.frequency = meters[i].frequency();
+      }
       s.valid = isfinite(s.power) && s.power >= 0 && isfinite(s.current) && s.current >= 0 &&
                 isfinite(s.voltage) && s.voltage > 0 && isfinite(s.pf) && s.pf >= 0 && s.pf <= 1;
       s.captured = monotonicMs(); xQueueOverwrite(outlets[i].sensors, &s);
@@ -847,8 +876,10 @@ void addOutlet(JsonDocument& root, int i, const Snapshot& s) {
   root[b + "safetyResetHold"] = st == SocketState::Disabled && s.safety.resetHold;
   // isLockedDown is not here: syncLockdown() writes it only on change, so the
   // app's unlock is not overwritten every second.
-  root[String("devices/") + DEVICE_ID + "/outlets/" + ch.outlet + "/relayState"] = relayEnergized(st);
-  root[b + "relay_on"] = relayEnergized(st); root[b + "storage_ok"] = ch.storageOK;
+  root[String("devices/") + DEVICE_ID + "/outlets/" + ch.outlet + "/relayState"] = relayOnNow(s);
+  root[b + "relay_on"] = relayOnNow(s); root[b + "storage_ok"] = ch.storageOK;
+  // Off only because its meter is silent (METER_SILENT_OFF_MS); back on by itself.
+  root[b + "meter_off"] = s.meterOff && relayEnergized(st);
   root[b + "profileID"] = s.activeProfileID;  // Supabase appliance id, "" until recognized
   // Rule-based recognition: RECOGNIZING, UNKNOWN, AMBIGUOUS, SAME_TYPE_IN_USE,
   // MATCHED_PROVISIONAL or MATCHED_CONFIRMED (the app shows the prompt).
@@ -887,10 +918,10 @@ void addStatus(JsonDocument& root, const Snapshot* s) {
   int64_t remainingMs = -1;  // -1: nothing running, so no limit applies
   for (int i = 0; i < 2; ++i) {
     auto st = s[i].safety.state;
-    root[b + "outlet" + OUTLET_HW[i].letter] = relayEnergized(st);
+    root[b + "outlet" + OUTLET_HW[i].letter] = relayOnNow(s[i]);
     // Per-channel view, one object per outlet.
     String o = b + OUTLET_HW[i].key + "/";
-    root[o + "relayOn"] = relayEnergized(st); root[o + "state"] = stateName(st);
+    root[o + "relayOn"] = relayOnNow(s[i]); root[o + "state"] = stateName(st);
     root[o + "appliance"] = s[i].activeProfileID[0] ? s[i].activeName : "None";
     if (s[i].sensor.valid && s[i].capturedMono - s[i].sensor.captured < SENSOR_TIMEOUT_MS) draw += s[i].sensor.power;
     if (st == SocketState::Warning || st == SocketState::LockedOut) { triggered = true; remainingMs = 0; }
@@ -921,7 +952,7 @@ void addLiveTelemetry(JsonDocument& root, int i, const Snapshot& s) {
   bool ok = x.valid && s.capturedMono - x.captured < SENSOR_TIMEOUT_MS;  // valid: finite, V > 0, 0 <= pf <= 1
   o["deviceId"] = DEVICE_ID; o["outlet"] = OUTLET_HW[i].key;
   o["timestamp"] = timestamp(s.capturedEpoch); o["timestamp_ms"] = s.capturedEpoch;
-  o["relayOn"] = relayEnergized(s.safety.state); o["state"] = stateName(s.safety.state);
+  o["relayOn"] = relayOnNow(s); o["state"] = stateName(s.safety.state);
   o["appliance"] = s.activeProfileID[0] ? s.activeName : "None";
   o["status"] = ok ? "OK" : "NO_SIGNAL";
   if (!ok) return;
@@ -1601,7 +1632,11 @@ void loop() {
       }
     }
     SensorSample sample;
-    if (xQueueReceive(ch.sensors, &sample, 0) == pdTRUE) handleSensor(ch, sample, now);
+    if (xQueueReceive(ch.sensors, &sample, 0) == pdTRUE) {
+      if (sample.valid) ch.lastValid = now;
+      handleSensor(ch, sample, now);
+    }
+    meterGuard(ch, now);
     if ((safety.state == SocketState::Active || safety.state == SocketState::Sampling) &&
         (!d.sensor.valid || now - d.sensor.captured > SENSOR_TIMEOUT_MS)) beginAlert(ch, "SENSOR_UNAVAILABLE", now);
     Command cmd;
