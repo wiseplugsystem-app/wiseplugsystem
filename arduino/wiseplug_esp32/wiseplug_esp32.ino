@@ -764,13 +764,21 @@ String firebaseAuth() { return FIREBASE_AUTH; }
 void loginRejected(int) {}
 #endif
 
+// Free-plan quota: Firebase answers a write with the data it wrote, and that
+// echo counts as download (the 1 s update alone was ~10 GB a month, the whole
+// Spark allowance). print=silent makes a write answer 204 with no body; it is
+// reported to the callers as 200, so "stored" still reads HTTP_CODE_OK.
+int silentOk(int code) { return code == HTTP_CODE_NO_CONTENT ? HTTP_CODE_OK : code; }
+
 int firebaseRequest(const char* method, const String& path, const String& body = "", String* response = nullptr) {
   if (WiFi.status() != WL_CONNECTED || !haveLogin()) return -1;
   int code = -1;
-  if (http.begin(tls, "https://" + firebaseHost + "/" + path + ".json?auth=" + firebaseAuth())) {
+  bool get = strcmp(method, "GET") == 0;
+  if (http.begin(tls, "https://" + firebaseHost + "/" + path + ".json?auth=" + firebaseAuth() +
+                          (get ? "" : "&print=silent"))) {
     http.setTimeout(5000);
-    if (strcmp(method, "GET") == 0) code = http.GET();
-    else { http.addHeader("Content-Type", "application/json"); code = http.sendRequest(method, body); }
+    if (get) code = http.GET();
+    else { http.addHeader("Content-Type", "application/json"); code = silentOk(http.sendRequest(method, body)); }
     if (response && code == HTTP_CODE_OK) *response = http.getString();
     http.end();  // keeps the TLS connection open for reuse
   }
@@ -789,10 +797,10 @@ int firebasePatch(const JsonDocument& root) {
     return firebaseRequest("PATCH", "", body);
   }
   int code = -1;
-  if (http.begin(tls, "https://" + firebaseHost + "/.json?auth=" + firebaseAuth())) {
+  if (http.begin(tls, "https://" + firebaseHost + "/.json?auth=" + firebaseAuth() + "&print=silent")) {
     http.setTimeout(5000);
     http.addHeader("Content-Type", "application/json");
-    code = http.sendRequest("PATCH", reinterpret_cast<uint8_t*>(patchBuffer), n);
+    code = silentOk(http.sendRequest("PATCH", reinterpret_cast<uint8_t*>(patchBuffer), n));
     http.end();
   }
   loginRejected(code);
@@ -1274,6 +1282,15 @@ void updateWifi(uint64_t now) {
         }
         trialSsid = "";
         Serial.printf("Wi-Fi: online on %s\n", WiFi.SSID().c_str());
+        // Internet time, started once Wi-Fi works and only once (it keeps
+        // itself up to date). Started at boot, while Wi-Fi was still
+        // connecting, its first time request crashed the plug (lwIP assert
+        // in sntp_request -> dns -> udp_new).
+        static bool clockStarted = false;
+        if (!clockStarted) {
+          clockStarted = true;
+          configTime(0, 0, "pool.ntp.org", "time.google.com");  // UTC; the app localizes
+        }
       } else if (now - modeSince > CONNECT_TIMEOUT_MS) {
         bool rollback = trialSsid.length() && !trialFromSetup && savedSsid.length();
         if (rollback) startConnect(savedSsid, savedPass, false, false);
@@ -1417,7 +1434,7 @@ void networkTask(void*) {
   setupRoutes();
   if (savedSsid.length() || legacyCredentials) startConnect(savedSsid, savedPass, false, false);
   else startSetup();  // nothing to connect to yet
-  configTime(0, 0, "pool.ntp.org", "time.google.com");  // UTC; the app localizes
+  // The clock sync starts in updateWifi() once Wi-Fi is online, not here.
   static Snapshot latest[2]; bool available[2] = {false, false};
   uint64_t lastCommands = 0, lastPublish = 0, lastConfig = 0, lastLive = 0;
   for (;;) {

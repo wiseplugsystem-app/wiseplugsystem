@@ -329,9 +329,22 @@ How it works: `haveLogin()` in the firmware (Identity Toolkit sign-in,
 Secure Token renewal, `?auth=<ID token>`); `device_accounts/gadget-1` in
 `database.rules.json`.
 
+## Fewer downloads, steadier clock (in plain words)
+
+- **Firebase free plan:** Firebase used to send every once-a-second update
+  back to the plug. Those replies alone came to about 10 GB a month, the whole
+  free allowance. The plug now asks for no reply (`print=silent`), so a month
+  uses about 1–2 GB.
+- **Internet time:** the plug starts asking for the time only once its Wi-Fi
+  is online. Asking at power-up, while Wi-Fi was still connecting, could
+  crash it.
+- **No paid Firebase features:** the old Firebase Cloud Function
+  (`functions/`) was removed. It needed the paid Blaze plan, and Supabase
+  already sends the phone alerts.
+
 ## Deployment
 
-Deploy the updated database rules to permit each signed-in user to read/write their alert preferences. Deploy the updated functions to honor those preferences for safety push delivery. These changes do not alter device ownership requirements.
+Deploy the updated database rules to permit each signed-in user to read/write their alert preferences. Phone alerts are sent by Supabase (`evaluate-safety-alert`); there are no Firebase Cloud Functions to deploy. These changes do not alter device ownership requirements.
 
 Flash the updated ESP32 sketch to publish `profileID` and `safetyDeadline`. The GUI remains usable with older telemetry, but precise remaining time stays unavailable.
 
