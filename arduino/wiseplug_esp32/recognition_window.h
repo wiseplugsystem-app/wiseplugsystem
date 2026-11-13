@@ -15,9 +15,12 @@
 //
 // Stage 1 is ready 10 s into STEADY (power, PF, start-up, settling, standby);
 // Stage 2 at the end of STEADY adds the power variation and, if the load
-// switched on and off at least twice, the cycle period. A load that never
-// settles within 60 s (a thermostat cycling, a varying load) produces only
-// Stage 2, from everything after the start-up, marked unstable.
+// switched on and off at least twice, the cycle period. A load that has not
+// settled UNSTEADY_STAGE1_MS after plug-in (a fan whose power keeps moving,
+// a thermostat, a varying load) still gets a Stage 1 then, from everything
+// after the start-up, marked unstable, so its first answer comes in about
+// 25 s, not after a minute. If it never settles, Stage 2 follows at 60 s,
+// also marked unstable.
 //
 // Limits at 1 reading per second: millisecond inrush is averaged away, so the
 // peak only reflects slow start-ups (motor spin-up, a charger's soft start); a
@@ -44,6 +47,7 @@ struct RecognitionWindow {
   static constexpr uint64_t STAGE1_AFTER_MS = 10000; // into STEADY
   static constexpr uint64_t STEADY_MS = 30000;
   static constexpr uint64_t MAX_SETTLE_MS = 60000;   // from plug-in
+  static constexpr uint64_t UNSTEADY_STAGE1_MS = 20000;  // from plug-in, if not steady yet
   // Below this the meter cannot tell an appliance's standby from an empty socket.
   static constexpr float MIN_STANDBY_W = 0.5f;
   // On/off cycling, relative to the highest power seen in the run (hysteresis).
@@ -108,6 +112,8 @@ struct RecognitionWindow {
       } else {
         if (t >= STARTUP_MS) phase = RecPhase::Settling;
         if (t >= MAX_SETTLE_MS) { phase = RecPhase::Reported; unstable = true; return 2; }
+        // Not steady yet: a first answer anyway, from what was measured so far.
+        if (!stage1Done && t >= UNSTEADY_STAGE1_MS && afterStartup.n) { stage1Done = true; return 1; }
         return 0;
       }
     } else {
@@ -121,15 +127,17 @@ struct RecognitionWindow {
 
   RecFeatures features(int stage) const {
     RecFeatures f;
-    // Unstable: the steady window never started, so use everything after the start-up.
-    const Stats& s = unstable || !steady.n ? afterStartup : steady;
+    // Not steady (yet): the steady window never started, so use everything
+    // after the start-up, and report it as unstable, as at registration.
+    const bool notSteady = unstable || !steady.n;
+    const Stats& s = notSteady ? afterStartup : steady;
     const float mean = s.meanP();
     f.avgPowerW = mean;
     f.avgPf = s.n ? float(s.sumPf / s.n) : 0;
     f.avgVoltageV = s.n ? float(s.sumV / s.n) : 0;
     f.startupPeakRatio = mean > 0 && startupPeak > 0 ? startupPeak / mean : 1;
-    f.settlingTimeS = unstable ? float(MAX_SETTLE_MS) / 1000 : float(settledAt - start) / 1000;
-    f.unstable = unstable;
+    f.settlingTimeS = notSteady ? float(MAX_SETTLE_MS) / 1000 : float(settledAt - start) / 1000;
+    f.unstable = notSteady;
     f.readings = s.n;
     f.hasStandby = standbyKnown; f.standbyPowerW = standby;
     if (stage == 2) {

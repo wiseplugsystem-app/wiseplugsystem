@@ -44,6 +44,14 @@ struct SafetyState {
     if (!on && state != SocketState::Disabled) { state = SocketState::Disabled; ++revision; }
     return true;
   }
+  // The user answered the warning with "Turn off now": the outlet switches
+  // off but is NOT locked; the app's switch turns it back on (thesis,
+  // Chapter III). Only an unanswered warning locks the outlet.
+  bool userTurnOff() {
+    if (state != SocketState::Warning) return false;
+    state = SocketState::Disabled; resetHold = false; runtimeWarning = overridden = false; ++revision;
+    return true;
+  }
   // App-requested reset: clears the safety trip but keeps the outlet OFF
   // (resetHold). Power comes back only with a separate TURN_ON.
   bool remoteReset() {

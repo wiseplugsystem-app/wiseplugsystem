@@ -136,10 +136,31 @@ class RecognitionService {
     {'action': 'rename', 'applianceId': applianceId, 'name': name},
   );
 
-  Future<void> deleteAppliance(String applianceId) => _invoke(
-    'manage-appliance',
-    {'action': 'delete', 'applianceId': applianceId},
-  );
+  /// What the appliance is ("Flat iron"); it gets that type's safe time.
+  /// [idleOutlets]: the outlets ('outlet_1', 'outlet_2') the online plug
+  /// shows with nothing running now, so the server can close a run whose
+  /// end never arrived instead of saying the appliance is running.
+  Future<void> changeType(
+    String applianceId,
+    String typeName,
+    String? iconKey, {
+    List<String> idleOutlets = const [],
+  }) => _invoke('manage-appliance', {
+    'action': 'change-type',
+    'applianceId': applianceId,
+    'typeName': typeName,
+    'iconKey': ?iconKey,
+    'idleOutlets': idleOutlets,
+  });
+
+  Future<void> deleteAppliance(
+    String applianceId, {
+    List<String> idleOutlets = const [],
+  }) => _invoke('manage-appliance', {
+    'action': 'delete',
+    'applianceId': applianceId,
+    'idleOutlets': idleOutlets,
+  });
 
   Future<Map<String, dynamic>> _invoke(
     String function,

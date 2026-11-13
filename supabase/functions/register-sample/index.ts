@@ -23,8 +23,10 @@
 import { deviceIdOf, firebaseUser, requireOwner } from "../_shared/auth.ts";
 import { db } from "../_shared/db.ts";
 import { HttpError, json, readJson, serve } from "../_shared/http.ts";
-import { type Appliance, confirmedCutoffS, type Profile, requiredSamples, tooPowerful } from "../_shared/matching.ts";
+import { type Appliance, confirmedCutoffS, isCharger, type Profile, requiredSamples, tooPowerful } from "../_shared/matching.ts";
 import {
+  findOrCreateType,
+  iconKeyOf,
   insertSample,
   loadAppliance,
   loadConfig,
@@ -77,21 +79,9 @@ serve(async (req) => {
   } else {
     const typeName = text(body.typeName, 40);
     if (!typeName) throw new HttpError(400, "typeName is required, e.g. Fan");
-    // Types are unique per user ignoring case ("fan" is "Fan").
-    const { data: types, error: typesError } = await db.from("appliance_types").select("*").eq("owner_uid", uid);
-    if (typesError) throw typesError;
     // Its icon ("What are you adding?"); the app maps unknown keys to "Other".
-    const iconKey = typeof body.iconKey === "string" && /^[a-z_]{1,32}$/.test(body.iconKey) ? body.iconKey : null;
-    let type = types.find((t) => String(t.name).toLowerCase() === typeName.toLowerCase());
-    if (!type) {
-      const { data, error } = await db.from("appliance_types")
-        .insert({ device_id: deviceId, owner_uid: uid, name: typeName, icon_key: iconKey }).select("*").single();
-      if (error) throw error;
-      type = data;
-    } else if (!type.icon_key && iconKey) {
-      const { error } = await db.from("appliance_types").update({ icon_key: iconKey }).eq("id", type.id);
-      if (error) throw error;
-    }
+    const iconKey = iconKeyOf(body.iconKey);
+    const type = await findOrCreateType(deviceId, uid, typeName, iconKey);
     const name = text(body.name, 63);
     if (!name) throw new HttpError(400, "name is required, e.g. Fan 2");
     // The system sets the safe operating time: the type's default.
@@ -103,11 +93,13 @@ serve(async (req) => {
     if (error) throw error;
     appliance = await loadAppliance(uid, created.id);
     // Its settings ("Speed 1", "Speed 2"…, or "Cook", "Keep warm"): one
-    // profile each, samples_per_level samples each, in the order given.
+    // profile each, samples_per_level samples each (a charger:
+    // samples_per_charger, its power varies), in the order given.
     const levels = levelNames(body.levels);
+    const perLevel = isCharger(type.icon_key ?? iconKey) ? config.samplesPerCharger : config.samplesPerLevel;
     if (levels.length) {
       const { error: levelError } = await db.from("appliance_profiles").insert(levels.map((l, i) => ({
-        appliance_id: created.id, mode_name: l, required_samples: config.samplesPerLevel, level_position: i,
+        appliance_id: created.id, mode_name: l, required_samples: perLevel, level_position: i,
       })));
       if (levelError) throw levelError;
       appliance = await loadAppliance(uid, created.id);

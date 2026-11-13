@@ -204,15 +204,20 @@ class RecognitionSettings {
 
   /// Samples for each setting when registering by level.
   final int samplesPerLevel;
+
+  /// A charger's samples: its power changes with the battery.
+  final int samplesPerCharger;
   const RecognitionSettings({
     this.registrationSamples = 3,
     this.defaultCutoffMinutes = 30,
     this.learningUses = 7,
     this.samplesPerLevel = 1,
+    this.samplesPerCharger = 3,
   });
   RecognitionSettings.fromRow(Map<String, dynamic> r)
     : registrationSamples = (r['registration_samples'] as num?)?.toInt() ?? 3,
       samplesPerLevel = (r['samples_per_level'] as num?)?.toInt() ?? 1,
+      samplesPerCharger = (r['samples_per_charger'] as num?)?.toInt() ?? 3,
       defaultCutoffMinutes =
           (r['default_cutoff_minutes'] as num?)?.toInt() ?? 30,
       learningUses = (r['learning_uses'] as num?)?.toInt() ?? 7;

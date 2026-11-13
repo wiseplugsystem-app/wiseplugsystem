@@ -52,11 +52,13 @@ system that does each step, for readers who want to look it up.
 - **A meter that stops answering:** the plug cannot time or protect that
   outlet, so after **15 seconds** of silence with nothing running it switches
   that outlet off, and back on by itself as soon as the meter answers. A short
-  blip changes nothing. If something was running, the usual 60-second warning
-  applies instead. From the first missed reading the card says
+  blip changes nothing. If something is running, one spoiled reading (a fan
+  motor's noise) changes nothing either: only **5 seconds without a good
+  reading** start a 60-second warning, and if the meter answers again in
+  that minute the warning ends and the appliance keeps running. From the first missed reading the card says
   **Not ready**, never "Ready to use".
 
-*Firmware: sensor task; Firebase: live_telemetry, telemetry_logs.*
+*Firmware: sensor task; Firebase: telemetry_logs.*
 
 ## Step 3. An appliance is switched on
 
@@ -86,7 +88,10 @@ each appliance different:
 
 The plug sends this summary twice: **Stage 1** about 10 seconds after the
 power settles (a quick first guess) and **Stage 2** after about a minute
-(the full fingerprint).
+(the full fingerprint). An appliance whose power keeps moving (some fans, a
+thermostat) still gets its Stage 1 **20 seconds** after it is switched on.
+So the app has a first answer in about **20–25 seconds**; until then the
+card says **"Finding out what it is… This takes about 20 seconds"**.
 
 *Firmware: recognition_window.h; Supabase: recognize-appliance.*
 
@@ -95,8 +100,11 @@ power settles (a quick first guess) and **Stage 2** after about a minute
 Supabase compares the fingerprint with every appliance you have registered:
 
 1. For each feature, the new value must be within that appliance's normal
-   range: **3 × its usual spread**, or a small minimum allowance, whichever
-   is bigger.
+   range: **3 × its usual spread**, or a minimum allowance, whichever is
+   bigger. The minimum is **±10 % of its power**, ±10 s of settling time and
+   ±0.25 of start-up peak, so an appliance whose power changes a little from
+   day to day (a fan, a charger) is still recognised. A run that never got
+   steady is not compared on settling time.
 2. Every appliance that passes gets a score (how close it is, with power and
    power factor counting most).
 3. The result is one of:
@@ -124,7 +132,8 @@ Until you confirm, the run keeps the **30-minute** default.
    - electric fan: Level 1, Level 2, Level 3… (you choose 1 to 4 levels);
    - flat iron: Low, Medium, High;
    - rice cooker: Cook, then Keep warm;
-   - chargers: one sample;
+   - chargers: **3 samples** (a charger's power changes with the battery,
+     so WisePlug needs to see how much);
    - Other: one sample, plus any settings you add.
 4. **For each sample:** turn it on at that setting, leave it on for about 1
    minute without touching the buttons, then turn it off. The app says what
@@ -141,7 +150,7 @@ Until you confirm, the run keeps the **30-minute** default.
 | Not recognised yet / not confirmed | **30 minutes** |
 | Confirmed appliance | Its type's safe time (normally 4 hours) |
 | Heating appliances | Shorter: kettle 15, hair dryer 15, microwave 30, flat iron / air fryer / heater 60, rice cooker 90 minutes |
-| After 7 confirmed uses | WisePlug learns how long you usually use it and allows **1.5 ×** that, never more than the safe time above |
+| After 7 confirmed uses (normal runs after registration; the registration samples do not count) | WisePlug learns how long you usually use it and allows **1.2 ×** that (20 % more), never more than the safe time above |
 
 Each time you answer "Yes, it is the fan", that run also refines the
 appliance's fingerprint, so recognition gets better with use.
@@ -151,7 +160,9 @@ appliance's fingerprint, so recognition gets better with use.
 ## Step 8. The warning before a cutoff
 
 1. When the safe time is reached, the phone shows a **60-second countdown**
-   with a warning sound that cannot be muted.
+   with a warning sound that cannot be muted. This pop-up is **only for the
+   safe time**. A meter that stops answering, too much power or a fault
+   show on the outlet card (and as a phone notification), not as a pop-up.
 2. You choose:
    - **Keep it on**: it gets extra time (20 % of how long it has run,
      between 1 minute and 1 hour);
@@ -193,16 +204,16 @@ the thesis.
 - **No Wi-Fi or no internet:** the plug keeps measuring and keeps every
   safety rule (safe times, warnings, cutoffs). Appliances it cannot
   recognise without the internet get the 30-minute default. Its run records
-  and safety reports are **saved on the plug's own memory (flash)** and sent
-  when the internet is back, so even a long outage or a power cut loses
-  nothing. After a minute without the home Wi-Fi it opens "wisewp" again,
+  and safety reports wait in the plug's memory and are sent when the
+  internet is back (a restart before then loses them; the safety rules
+  never depend on them). After a minute without the home Wi-Fi it opens "wisewp" again,
   and keeps retrying the home network every 2 minutes.
 - **Power cut:** if the power goes off while an appliance was running, that
   outlet comes back **off and locked** ("Turned off for safety" in the app), so nothing
   restarts while nobody is watching. Reset, then Turn on again. An outlet
   that was idle comes back as it was.
 
-*Firmware: store-and-forward on flash (report_store.h), setup().*
+*Firmware: sendSupabase() (reports from memory, as in the 35th commit), setup().*
 
 ## Step 11b. Looking after itself (no one has to restart it)
 

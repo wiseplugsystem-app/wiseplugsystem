@@ -14,7 +14,10 @@ import '../services/safety_alarm_manager.dart';
 /// signed-in home screen) so its dialog covers every tab and pushed screen.
 ///
 /// The dialog and its warning sound start automatically only when the gadget
-/// reports `safetyTriggered == true` or `remainingLimit <= 0`. Dismissing
+/// reports `safetyTriggered == true` or `remainingLimit <= 0` AND an outlet's
+/// safe time is up (its alertType is SAFETY_CEILING_EXCEEDED): the pop-up is
+/// for the safe time only. A meter that stops answering, too much power or a
+/// fault show on the outlet card and as a phone notification. Dismissing
 /// silences that event; a new event (the condition clears, then recurs)
 /// raises it again. The dialog closes itself when the condition clears.
 ///
@@ -46,10 +49,15 @@ class _SafetyAlertListenerState extends State<SafetyAlertListener> {
   bool _dismissed = false;
   bool _warningSounding = false; // the warning pattern is playing
 
+  /// The outlets whose safe time is up: warning, or turned off by it.
+  Iterable<OutletReading> get _safeTime => _readings.values.where(
+    (r) => (r.isWarning || r.isLockedOut) && r.isSafeTimeAlert,
+  );
+
   /// Time left until the soonest cutoff among the outlets in warning.
   Duration? _untilCutoff() {
     final now = DateTime.now();
-    final seconds = _readings.values
+    final seconds = _safeTime
         .where((r) => r.isWarning)
         .map((r) => r.secondsRemaining(now));
     return seconds.isEmpty
@@ -60,7 +68,7 @@ class _SafetyAlertListenerState extends State<SafetyAlertListener> {
   /// The warning ended with the power cut: one long beep.
   void _checkCutoff() {
     if (_route == null || !_warningSounding) return;
-    final values = _readings.values;
+    final values = _safeTime;
     if (values.any((r) => r.isWarning) || !values.any((r) => r.isLockedOut)) {
       return;
     }
@@ -77,7 +85,8 @@ class _SafetyAlertListenerState extends State<SafetyAlertListener> {
     final status = _status;
     return status != null &&
         status.isOnline(DateTime.now()) &&
-        status.needsSafetyAlert;
+        status.needsSafetyAlert &&
+        _safeTime.isNotEmpty;
   }
 
   @override
@@ -93,8 +102,8 @@ class _SafetyAlertListenerState extends State<SafetyAlertListener> {
       ..add(
         widget.service.streamOutlets().listen((readings) {
           _readings = readings;
-          _updates.value++;
           _checkCutoff();
+          _evaluate();
         }, onError: (Object _) {}),
       );
   }
@@ -131,7 +140,7 @@ class _SafetyAlertListenerState extends State<SafetyAlertListener> {
         ),
       ),
     );
-    if (_readings.values.any((r) => r.isWarning)) {
+    if (_safeTime.any((r) => r.isWarning)) {
       _warningSounding = true;
       unawaited(_alarm.playSafetyAlarm(remaining: _untilCutoff));
     } else {
@@ -275,7 +284,7 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
       final triggered = widget
           .readings()
           .values
-          .where((r) => r.isWarning || r.isLockedOut)
+          .where((r) => (r.isWarning || r.isLockedOut) && r.isSafeTimeAlert)
           .toList();
       final warnings = triggered.where((r) => r.isWarning).toList();
       final warning = warnings.isNotEmpty;
@@ -396,7 +405,9 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
                             'Reset Safety',
                             () => _send(
                               'RESET_SAFETY',
-                              (r) => r.isWarning || r.isLockedOut,
+                              (r) =>
+                                  (r.isWarning || r.isLockedOut) &&
+                                  r.isSafeTimeAlert,
                             ),
                             danger: true,
                           ),

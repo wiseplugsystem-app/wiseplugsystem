@@ -168,6 +168,9 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
   /// Set once Register is pressed: the samples are being collected.
   RegistrationTracker? _tracker;
   RegistrationStep _step = RegistrationStep.plugIn;
+
+  /// When the run being measured started (shown as "On for 35 s").
+  DateTime? _measuringSince;
   String? _applianceId;
   String _applianceName = '';
   int _collected = 0;
@@ -196,10 +199,17 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
       ? [...levelsFor(_kind, speeds: _speeds), ..._extraLevels]
       : [for (final m in _appliance!.levels) m.name];
 
-  /// Samples in all: one for each setting (samples_per_level).
+  /// Samples in all: one for each setting (samples_per_level); a charger
+  /// samples_per_charger, since its power changes with the battery.
   int get _required => _newAppliance
-      ? _levels.length * widget.settings.samplesPerLevel
+      ? _levels.length *
+            (_isCharger(_kind)
+                ? widget.settings.samplesPerCharger
+                : widget.settings.samplesPerLevel)
       : _appliance!.samplesNeeded(_legacy);
+
+  static bool _isCharger(ApplianceKind k) =>
+      k.key == 'laptop_charger' || k.key == 'phone_charger';
 
   @override
   void initState() {
@@ -266,7 +276,12 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
       if (step == RegistrationStep.record && latest != null) {
         await _record(tracker, latest);
       } else if (mounted) {
-        setState(() => _step = step);
+        setState(() {
+          _step = step;
+          _measuringSince = step == RegistrationStep.measuring
+              ? latest?.startedAt
+              : null;
+        });
       }
     } catch (_) {
       // Offline for a moment: the next poll tries again.
@@ -503,11 +518,14 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
         _required == 1
             ? 'Do this 1 time.'
             : _levels.length > 1
-            ? 'Do this $_required times, one time for each setting:'
+            ? _levels.every(_isSpeed)
+                  ? 'Do this $_required times, a different speed each time '
+                        '(any order).'
+                  : 'Do this $_required times, one time for each setting:'
             : 'Do this $_required times.',
         style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
       ),
-      if (_levels.length > 1) ...[
+      if (_levels.length > 1 && !_levels.every(_isSpeed)) ...[
         const SizedBox(height: 4),
         Text(_levels.join('  →  '), style: const TextStyle(fontSize: 16)),
       ],
@@ -652,10 +670,25 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
     },
   );
 
-  /// What to do for the setting [level], before "(sample 1 of 3)".
-  static String _levelHint(String? level) => switch (level) {
+  /// A fan's speeds are saved as "Level 1", "Level 2"…, but users may not
+  /// know which button is which: they do them in any order, a different
+  /// speed each time (the samples all belong to the same fan).
+  static bool _isSpeed(String? level) => level?.startsWith('Level ') ?? false;
+
+  /// What to do for sample [sample] at [level]. A charger draws more on a
+  /// low battery and less when nearly full, so each of its samples asks for
+  /// a different battery level and WisePlug learns all its speeds.
+  static String _levelHint(String? level, int sample) => switch (level) {
     null || 'Normal' => '',
-    'Charging' => 'Charge a phone or laptop with it. ',
+    _ when _isSpeed(level) =>
+      sample == 1 ? 'Use any speed. ' : 'Use a speed you have NOT done yet. ',
+    'Charging' => switch (sample) {
+      1 => 'Charge a phone or laptop whose battery is LOW (under 30%). ',
+      2 => 'Charge it when the battery is about HALF full (40–60%). ',
+      3 => 'Charge it when the battery is NEARLY FULL (over 80%). ',
+      _ => 'Charge a phone or laptop with it (any battery level). ',
+    },
+    'Heating' => 'Set the dial to any setting and let it heat up. ',
     _ => 'Set it to $level. ',
   };
 
@@ -670,7 +703,7 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
     return [
       const SizedBox(height: 16),
       Text(
-        fan ? 'How many levels does it have?' : 'Its settings:',
+        fan ? 'How many speeds does your fan have?' : 'Its settings:',
         style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
       ),
       const SizedBox(height: 8),
@@ -690,30 +723,34 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
         Padding(
           padding: const EdgeInsets.only(top: 6, bottom: 8),
           child: Text(
-            'Level 1 is the slowest. Pick how many levels your fan has: '
-            'WisePlug takes one sample at each level, so each level you add '
-            'is one more time to turn it on.',
+            'Count its speed buttons. You will turn it on once at each '
+            'speed, in any order.',
             style: TextStyle(color: context.muted, fontSize: 16),
           ),
         ),
-      Wrap(
-        spacing: 8,
-        runSpacing: 8,
-        children: [
-          for (final l in _levels)
-            Chip(
-              label: Text(l),
-              onDeleted: _extraLevels.contains(l)
-                  ? () => setState(() => _extraLevels.remove(l))
-                  : null,
-            ),
-        ],
-      ),
+      // A fan's speeds are just counted above (no "Level 1/2/3" to match).
+      if (!fan)
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final l in _levels)
+              Chip(
+                label: Text(l),
+                onDeleted: _extraLevels.contains(l)
+                    ? () => setState(() => _extraLevels.remove(l))
+                    : null,
+              ),
+          ],
+        ),
       if (charger)
         Padding(
           padding: const EdgeInsets.only(top: 6),
           child: Text(
-            'A charger picks its speed by itself, so 1 sample is enough.',
+            'A charger uses more power when the battery is low and less when '
+            'it is nearly full, so WisePlug takes '
+            '${widget.settings.samplesPerCharger} samples: one with the '
+            'battery low, one about half full, and one nearly full.',
             style: TextStyle(color: context.muted, fontSize: 16),
           ),
         ),
@@ -740,6 +777,16 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
     setState(() => _extraLevels.add(name));
   }
 
+  /// After a step, what the next one is: "Then turn it on at a different
+  /// speed." / "Then turn it on again: set it to Keep warm."
+  static String _nextHint(String? next, int sample) => switch (next) {
+    null => '',
+    _ when _isSpeed(next) => 'Then turn it on at a DIFFERENT speed. ',
+    'Normal' || 'Heating' => 'Then turn it on again. ',
+    'Charging' => 'Then charge again: ${_levelHint(next, sample)}',
+    _ => 'Then turn it on again and set it to $next. ',
+  };
+
   /// "the fan" -> "The fan", at the start of a sentence.
   static String _cap(String s) =>
       s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);
@@ -752,28 +799,33 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
         : switch (_step) {
             RegistrationStep.plugIn => (
               Icons.power,
-              'Turn $name on. ${_levelHint(_level)}'
-                  '(sample $sample of $_required).',
+              'Step $sample of $_required: Turn $name on. '
+                  '${_levelHint(_level, sample)}',
             ),
             RegistrationStep.restart => (
               Icons.restart_alt,
               '${_cap(name)} is already on. Turn it off, count to 5, then turn '
-                  'it on again.',
+                  'it on again${_isSpeed(_level) ? ' at a speed you have NOT done yet' : ''}.',
             ),
-            RegistrationStep.measuring || RegistrationStep.record => (
-              Icons.speed,
-              'Good! Leave it on. Don\'t change the setting now. WisePlug '
-                  'is learning it. This takes about 1 minute '
-                  '(sample $sample of $_required).',
+            RegistrationStep.measuring => (
+              Icons.hourglass_top,
+              'Please wait about 1 minute. Leave it on and don\'t touch its '
+                  'buttons. WisePlug is learning it (step $sample of '
+                  '$_required).',
+            ),
+            RegistrationStep.record => (
+              Icons.save_outlined,
+              'Saving… please wait a few seconds.',
             ),
             RegistrationStep.switchOff => (
               Icons.power_off,
-              'Sample $_collected of $_required done! Now turn $name off.'
-                  '${_level == null || _level == 'Normal' ? '' : ' Next: $_level.'}',
+              'Step $_collected of $_required done! Now turn $name off and '
+                  'wait 5 seconds. ${_nextHint(_level, _collected + 1)}'
+                  'You will wait about 1 minute again.',
             ),
             RegistrationStep.tooShort => (
               Icons.timer_off_outlined,
-              'Oops, that was too short. Turn it on again and leave it on for '
+              'That was too short. Turn it on again and leave it on for '
                   'about 1 minute.',
             ),
           };
@@ -812,6 +864,27 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
       if (!_complete && _step == RegistrationStep.measuring) ...[
         const SizedBox(height: 16),
         const LinearProgressIndicator(),
+        if (_measuringSince case final since?) ...[
+          const SizedBox(height: 8),
+          Builder(
+            builder: (context) {
+              final s = DateTime.now()
+                  .difference(since)
+                  .inSeconds
+                  .clamp(0, 9999);
+              return Text(
+                // Over 2 minutes: the measurement is not getting through.
+                s > 120
+                    ? 'On for ${s ~/ 60} min ${s % 60} s. This is taking '
+                          'longer than usual: check that the WisePlug is '
+                          'online.'
+                    : 'On for $s s of about 60 s',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 16, color: context.muted),
+              );
+            },
+          ),
+        ],
       ],
       if (_error != null) ...[
         const SizedBox(height: 12),

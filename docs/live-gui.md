@@ -280,17 +280,18 @@ WisePlug looks after itself, so nobody has to unplug it to "restart" it:
 - **If the safety part ever froze**, a hardware watchdog restarts it; an
   outlet that was running then comes back off and locked, like after a power
   cut.
-- **Run summaries and safety reports are saved on the plug's flash** until
-  the server has them, so a long Wi-Fi outage or a power cut loses nothing.
+- **Run summaries and safety reports** wait in the plug's memory until
+  the server has them (since the 42nd commit: the flash store of the 36th
+  stopped them from reaching Supabase at all, see below).
 - **Updates over Wi-Fi:** new firmware can be sent from the Arduino IDE
   without a cable, only while both outlets are idle or off.
-- **Safer connections:** the plug now checks the servers' certificates.
+- **Connections** are encrypted, but the servers' certificates are not
+  checked (as in the 35th commit; checking them needed more memory than the
+  plug has, see below).
 
 How it works: the SELF-HEALING section of the firmware (cloud health,
-heartbeats, `healthCheck()` in the safety loop, `enableLoopWDT()`); the
-store-and-forward section (`report_store.h`, `event_store.h`, a 64 KB file
-`/reports.bin`); Arduino OTA when `OTA_PASSWORD` is set in `secrets.h`;
-`useBuiltinCACertBundle()`. The plug reports `devices/gadget-1/status/health`
+heartbeats, `healthCheck()` in the safety loop, `enableLoopWDT()`);
+`sendSupabase()`; Arduino OTA when `OTA_PASSWORD` is set in `secrets.h`. The plug reports `devices/gadget-1/status/health`
 (uptime, free memory, largest free block, last self-restart) in Firebase.
 
 **Arduino IDE setting (once):** Tools → Partition Scheme → **Minimal SPIFFS
@@ -331,28 +332,22 @@ Secure Token renewal, `?auth=<ID token>`); `device_accounts/gadget-1` in
 
 ## When a meter stops answering (in plain words)
 
-The plug can only time an appliance and protect against too much power if
-that outlet's meter is working. So:
+Each outlet has its own meter. A meter that stops answering no longer
+switches its outlet off. (Before, a silent meter kept its outlet off, so the
+two outlets took turns being on.) Now:
 
-- **A short blip does nothing.** If the meter is silent for a moment (a motor
-  starting, a loose contact), the plug first restarts the meter's connection
-  by itself. The card already says **"Not ready"** (never "Ready to
-  use") while it waits.
-- **Silent for 15 seconds, with nothing running:** the plug switches that
-  outlet **off**. The card still says **"Not ready"**: the plug cannot
-  measure it, so it keeps it off.
-- **The meter answers again:** the outlet comes back **on by itself**. There's
-  nothing to press, and the other outlet is never touched.
-- **Something is running when the meter stops:** the usual 60-second warning
-  appears, then the outlet turns off for safety (as before).
-- **After the plug is switched on,** each outlet stays off until its meter
-  gives its first good reading (under a second when the wiring is good).
+- **Nothing running:** the outlet stays on or off, the way you set it. The
+  card says **"Not measuring"**. WisePlug can't time an appliance on that
+  outlet until the meter answers again.
+- **A short blip does nothing.** The plug restarts the meter's connection
+  by itself.
+- **Something running when the meter stops for 5 seconds:** the usual
+  60-second warning appears, then the outlet turns off for safety. If the
+  meter answers within that time, the run simply goes on.
 
-If an outlet stays "Off until the meter works again", check that meter's
-5V, GND, TX and RX wires (see the wiring page), then run `pin_finder`.
-
-How it works: `meterGuard()` and `METER_SILENT_OFF_MS` in the firmware;
-`meter_off` in `telemetry_logs/<outlet>`; `OutletReading.meterOff` in the app.
+If an outlet keeps saying "Not measuring", check that meter's 5V, GND, TX and
+RX wires (see the wiring page), and that the meter is connected to mains. A
+PZEM meter needs mains power to measure; USB power alone is not enough.
 
 ## Fewer downloads, steadier clock (in plain words)
 
@@ -408,7 +403,7 @@ switch is `_PowerControl` (`ready`).
   now** and **Keep it on**. After a cutoff it says **Turned off for
   safety** with **Close** and **Reset Safety**.
 - **Appliances tab** (was Profiles): an appliance's page shows only
-  **Where**, **Safe time**, **Learning** (3 of 7 uses) and **Power use**,
+  **Where**, **Safe time**, **Times used** (3 of 7) and **Power use**,
   then Edit and Delete.
 - **Settings:** **My account**, **Change Wi-Fi**, **Dark mode**, the plug
   (online or offline), **Sign out**, and the app version in small print.
@@ -419,6 +414,84 @@ switch is `_PowerControl` (`ready`).
   **safe time**; an outlet the plug cut is **turned off for safety**;
   extra time after the warning is **Keep it on**.
 
+## Recognition answers reach Supabase again (in plain words)
+
+- **The problem:** the plug kept two secure connections open, one to
+  Firebase and one to Supabase. Each needs about 40 KB of memory in one
+  piece, and together they did not fit (the largest free piece was about
+  17 KB). So the plug's measurements never reached Supabase: no pop-up, and
+  the card only said "Unknown appliance".
+- **The fix:** one secure connection at a time. When the plug has something
+  for Supabase, it closes Firebase's connection, sends, closes its own, and
+  Firebase reconnects. Live updates pause for a second or two; safety is
+  never affected (it runs on its own).
+- **Less to send:** the plug no longer writes what nothing reads:
+  `live_telemetry`, `alerts/`, `activity_log`, `devices/gadget-1/notifications`,
+  `outlets/…/relayState` and `isLockedDown`, and `status/outlet_1|2`. Phone
+  alerts still come from Supabase; Reset Safety still works (it uses the
+  RESET_SAFETY command).
+- **Faster first answer:** an appliance whose power keeps moving gets its
+  first guess 20 s after it is switched on (it used to wait 60 s).
+- **While waiting** the card says "Finding out what it is… This takes about
+  20 seconds", not "Unknown appliance".
+- **If an upload still fails,** the Serial Monitor says why: "Stage 1 not
+  delivered yet (HTTP -1, largest free block 17396)". HTTP -1 means no
+  connection (often too little memory), 0 means the clock is not set yet.
+
+## Recognising appliances whose power changes; editing what an appliance is (in plain words)
+
+- **Why a charger was "Something new" every time:** it was registered with
+  one sample, so WisePlug allowed only ±2 % of its power. A laptop charger
+  drew 80, 103 and 91 W on different days. Now the minimum allowance is
+  **±10 %** (settling time ±10 s, start-up peak ±0.25), a charger is
+  registered with **3 samples** so its real spread is learned, and a run
+  that never got steady is not compared on settling time. All three of
+  those charger runs are recognised with 3 samples. A charger registered
+  with one sample before this should be deleted and registered again.
+  (`recognition_config`: floor_power_pct, floor_settling_time_s,
+  floor_startup_peak_ratio, samples_per_charger; migration
+  20261112000000_varying_loads.)
+- **Moving an appliance from A to B:** the plug now tells Supabase which
+  runs it has going, so a run that ended on A is closed at once and the
+  appliance is recognised on B (it is no longer "still running on A").
+- **Edit an appliance:** its page's **Edit** changes its name and **what it
+  is** (Electric fan, Flat iron, … or Other). A new type brings its safe
+  time: heating types are shorter. Not while it is running.
+- **"Registering · 1 of 3 done"** shows on the outlet card while the
+  appliance on it is still being registered.
+- **No cutoff for one spoiled meter reading:** a running outlet gets the
+  "meter stopped answering" warning only after 5 s without a good reading
+  (it used to start on one bad reading, and the outlet was always cut 60 s
+  later). If the meter answers again within that minute, the warning ends
+  and the run continues. After **Reset Safety** the card says **Reset
+  done** and "Press Turn on again below"; it no longer looks locked.
+- **Registration** follows the newest run Supabase has on either outlet,
+  as in the 35th commit. That works again now that run ends reach Supabase
+  within seconds (a run end is retried every 10 s). See HARDWARE_TEST.md for
+  the full check on the real plug.
+- **The warning pop-up is only for the safe time.** A meter that stops
+  answering, too much power or a fault show on the outlet card instead
+  ("Meter stopped answering … turns it off for safety in 45 s") and as a
+  phone notification. The plug sends why (`alertType` in telemetry_logs).
+
+## Back to the 35th commit's network part (in plain words)
+
+Registration and "Times used" worked until the 36th commit. Supabase shows
+the plug's run ends and safety reports stopped on 9 November, the day after
+it. That commit added, at once, certificate checks on every secure
+connection (much more memory per connection) and a flash store for reports.
+From then on run ends never arrived (so no use was ever counted, and no
+safety notification reached the phone), recognition uploads failed, and a
+connection crashed the plug during a test.
+
+So the plug's network part is back to the 35th commit's way: connections
+without certificate checks (`setInsecure`; still encrypted; a known
+limitation on an untrusted Wi-Fi), and run ends and safety reports sent
+straight from memory. Everything else from later commits stays (pins, clock
+fix, quiet Firebase writes, silent meter, missed-reading rule, one secure
+connection at a time, run list, alert type, run ID). The program is about
+115 KB smaller.
+
 ## Deployment
 
 Deploy the updated database rules to permit each signed-in user to read/write their alert preferences. Phone alerts are sent by Supabase (`evaluate-safety-alert`); there are no Firebase Cloud Functions to deploy. These changes do not alter device ownership requirements.
@@ -426,3 +499,96 @@ Deploy the updated database rules to permit each signed-in user to read/write th
 Flash the updated ESP32 sketch to publish `profileID` and `safetyDeadline`. The GUI remains usable with older telemetry, but precise remaining time stays unavailable.
 
 No database data, rules, functions or firmware are deployed by a Flutter hot reload. Fully restart/rebuild the app after adding the version asset.
+
+## "Running now" when nothing is plugged in
+
+If the plug restarts or goes offline during a run, the run's end never reaches
+Supabase, so it still looks like the appliance is running. You then couldn't
+edit or delete it ("…is running now; switch it off or unplug it first").
+Now, when you press Edit or Delete, the app tells the server which outlets the
+plug shows as empty right now. The server closes the stuck run, and the edit or
+delete goes through. This only happens while the plug is online. Safety is not
+affected: the plug times and turns off its outlets by itself.
+
+## How many samples each appliance takes (in plain words)
+
+A sample is one run of about a minute while WisePlug measures the appliance.
+WisePlug takes one sample for each setting you can choose, and more for a
+charger:
+
+| Appliance | Samples | Why |
+|---|---|---|
+| Electric fan | 1 per speed (you pick 1–4) | Each speed uses different watts (e.g. 35, 48, 60 W) |
+| Flat iron | 1 ("Heating") | The dial doesn't change the watts: it always heats at 1,000–1,500 W. The dial only changes how long it rests at 0 W. |
+| Rice cooker | 2 (Cook, Keep warm) | About 700 W while cooking, 30–50 W keeping warm |
+| Laptop or phone charger | 3 (battery low, half, nearly full) | A charger picks its own speed: fast on a low battery, slow when nearly full |
+| Other | 1, or add settings (up to 6) | Add one for each button or setting that changes how much it uses |
+
+## Irons and other heating appliances: the timer keeps going (in plain words)
+
+A flat iron's thermostat switches its heater off (0 W) once it is hot, then
+on again when it cools. Before, WisePlug thought the iron had been unplugged
+at every rest, and gave it a fresh safe time when it heated again. An iron
+left on was never turned off.
+
+Now a heating appliance (one that used 500 W or more in this run) may rest at
+0 W for up to **3 minutes** and still count as on. Its safe time keeps
+counting, so an iron left on is turned off when its safe time is up. After 3
+minutes at 0 W the run ends as before. Fans and chargers use far less than
+500 W, so they still count as off 3 seconds after you switch them off. Both
+numbers live in Supabase (`recognition_config.rest_gap_s` and
+`rest_gap_min_w`).
+
+## "Turned off" notification after an unanswered warning (in plain words)
+
+When the 60-second warning ran out with no answer, the plug turned the outlet
+off, but never told Supabase. So the phone got "Safe time is up", but never
+"The outlet was turned off". Found with the plug simulator
+(`tool/simulate_plug.ts`). Now the plug sends the "turned off" report whenever
+a warning ends without an answer, or with "Turn off now". A restart or power
+cut does not send it: that is shown on the card instead.
+
+## "Turn off now" and the 20 % buffer (in plain words)
+
+These two changes make the system match the thesis (Chapter III):
+
+- **"Turn off now"** in the safe-time pop-up just switches the outlet off.
+  It is **not locked**: the outlet's switch in Power Control works right
+  away. Only a warning that **nobody answers** locks the outlet, and then
+  you need **Reset Safety**.
+- **The learned safe time** (after 7 uses) is now your usual time **plus
+  20 %**: for example, 60 minutes of usual use gives a 72-minute safe time.
+  It was plus 50 %. It is still never longer than the safe time for that
+  type of appliance (`recognition_config.learned_margin` = 1.20).
+
+## Simpler words for everyday users (in plain words)
+
+The app is for people who just want it to work. The logic underneath is
+unchanged (one sample per speed, 7 uses to learn, safe times, all safety
+rules); only the words on screen are simpler.
+
+- **Fan speeds in any order.** "How many speeds does your fan have? Count
+  its speed buttons." Each step says "Use a speed you have NOT done yet", so
+  nobody has to know which button is "Level 1".
+- **Every wait is said out loud:** "Please wait about 1 minute. Leave it on
+  and don't touch its buttons." / "Saving… please wait a few seconds." /
+  "Step 1 of 3 done! Now turn the fan off and wait 5 seconds. Then turn it
+  on at a DIFFERENT speed. You will wait about 1 minute again."
+- **The appliance page:** Right now (On, in Outlet A / Off), Turns off after,
+  Used (3 of 7 times; later "Usually on for"), Uses about (45 W).
+  The status badge and the list filters stay All / Active / Idle.
+
+## Finishing a registration later (in plain words)
+
+Each speed you already registered is recognized at once, so turning the fan
+on at one of those speeds does not bring up the registration pop-up. To
+finish registering:
+
+- **From the appliance's page:** tap **Continue registering**, then turn the
+  appliance on at a speed (or setting) you have not done yet.
+- **From the outlet card:** while it runs, a **Finish registering** button
+  appears under "Registering · 1 of 3 done". A run that is already going is
+  not used (it may be a speed you already did): turn it off, count to 5,
+  and turn it on at a different speed.
+- **Or simply** turn it on at a speed you have not done yet: WisePlug does
+  not know that speed, so the pop-up appears with "It is … : continue".

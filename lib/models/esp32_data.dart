@@ -39,10 +39,10 @@ class OutletReading {
   /// Off after a safety reset: it stays off until the user turns it on again.
   final bool safetyResetHold;
 
-  /// Off only because its meter is not answering: the plug cannot time or
-  /// protect it, so it holds the outlet off and turns it back on by itself
-  /// once the meter answers again.
-  final bool meterOff;
+  /// Why the outlet is warning or was turned off: SAFETY_CEILING_EXCEEDED
+  /// (its safe time is up), SENSOR_UNAVAILABLE, OVERCURRENT or POWER_ANOMALY.
+  /// Empty from firmware that does not send it.
+  final String alertType;
 
   OutletReading.fromMap(this.outlet, Map<String, dynamic> map)
     : currentState = map['currentState']?.toString() ?? '',
@@ -56,7 +56,7 @@ class OutletReading {
       overridden = map['overridden'] == true,
       safetyResetHold =
           map['safetyResetHold'] == true && map['currentState'] == 'DISABLED',
-      meterOff = map['meter_off'] == true,
+      alertType = map['alertType']?.toString() ?? '',
       appliance = map['appliance']?.toString() ?? 'Unknown',
       status = map['status']?.toString() ?? 'Unknown',
       voltage = sensorNumber(map['voltage_V']),
@@ -86,10 +86,15 @@ class OutletReading {
       currentState == 'LOCKED_OUT' || status == 'LOCKED_OUT';
   bool get isWarning => currentState == 'WARNING';
 
-  /// The outlet gives power (the plug switches it off when it is turned off,
-  /// locked out for safety, or its meter is not answering).
-  bool get switchedOn =>
-      currentState != 'DISABLED' && !isLockedOut && !meterOff;
+  /// The warning or cutoff is about the safe time running out: the only one
+  /// that opens the pop-up. Any other reason (a power cut, a silent meter,
+  /// too much power, a fault, or none given) shows on the outlet card and as
+  /// a phone notification.
+  bool get isSafeTimeAlert => alertType == 'SAFETY_CEILING_EXCEEDED';
+
+  /// The outlet gives power (the plug switches it off when it is turned off
+  /// or locked out for safety).
+  bool get switchedOn => currentState != 'DISABLED' && !isLockedOut;
   int secondsRemaining(DateTime now) => countdownExpiry == null
       ? 0
       : ((countdownExpiry!.difference(now).inMilliseconds + 999) ~/ 1000).clamp(

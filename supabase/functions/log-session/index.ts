@@ -134,7 +134,7 @@ serve(async (req) => {
   // appliance was CONFIRMED and the run ended normally (switched off, not a
   // lock-out), it counts as one use for the 7-use learning.
   const { data: open, error: openError } = await db.from("outlet_sessions")
-    .select("id, appliance_id, status").eq("device_id", deviceId).eq("outlet", outlet)
+    .select("id, appliance_id, status, confirmed_by").eq("device_id", deviceId).eq("outlet", outlet)
     .is("ended_at", null).lte("started_at", endedAt).order("started_at", { ascending: false }).limit(1).maybeSingle();
   if (openError) throw openError;
   // recognize-appliance may already have closed this run as stale (its end
@@ -143,7 +143,7 @@ serve(async (req) => {
   if (!run) {
     const start = Date.parse(startedAt);
     const { data: closed, error: closedError } = await db.from("outlet_sessions")
-      .select("id, appliance_id, status").eq("device_id", deviceId).eq("outlet", outlet)
+      .select("id, appliance_id, status, confirmed_by").eq("device_id", deviceId).eq("outlet", outlet)
       .in("end_reason", STALE_ENDS)
       .gte("started_at", new Date(start - 5000).toISOString()).lte("started_at", new Date(start + 5000).toISOString())
       .limit(1).maybeSingle();
@@ -154,7 +154,10 @@ serve(async (req) => {
     const open = run;
     const { error } = await db.from("outlet_sessions").update({ ended_at: endedAt, end_reason: endReason }).eq("id", open.id);
     if (error) throw error;
-    if (open.status === "MATCHED_CONFIRMED" && open.appliance_id && NORMAL_ENDS.includes(endReason)) {
+    // A registration sample is not a use: only normal runs after it count
+    // (its ~1-minute runs would make the learned usual time far too short).
+    if (open.status === "MATCHED_CONFIRMED" && open.confirmed_by !== "registration" && open.appliance_id &&
+        NORMAL_ENDS.includes(endReason)) {
       const config = await loadConfig();
       const { data: a, error: aError } = await db.from("appliance_instances")
         .select("use_count, recent_runtimes_s, is_learned, baseline_runtime_s").eq("id", open.appliance_id).single();

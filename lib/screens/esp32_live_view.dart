@@ -594,9 +594,37 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
         session != null &&
         (session.status == RecognitionStatus.provisional ||
             session.status == RecognitionStatus.confirmed);
-    return matched
-        ? session.applianceName ?? reading.appliance
+    if (matched) return session.applianceName ?? reading.appliance;
+    return _recognizing(reading)
+        ? 'Finding out what it is…'
         : reading.appliance;
+  }
+
+  /// WisePlug is still working out what runs on this outlet: measuring, or
+  /// waiting for Supabase's answer (the plug says "Recognizing appliance").
+  /// Not once the app already knows it (e.g. it was just registered or
+  /// confirmed), even while the plug is still finishing its measurement.
+  bool _recognizing(OutletReading reading) {
+    final status = _sessions[reading.outlet]?.status;
+    if (status == RecognitionStatus.provisional ||
+        status == RecognitionStatus.confirmed) {
+      return false;
+    }
+    return reading.currentState == 'SAMPLING' ||
+        reading.appliance == 'Recognizing appliance';
+  }
+
+  /// The appliance running in [session] when it is still being registered
+  /// (not all its samples yet), else null.
+  RegisteredAppliance? _registering(OutletSession? session) {
+    final id = session?.applianceId;
+    if (id == null) return null;
+    for (final a in _appliances) {
+      if (a.id == id) {
+        return a.isReady(_recognitionSettings.registrationSamples) ? null : a;
+      }
+    }
+    return null;
   }
 
   /// The recognition badge of a running outlet: what WisePlug knows about it
@@ -726,32 +754,40 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
     if (reading.isLockedOut) {
       return (
         headline: 'Turned off for safety',
-        hint: 'Check the appliance, then press Reset Safety below.',
+        hint: reading.alertType == 'POWER_CUT'
+            ? 'The power went off while it was running. Check the '
+                  'appliance, then press Reset Safety below.'
+            : 'Check the appliance, then press Reset Safety below.',
         icon: Icons.block,
         color: Colors.red,
       );
     }
     if (reading.isWarning) {
       return (
-        headline: 'Safety warning',
-        hint: 'Answer the warning, or this outlet turns off.',
+        headline: reading.isSafeTimeAlert
+            ? 'Safe time is up'
+            : 'Meter stopped answering',
+        hint: reading.isSafeTimeAlert
+            ? 'Answer the warning, or this outlet turns off.'
+            : 'WisePlug cannot measure this outlet, so it turns it off for '
+                  'safety in ${reading.secondsRemaining(now)} s.',
         icon: Icons.warning_amber_rounded,
         color: Colors.red,
       );
     }
-    if (reading.sensorValid == false || reading.meterOff) {
+    if (reading.sensorValid == false) {
       return (
-        headline: 'Not ready',
+        headline: 'Not measuring',
         hint:
-            'Check that the WisePlug is plugged into the wall. This outlet '
-            'turns back on by itself.',
+            'This outlet has power, but WisePlug cannot measure or time it. '
+            'Check that the WisePlug is plugged into the wall.',
         icon: Icons.error_outline,
         color: _amber,
       );
     }
     if (reading.safetyResetHold) {
       return (
-        headline: 'Turned off for safety',
+        headline: 'Reset done',
         hint: 'Press Turn on again below when you want to use it.',
         icon: Icons.power_off,
         color: Colors.grey,
@@ -778,7 +814,16 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
     final connected =
         !_readError && reading?.hasConnectedAppliance(now) == true;
     final idle = _cardState(reading, now);
-    final color = connected ? _statusColor(_status(reading, now)) : idle.color;
+    // A known appliance is "Active" (green) even while the plug is still
+    // measuring it; amber is for "still finding out" and "near the limit".
+    final running = connected ? _status(reading, now) : null;
+    final color = running == null
+        ? idle.color
+        : _statusColor(
+            running == 'Recognizing' && !_recognizing(reading!)
+                ? 'Active'
+                : running,
+          );
     return _Panel(
       border: color,
       padding: 15,
@@ -850,7 +895,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
         ? overrideBufferSeconds(cutoff)
         : cutoff;
     final start = reading.startTime?.toLocal();
-    final recognizing = reading.currentState == 'SAMPLING';
+    final recognizing = _recognizing(reading);
     return [
       Row(
         children: [
@@ -874,7 +919,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
         crossAxisAlignment: WrapCrossAlignment.center,
         children: [
           Text(
-            recognizing ? 'Finding out what it is…' : 'In use',
+            recognizing ? 'This takes about 20 seconds' : 'In use',
             style: TextStyle(
               fontWeight: FontWeight.w700,
               color: context.readable(color),
@@ -913,6 +958,19 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
             ],
           ),
         ),
+      // A warning that is not about the safe time (no pop-up for it).
+      if (reading.isWarning && !reading.isSafeTimeAlert)
+        Padding(
+          padding: const EdgeInsets.only(top: 10),
+          child: Text(
+            'The meter missed readings: this outlet turns off for safety in '
+            '${reading.secondsRemaining(now)} s.',
+            style: TextStyle(
+              fontWeight: FontWeight.w700,
+              color: context.readable(Colors.red),
+            ),
+          ),
+        ),
       if (seconds != null) ...[
         const SizedBox(height: 10),
         Text(
@@ -931,7 +989,40 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
           backgroundColor: Colors.grey.withValues(alpha: .15),
         ),
       ],
-      ?_recognitionBadge(session, true),
+      // Still being registered: say so, instead of "Confirmed".
+      if (_registering(session) case final a?)
+        Padding(
+          padding: const EdgeInsets.only(top: 10),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            decoration: BoxDecoration(
+              color: _amber.withValues(alpha: .14),
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Text(
+              'Registering · ${a.samplesDone(_recognitionSettings.registrationSamples)} '
+              'of ${a.samplesNeeded(_recognitionSettings.registrationSamples)} done',
+              style: TextStyle(
+                color: context.readable(_amber),
+                fontWeight: FontWeight.w700,
+                fontSize: 16,
+              ),
+            ),
+          ),
+        ),
+      // Recognized at a setting it already has, but not finished: a way to
+      // continue (no pop-up appears for a recognized appliance).
+      if (_registering(session) case final a?)
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton.icon(
+            onPressed: () => _continueRegistration(a),
+            icon: const Icon(Icons.playlist_add_check),
+            label: const Text('Finish registering'),
+          ),
+        )
+      else if (_registering(session) == null)
+        ?_recognitionBadge(session, true),
       if (overridden)
         Container(
           margin: const EdgeInsets.only(top: 10),
@@ -1016,20 +1107,44 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
   String _registrationText(RegisteredAppliance a) {
     final legacy = _recognitionSettings.registrationSamples;
     final next = a.nextLevel;
+    final how = next == null
+        ? 'Turn it on again'
+        : next.startsWith('Level ')
+        ? 'Turn it on at a different speed'
+        : 'Turn it on at $next';
     return 'Registering · ${a.samplesDone(legacy)} of '
-        '${a.samplesNeeded(legacy)} done. '
-        '${next == null ? 'Turn it on again' : 'Turn it on at $next'} to continue.';
+        '${a.samplesNeeded(legacy)} done. $how, or tap Continue registering.';
   }
 
-  /// The 7-use learning, in plain words: "3 of 7 uses", then "Done: it is
-  /// usually on for 45 min".
+  /// Opens the registration steps for [a] (from its page or its outlet
+  /// card). They follow the next run on either outlet; one already going is
+  /// not used, since it may be a setting [a] already has.
+  Future<void> _continueRegistration(RegisteredAppliance a) async {
+    final recognition = widget.recognition;
+    if (recognition == null || _promptOpen) return;
+    _promptOpen = true;
+    try {
+      await showRegistrationDialog(
+        context,
+        service: recognition,
+        appliance: a,
+        settings: _recognitionSettings,
+      );
+    } finally {
+      _promptOpen = false;
+    }
+    await _loadAppliances();
+  }
+
+  /// The 7-use learning, in plain words: "3 of 7", then "7 · usually on for
+  /// 45 min" (a use counts once you confirmed what it is).
   String _learningText(RegisteredAppliance a) {
     final total = _recognitionSettings.learningUses;
-    if (!a.isLearned) return '${a.useCount.clamp(0, total)} of $total uses';
+    if (!a.isLearned) return '${a.useCount.clamp(0, total)} of $total times';
     final usual = a.baselineRuntimeSeconds;
     return usual == null
-        ? 'Done'
-        : 'Done: it is usually on for ${_duration(usual)}';
+        ? '${a.useCount}'
+        : '${a.useCount} · usually on for ${_duration(usual)}';
   }
 
   /// "Not plugged in · last used on Outlet A" (or never used yet).
@@ -1042,10 +1157,10 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
       return _registrationText(a);
     }
     if (a.isLearned && a.baselineRuntimeSeconds != null) {
-      return 'Typical use ${_duration(a.baselineRuntimeSeconds)}';
+      return 'Usually on for ${_duration(a.baselineRuntimeSeconds)}';
     }
-    final left = (_recognitionSettings.learningUses - a.useCount).clamp(0, 99);
-    return 'Learning · $left more ${left == 1 ? 'use' : 'uses'} to learn';
+    final total = _recognitionSettings.learningUses;
+    return 'Used ${a.useCount.clamp(0, total)} of $total times';
   }
 
   List<Widget> _profileList(DateTime now) {
@@ -1273,39 +1388,45 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                 child: Column(
                   children: [
                     _Pair(
-                      'Where',
+                      'Right now',
                       outlet != null
-                          ? 'Running on Outlet $outlet'
+                          ? 'On, in Outlet $outlet'
                           : a.lastOutlet == null
-                          ? 'Not plugged in'
-                          : 'Not plugged in (last on Outlet ${outletLetter(a.lastOutlet!)})',
+                          ? 'Off'
+                          : 'Off (last used in Outlet ${outletLetter(a.lastOutlet!)})',
                     ),
                     // Set by WisePlug: the type's default, then the learned
-                    // typical use x 1.5.
+                    // typical use x 1.2 (recognition_config.learned_margin).
                     _Pair(
-                      'Safe time',
+                      'Turns off after',
                       _duration(a.cutoffMinutes * 60),
                       color: _green,
                     ),
                     // The 7-use learning.
-                    _Pair('Learning', _learningText(a)),
+                    if (a.isLearned && a.baselineRuntimeSeconds != null)
+                      _Pair(
+                        'Usually on for',
+                        _duration(a.baselineRuntimeSeconds),
+                      )
+                    else
+                      _Pair('Used', _learningText(a)),
                     // The power signature WisePlug recognises. Only the main
                     // one: extra modes WisePlug adds by itself ("Mode 2", e.g.
                     // another fan speed) still count for recognition, unshown.
                     if (_mainMode(a) case final m?)
                       _Pair(
-                        'Power use',
+                        'Uses about',
                         m.sampleCount < _recognitionSettings.registrationSamples
-                            ? 'Not known yet'
+                            ? 'Not measured yet'
                             : m.meanPowerW == null
-                            ? 'Not known yet'
-                            : 'About ${m.meanPowerW!.round()} W',
+                            ? 'Not measured yet'
+                            : '${m.meanPowerW!.round()} W',
                       ),
                   ],
                 ),
               ),
             ),
-            if (!ready)
+            if (!ready) ...[
               Padding(
                 padding: const EdgeInsets.only(top: 10),
                 child: Text(
@@ -1313,11 +1434,21 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                   style: TextStyle(fontSize: 16, color: context.muted),
                 ),
               ),
+              const SizedBox(height: 10),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: () => _continueRegistration(a),
+                  icon: const Icon(Icons.playlist_add_check),
+                  label: const Text('Continue registering'),
+                ),
+              ),
+            ],
             Padding(
               padding: const EdgeInsets.only(top: 10),
               child: Text(
-                'WisePlug sets the safe time by itself and adjusts it after '
-                '${_recognitionSettings.learningUses} uses.',
+                'WisePlug picks this time for you. It gets smarter after you '
+                'use it ${_recognitionSettings.learningUses} times.',
                 style: TextStyle(fontSize: 16, color: context.muted),
               ),
             ),
@@ -1358,16 +1489,36 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
     );
   }
 
-  /// Edit: the name only (the safety limit and modes are set by WisePlug).
+  /// Edit: the name and what it is (its type). The safe time and modes are
+  /// set by WisePlug; a new type brings that type's safe time.
   Future<void> _renameAppliance(
     BuildContext dialogContext,
     RegisteredAppliance a,
   ) async {
-    final name = await showDialog<String>(
+    final edit = await showDialog<_ApplianceEdit>(
       context: dialogContext,
-      builder: (_) => _RenameDialog(initial: a.name),
+      builder: (_) => _RenameDialog(initial: a.name, typeName: a.typeName),
     );
-    if (name == null || name.isEmpty || name == a.name || !mounted) return;
+    if (edit == null || !mounted) return;
+    if (edit.typeName.isNotEmpty &&
+        edit.typeName.toLowerCase() != a.typeName.toLowerCase()) {
+      try {
+        await widget.recognition!.changeType(
+          a.id,
+          edit.typeName,
+          edit.iconKey,
+          idleOutlets: _idleOutlets(),
+        );
+        _notify('${a.name} is now a ${edit.typeName}.');
+      } catch (error) {
+        _notify('$error'.replaceFirst('Bad state: ', ''));
+      }
+    }
+    final name = edit.name;
+    if (name.isEmpty || name == a.name) {
+      await _loadAppliances();
+      return;
+    }
     if (_appliances.any(
       (x) => x.id != a.id && x.name.toLowerCase() == name.toLowerCase(),
     )) {
@@ -1383,6 +1534,23 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
       _notify('$error'.replaceFirst('Bad state: ', ''));
     }
     await _loadAppliances();
+  }
+
+  /// The outlets the online plug shows with nothing running right now
+  /// ('outlet_1' = A, 'outlet_2' = B). Empty when the plug is offline or a
+  /// reading is old, so the server then trusts its own records.
+  List<String> _idleOutlets() {
+    final now = DateTime.now();
+    if (_gadget?.isOnline(now) != true) return const [];
+    return [
+      for (final (key, id) in const [('A', 'outlet_1'), ('B', 'outlet_2')])
+        if (_readings[key] case final r?
+            when r.isFresh(now) &&
+                r.sensorValid != false &&
+                !r.hasConnectedAppliance(now) &&
+                (r.activePower ?? 0) < 1)
+          id,
+    ];
   }
 
   Future<void> _deleteAppliance(
@@ -1412,7 +1580,10 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
     );
     if (confirmed != true || !mounted) return;
     try {
-      await widget.recognition!.deleteAppliance(a.id);
+      await widget.recognition!.deleteAppliance(
+        a.id,
+        idleOutlets: _idleOutlets(),
+      );
       if (dialogContext != context && dialogContext.mounted) {
         Navigator.pop(dialogContext);
       }
@@ -1646,9 +1817,19 @@ class _Pair extends StatelessWidget {
 
 /// "Edit Appliance Profile": the name only. Owns its text controller, so it
 /// is disposed after the dialog's closing animation, not during it.
+/// What "Edit" returns: the name, and the type ("Electric fan") with its
+/// icon key (null for one typed in under "Other").
+class _ApplianceEdit {
+  final String name, typeName;
+  final String? iconKey;
+  const _ApplianceEdit(this.name, this.typeName, this.iconKey);
+}
+
+/// "Edit": the appliance's name and what it is. Owns its text controllers,
+/// so they are disposed after the dialog's closing animation, not during it.
 class _RenameDialog extends StatefulWidget {
-  final String initial;
-  const _RenameDialog({required this.initial});
+  final String initial, typeName;
+  const _RenameDialog({required this.initial, required this.typeName});
   @override
   State<_RenameDialog> createState() => _RenameDialogState();
 }
@@ -1656,34 +1837,108 @@ class _RenameDialog extends StatefulWidget {
 class _RenameDialogState extends State<_RenameDialog> {
   late final _name = TextEditingController(text: widget.initial);
 
+  /// The picked standard type, or [otherKind] for one typed in.
+  late ApplianceKind _kind = _standard(widget.typeName) ?? otherKind;
+  late final _other = TextEditingController(
+    text: _standard(widget.typeName) == null ? widget.typeName : '',
+  );
+
+  static ApplianceKind? _standard(String typeName) {
+    for (final k in applianceKinds) {
+      if (k.label.toLowerCase() == typeName.toLowerCase()) return k;
+    }
+    return null;
+  }
+
   @override
   void dispose() {
     _name.dispose();
+    _other.dispose();
     super.dispose();
   }
 
   @override
-  Widget build(BuildContext context) => AlertDialog(
-    title: const Text('Edit Appliance Profile'),
-    content: TextField(
-      controller: _name,
-      autofocus: true,
-      decoration: const InputDecoration(
-        labelText: 'Appliance Name',
-        border: OutlineInputBorder(),
+  Widget build(BuildContext context) {
+    final kinds = [
+      for (final k in applianceKinds)
+        if (canAdd(k) || k == _kind) k,
+      otherKind,
+    ];
+    return AlertDialog(
+      scrollable: true,
+      title: const Text('Edit appliance'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          TextField(
+            controller: _name,
+            decoration: const InputDecoration(
+              labelText: 'Its name',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 16),
+          DropdownButtonFormField<ApplianceKind>(
+            initialValue: _kind,
+            isExpanded: true,
+            decoration: const InputDecoration(
+              labelText: 'What is it?',
+              border: OutlineInputBorder(),
+            ),
+            items: [
+              for (final k in kinds)
+                DropdownMenuItem(
+                  value: k,
+                  child: Row(
+                    children: [
+                      Icon(k.icon, size: 22),
+                      const SizedBox(width: 10),
+                      Flexible(child: Text(k.label)),
+                    ],
+                  ),
+                ),
+            ],
+            onChanged: (k) => setState(() => _kind = k ?? _kind),
+          ),
+          if (_kind == otherKind) ...[
+            const SizedBox(height: 12),
+            TextField(
+              controller: _other,
+              decoration: const InputDecoration(
+                labelText: 'Write what it is',
+                hintText: 'e.g. Electric grill',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+          const SizedBox(height: 10),
+          Text(
+            'Changing what it is also changes its safe time (heating '
+            'appliances get a shorter one).',
+            style: TextStyle(fontSize: 16, color: context.muted),
+          ),
+        ],
       ),
-    ),
-    actions: [
-      TextButton(
-        onPressed: () => Navigator.pop(context),
-        child: const Text('Cancel'),
-      ),
-      FilledButton(
-        onPressed: () => Navigator.pop(context, _name.text.trim()),
-        child: const Text('Save Profile'),
-      ),
-    ],
-  );
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(
+            context,
+            _ApplianceEdit(
+              _name.text.trim(),
+              _kind == otherKind ? _other.text.trim() : _kind.label,
+              _kind == otherKind ? null : _kind.key,
+            ),
+          ),
+          child: const Text('Save'),
+        ),
+      ],
+    );
+  }
 }
 
 class _Badge extends StatelessWidget {
@@ -1933,14 +2188,9 @@ class _PowerControlState extends State<_PowerControl> {
     final appliance = r?.hasConnectedAppliance(widget.now) == true;
     // Only the switch shows the state: green = power on (live relay state).
     final lit = r != null && r.isFresh(widget.now) && !r.isLockedOut && on;
-    // The plug answers and can measure this outlet. Otherwise the switch is
-    // greyed out: the plug cannot act on it, or keeps the outlet off itself
-    // until its meter answers (METER_SILENT_OFF_MS).
-    final ready =
-        r != null &&
-        r.isFresh(widget.now) &&
-        r.sensorValid != false &&
-        !r.meterOff;
+    // The plug answers. Otherwise the switch is greyed out: the plug cannot
+    // act on it. (A silent meter no longer blocks it: the outlet stays usable.)
+    final ready = r != null && r.isFresh(widget.now);
     final canToggle =
         !_busy &&
         ready &&
@@ -1985,8 +2235,6 @@ class _PowerControlState extends State<_PowerControl> {
                               ? 'Turned off for safety'
                               : r.safetyResetHold
                               ? 'Off · reset done'
-                              : !ready
-                              ? 'Not ready'
                               : on && !appliance
                               ? 'On · nothing plugged in'
                               : on

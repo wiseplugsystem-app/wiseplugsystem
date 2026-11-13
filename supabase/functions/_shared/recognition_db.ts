@@ -20,6 +20,34 @@ import {
 
 type Row = Record<string, unknown>;
 
+/** An icon key from the app ("fan", "laptop_charger"), or null. */
+export const iconKeyOf = (v: unknown): string | null =>
+  typeof v === "string" && /^[a-z_]{1,32}$/.test(v) ? v : null;
+
+/**
+ * The user's appliance type named [typeName] ("Fan"), created if new. Types
+ * are unique per user ignoring case ("fan" is "Fan"). A type without an icon
+ * gets [iconKey]. Its default safe time is set by the database (heating types
+ * are shorter: heating_safe_times).
+ */
+export async function findOrCreateType(deviceId: string, uid: string, typeName: string, iconKey: string | null): Promise<Row> {
+  const { data: types, error } = await db.from("appliance_types").select("*").eq("owner_uid", uid);
+  if (error) throw error;
+  let type = (types ?? []).find((t: Row) => String(t.name).toLowerCase() === typeName.toLowerCase());
+  if (!type) {
+    const { data, error: e } = await db.from("appliance_types")
+      .insert({ device_id: deviceId, owner_uid: uid, name: typeName, icon_key: iconKey }).select("*").single();
+    if (e) throw e;
+    type = data;
+  } else if (!type.icon_key && iconKey) {
+    const { data, error: e } = await db.from("appliance_types").update({ icon_key: iconKey })
+      .eq("id", type.id).select("*").single();
+    if (e) throw e;
+    type = data;
+  }
+  return type!;
+}
+
 export async function loadConfig(): Promise<Config> {
   const { data, error } = await db.from("recognition_config").select("*").single();
   if (error) throw error;

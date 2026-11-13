@@ -27,7 +27,8 @@
 //         running?: [event IDs the plug is running now] }
 // Auth: x-device-key. Idempotent per (eventId, stage).
 // Reply: { status, applianceId, applianceName, candidates, suggested, registerAs,
-//          promptText, cutoffS, stage, reason, ... } (see sessionReply)
+//          promptText, cutoffS, stage, reason, restGapS, restGapMinW, ... }
+//          (see sessionReply; restGap*: recognition_config's thermostat rest)
 import { deviceIdOf, requireDevice } from "../_shared/auth.ts";
 import { db } from "../_shared/db.ts";
 import { HttpError, json, outletOf, readJson, serve } from "../_shared/http.ts";
@@ -72,6 +73,8 @@ serve(async (req) => {
   const [config, owner, calibration] = await Promise.all([loadConfig(), ownerOf(deviceId), loadCalibration(deviceId, outlet)]);
   // In the reference meter's units, so Outlet A and Outlet B samples compare.
   const features = calibrate(rawFeatures, calibration);
+  // Every answer also carries the thermostat-rest settings for the plug.
+  const reply = (s: Row) => ({ ...sessionReply(s), restGapS: config.restGapS, restGapMinW: config.restGapMinW });
   const { data: existing, error: existingError } = await db.from("outlet_sessions")
     .select("*").eq("event_id", eventId).maybeSingle();
   if (existingError) throw existingError;
@@ -79,7 +82,7 @@ serve(async (req) => {
     throw new HttpError(409, "eventId belongs to another outlet");
   }
   // A retry, a late Stage 1, or a run that has already ended: answer as before.
-  if (existing && (existing.stage >= stage || existing.ended_at)) return json(sessionReply(existing));
+  if (existing && (existing.stage >= stage || existing.ended_at)) return json(reply(existing));
 
   // The user (or registration) already said what this is: keep their answer.
   // At Stage 2 a user confirmation also teaches the profile (EMA), once.
@@ -92,7 +95,7 @@ serve(async (req) => {
     }
     const { data, error } = await db.from("outlet_sessions").update(update).eq("id", existing.id).select("*").single();
     if (error) throw error;
-    return json(sessionReply(data));
+    return json(reply(data));
   }
 
   // Close the plug's runs that have ended though their end was never reported
@@ -163,7 +166,7 @@ serve(async (req) => {
     // Another outlet claimed the same appliance a moment ago (or this run was
     // inserted by a parallel retry): decide again with the latest sessions.
     const { data: again } = await db.from("outlet_sessions").select("*").eq("event_id", eventId).maybeSingle();
-    if (again && !existing) return json(sessionReply(again));
+    if (again && !existing) return json(reply(again));
     result = await decide();
     ({ data: saved, error } = await write(result));
   }
@@ -175,5 +178,5 @@ serve(async (req) => {
       .eq("id", result.match.appliance.id);
     if (lastError) throw lastError;
   }
-  return json(sessionReply(saved!), existing ? 200 : 201);
+  return json(reply(saved!), existing ? 200 : 201);
 });

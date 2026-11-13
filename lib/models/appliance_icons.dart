@@ -112,13 +112,15 @@ const maxLevels = 6;
 
 /// The settings WisePlug takes a sample of, one each, in order. A fan's
 /// levels are chosen by the user ([speeds], 1 to 4: Level 1 the slowest); a
-/// flat iron's dial;
-/// a rice cooker's two modes. A charger picks its charging speed by itself,
-/// so it takes one sample, and so does anything else ("Other" can add more).
+/// rice cooker's two modes. A flat iron heats at the same 1,000–1,500 W on
+/// every dial setting (the dial only changes how long it rests at 0 W), so
+/// it takes one sample. A charger picks its charging speed by itself: one
+/// setting, sampled samples_per_charger times at different battery levels.
+/// Anything else takes one sample ("Other" can add more settings).
 List<String> levelsFor(ApplianceKind kind, {int speeds = 3}) =>
     switch (kind.key) {
       'fan' => [for (var i = 1; i <= speeds; i++) 'Level $i'],
-      'flat_iron' => const ['Low', 'Medium', 'High'],
+      'flat_iron' => const ['Heating'],
       'rice_cooker' => const ['Cook', 'Keep warm'],
       'laptop_charger' || 'phone_charger' => const ['Charging'],
       _ => const ['Normal'],

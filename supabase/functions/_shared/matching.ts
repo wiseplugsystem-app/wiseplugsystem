@@ -102,6 +102,12 @@ export interface Config {
   maxApplianceW: number;
   /** recognition_config.samples_per_level: samples for each setting at registration. */
   samplesPerLevel: number;
+  /** recognition_config.samples_per_charger: a charger's samples (its power varies). */
+  samplesPerCharger: number;
+  /** recognition_config.rest_gap_s: a heating load may rest at 0 W this long and stay on. */
+  restGapS: number;
+  /** recognition_config.rest_gap_min_w: a run peaking at or above this is a heating load. */
+  restGapMinW: number;
 }
 
 type Row = Record<string, unknown>;
@@ -147,6 +153,9 @@ export function configFromRow(r: Row): Config {
     // Older rows (and the tools' fixed settings) without it: the plug's limit.
     maxApplianceW: Number.isFinite(Number(r.max_appliance_w)) ? Number(r.max_appliance_w) : 1760,
     samplesPerLevel: Number.isFinite(Number(r.samples_per_level)) ? Number(r.samples_per_level) : 1,
+    samplesPerCharger: Number.isFinite(Number(r.samples_per_charger)) ? Number(r.samples_per_charger) : 3,
+    restGapS: Number.isFinite(Number(r.rest_gap_s)) ? Number(r.rest_gap_s) : 180,
+    restGapMinW: Number.isFinite(Number(r.rest_gap_min_w)) ? Number(r.rest_gap_min_w) : 500,
   };
 }
 
@@ -160,6 +169,11 @@ export function configFromRow(r: Row): Config {
  * next reading because of ordinary meter noise. Power and cycle period are
  * relative (a 2 % change matters the same for 10 W and 1000 W).
  */
+/** A charger's icon keys: its power depends on the battery, so it gets
+ * samples_per_charger registration samples. */
+export const isCharger = (iconKey: unknown): boolean =>
+  iconKey === "laptop_charger" || iconKey === "phone_charger";
+
 export function floorOf(f: Feature, mean: number, c: Config): number {
   switch (f) {
     case "avg_power_w": return Math.abs(mean) * c.floorPowerPct;
@@ -229,6 +243,16 @@ export interface ProfileResult {
 const EDGE = 1e-9;
 
 /**
+ * The settling time the plug reports for a load that never settled (its
+ * MAX_SETTLE_MS, 60 s): "it never got steady", not a measured time. Such a
+ * value cannot be compared with a real settling time, so settling time is
+ * skipped when either the reading or the profile says "never steady"
+ * (a laptop charger can settle in 8 s one day and never the next).
+ */
+export const NEVER_SETTLED_S = 60;
+const neverSettled = (v: number | null | undefined) => has(v) && v >= NEVER_SETTLED_S - 0.5;
+
+/**
  * Compares one reading with one profile. A feature is compared only when
  * both the reading and the profile have it (null on either side: skipped).
  * Power must always be compared: it is the one feature every reading and
@@ -241,6 +265,7 @@ export function evaluateProfile(x: Features, a: Appliance, p: Profile, stage: St
     const value = f === "avg_power_w" ? power : x[f];
     const mean = p.mean[f];
     if (!has(value) || !has(mean)) continue;
+    if (f === "settling_time_s" && (x.unstable || neverSettled(value) || neverSettled(mean))) continue;
     const tol = tolerance(f, p, c);
     const normalized = Math.abs(value - mean) / tol;
     checks.push({ feature: f, value, mean, tolerance: tol, normalized, pass: normalized <= 1 + EDGE });
