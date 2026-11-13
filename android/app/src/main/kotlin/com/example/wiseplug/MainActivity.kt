@@ -14,13 +14,15 @@ class MainActivity : FlutterActivity() {
         createSafetyChannel()
     }
 
-    // Safety pushes play WisePlug's own warning tone (res/raw/wiseplug_warning.wav,
-    // CC0, see assets/sounds/LICENSE.md) even when the app is closed: the
-    // Supabase sender names this channel. Android fixes a channel's sound when it
-    // is first created, so a different tone needs a new channel id.
+    // Safety pushes play the same warning sound as the app (res/raw/wiseplug_alert.mp3,
+    // see assets/sounds/LICENSE.md) even when the app is closed: the Supabase
+    // sender names this channel. Android fixes a channel's sound when it is first
+    // created, so the new sound has a new channel id; the old channel (with the
+    // old beeps) is removed.
     private fun createSafetyChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val tone = Uri.parse("android.resource://$packageName/${R.raw.wiseplug_warning}")
+        getSystemService(NotificationManager::class.java).deleteNotificationChannel(OLD_SAFETY_CHANNEL)
+        val tone = Uri.parse("android.resource://$packageName/${R.raw.wiseplug_alert}")
         val channel = NotificationChannel(
             SAFETY_CHANNEL,
             "Safety warnings",
@@ -40,6 +42,7 @@ class MainActivity : FlutterActivity() {
     }
 
     companion object {
-        const val SAFETY_CHANNEL = "wiseplug_safety"
+        const val SAFETY_CHANNEL = "wiseplug_safety_v2"
+        const val OLD_SAFETY_CHANNEL = "wiseplug_safety"
     }
 }

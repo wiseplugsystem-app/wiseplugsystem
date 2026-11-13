@@ -713,10 +713,13 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
   /// What to do for sample [sample] at [level]. A charger draws more on a
   /// low battery and less when nearly full, so each of its samples asks for
   /// a different battery level and WisePlug learns all its speeds.
-  static String _levelHint(String? level, int sample) => switch (level) {
+  String _levelHint(String? level, int sample) => switch (level) {
     null || 'Normal' => '',
     _ when _isSpeed(level) =>
       sample == 1 ? 'Use any speed. ' : 'Use a speed you have NOT done yet. ',
+    // One sample (samples_per_charger = 1): just charge with it.
+    'Charging' when widget.settings.samplesPerCharger <= 1 =>
+      'Charge a laptop or phone with it. ',
     'Charging' => switch (sample) {
       1 => 'Charge a phone or laptop whose battery is LOW (under 30%). ',
       2 => 'Charge it when the battery is about HALF full (40–60%). ',
@@ -778,7 +781,7 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
               ),
           ],
         ),
-      if (charger)
+      if (charger && widget.settings.samplesPerCharger > 1)
         Padding(
           padding: const EdgeInsets.only(top: 6),
           child: Text(
@@ -814,7 +817,7 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
 
   /// After a step, what the next one is: "Then turn it on at a different
   /// speed." / "Then turn it on again: set it to Keep warm."
-  static String _nextHint(String? next, int sample) => switch (next) {
+  String _nextHint(String? next, int sample) => switch (next) {
     null => '',
     _ when _isSpeed(next) => 'Then turn it on at a DIFFERENT speed. ',
     'Normal' || 'Heating' => 'Then turn it on again. ',

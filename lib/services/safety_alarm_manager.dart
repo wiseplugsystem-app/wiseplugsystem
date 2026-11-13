@@ -3,9 +3,11 @@ import 'dart:async';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
 
-/// The warning sounds' timing and volume. The tones themselves are made by
-/// `tool/make_warning_tone.ts` (two short beeps, 1 kHz then 2.5 kHz; CC0,
-/// see assets/sounds/LICENSE.md).
+/// The warning sounds and their volume. The warning sound
+/// (assets/sounds/warning_tone.mp3, chosen by the project; see
+/// assets/sounds/LICENSE.md) loops for the whole countdown. The cutoff tone is
+/// made by `tool/make_warning_tone.ts`. [repeatEvery], [finalStretch] and
+/// [finalRepeatEvery] belong to the old two-beep pattern and are unused now.
 class WarningSoundConfig {
   /// Between beep pairs during a warning.
   final Duration repeatEvery;
@@ -23,7 +25,7 @@ class WarningSoundConfig {
     this.finalStretch = const Duration(seconds: 10),
     this.finalRepeatEvery = const Duration(seconds: 1),
     this.volume = 1.0,
-    this.warningTone = 'sounds/warning_tone.wav',
+    this.warningTone = 'sounds/warning_tone.mp3',
     this.cutoffTone = 'sounds/cutoff_tone.wav',
   });
 
@@ -38,6 +40,9 @@ class WarningSoundConfig {
 /// Plays a tone (an asset path under assets/).
 abstract class TonePlayer {
   Future<void> play(String asset, double volume);
+
+  /// Plays [asset] over and over until [stop].
+  Future<void> loop(String asset, double volume);
   Future<void> stop();
 }
 
@@ -51,12 +56,19 @@ class _AudioTonePlayer implements TonePlayer {
   }
 
   @override
+  Future<void> loop(String asset, double volume) async {
+    await _player.stop();
+    await _player.setReleaseMode(ReleaseMode.loop);
+    await _player.play(AssetSource(asset), volume: volume);
+  }
+
+  @override
   Future<void> stop() => _player.stop();
 }
 
 /// The phone's safety warning sound, the same for every safety warning:
-///  * warning (the 60 s before a cutoff): two short beeps every 4 s, every
-///    1 s in the last 10 s;
+///  * warning (the 60 s before a cutoff): the warning sound, looped from
+///    start to end until the warning is answered, cleared or cut off;
 ///  * cutoff (also an electrical trip): one long beep, then silence.
 /// There is no mute: the sound stops only when the warning is over.
 /// With the app closed, the push notification plays the same tone (Android
@@ -93,13 +105,25 @@ class SafetyAlarmManager {
     await _beep();
   }
 
+  /// Loops the warning sound; a timer silences it once the cutoff is due
+  /// (the cutoff tone follows the plug).
   Future<void> _beep() async {
     if (!_warning) return;
     final left = _remaining?.call();
     if (left != null && left <= Duration.zero) return; // the cutoff is due
-    await _play(config.warningTone);
-    if (!_warning) return;
-    _next = Timer(config.nextBeepIn(_remaining?.call()), _beep);
+    try {
+      await _player.loop(config.warningTone, config.volume);
+    } catch (error) {
+      // E.g. a browser blocks sound until the page was tapped once.
+      debugPrint('Safety sound: could not play ${config.warningTone}: $error');
+    }
+    if (!_warning || left == null) return;
+    _next = Timer(left, () async {
+      if (!_warning) return;
+      try {
+        await _player.stop();
+      } catch (_) {}
+    });
   }
 
   /// The power was cut: one long beep, then silence.

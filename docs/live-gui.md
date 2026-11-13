@@ -603,3 +603,33 @@ finish registering:
   saved again. Turn the fan off, wait 5 seconds, then turn it on at a
   DIFFERENT speed." That run is never saved. (Chargers are not affected:
   their 3 steps are meant to be the same "Charging" setting.)
+
+## "How to use WisePlug" (in plain words)
+
+Settings → **How to use WisePlug** is a short instruction manual for people
+who have never used a smart plug. Eight topics, each a tap-to-open card with
+numbered steps in the same words the app uses: getting started, adding a new
+appliance, everyday use, Power Control, when the safe time is up, what the
+outlet cards mean, your appliances, and staying safe. Its numbers (30
+minutes, 7 uses, 1,760 W) come from Supabase, so the help always matches the
+app (`lib/screens/help_screen.dart`).
+
+## Chargers: one sample (in plain words)
+
+A laptop or phone charger is now registered in **one step**, like any
+appliance with one setting: "Charge a laptop or phone with it." (It was 3
+steps at different battery levels.) Chargers already being registered are
+finished at once. If WisePlug is unsure about a charger later (a very
+different battery level), it simply asks "Which appliance…?". Set by
+`recognition_config.samples_per_charger` = 1 (migration 20261113020000).
+
+## Your own warning sound (in plain words)
+
+The 60-second safety warning now plays the project's chosen sound
+(`assets/sounds/warning_tone.mp3`, 7.6 s), **looped from start to end** until
+you tap Keep it on or Turn off now, the warning clears, or the outlet is cut
+off. (Before, two short beeps repeated every 4 s.) The phone notification
+uses the same sound (`res/raw/wiseplug_alert.mp3`, Android channel
+"wiseplug_safety_v2"; the old channel with the old beeps is removed). Phones
+need app 1.2.0 or newer for the new notification sound. Where the sound comes
+from and its license are written in `assets/sounds/LICENSE.md`.

@@ -15,6 +15,7 @@ import '../services/esp32_service.dart';
 import '../services/recognition_service.dart';
 import '../widgets/wiseplug_logo.dart';
 import 'esp32_dashboard.dart';
+import 'help_screen.dart';
 import 'recognition_prompt.dart';
 import 'registration_dialog.dart';
 import 'user_profile_screen.dart';
@@ -1620,6 +1621,18 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
       Card(
         child: Column(
           children: [
+            ListTile(
+              leading: const Icon(Icons.menu_book_outlined),
+              title: const Text('How to use WisePlug'),
+              subtitle: const Text('Simple steps for every part of the app'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => HelpScreen(settings: _recognitionSettings),
+                ),
+              ),
+            ),
+            const Divider(height: 1),
             ListTile(
               leading: const Icon(Icons.account_circle_outlined),
               title: const Text('My account'),
