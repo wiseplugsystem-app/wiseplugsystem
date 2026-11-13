@@ -592,3 +592,14 @@ finish registering:
   and turn it on at a different speed.
 - **Or simply** turn it on at a speed you have not done yet: WisePlug does
   not know that speed, so the pop-up appears with "It is … : continue".
+- **In every "Which appliance…?" / "Is this …?" question:** an appliance
+  that is still being registered is listed under **Still registering:** as
+  "It is … : continue registering (2 of 3 done)". A speed or battery level
+  not registered yet can look like another appliance; tapping it saves this
+  run as that appliance's next step.
+- **The same speed twice is caught.** If a step is done at a speed (or
+  setting) that is already saved, WisePlug recognizes it within about 20
+  seconds and says: "That speed is already saved (about 33 W). It will not be
+  saved again. Turn the fan off, wait 5 seconds, then turn it on at a
+  DIFFERENT speed." That run is never saved. (Chargers are not affected:
+  their 3 steps are meant to be the same "Charging" setting.)

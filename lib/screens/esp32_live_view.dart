@@ -206,6 +206,10 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
     if (recognition == null || _promptOpen) return;
     _promptOpen = true;
     try {
+      // The newest appliances and samples first, so the pop-up's choices
+      // ("It is …: continue (2 of 3 done)") match the Appliances page.
+      await _loadAppliances();
+      if (!mounted) return;
       final required = _recognitionSettings.registrationSamples;
       // Registration is a pop-up that appears only for a new appliance.
       Future<void> register({
@@ -239,6 +243,12 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
         context,
         session,
         defaultCutoffMinutes: _recognitionSettings.defaultCutoffMinutes,
+        // A setting not registered yet can look like another appliance.
+        unfinished: [
+          for (final a in _appliances)
+            if (!a.isReady(required)) a,
+        ],
+        registrationSamples: required,
       );
       if (!mounted) return;
       switch (choice) {
@@ -251,6 +261,16 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
           }
         case RegisterChoice(:final typeName, :final name):
           await register(typeName: typeName, name: name);
+        case ContinueChoice(:final appliance):
+          // This run is its next sample.
+          await showRegistrationDialog(
+            context,
+            service: recognition,
+            fromSession: session,
+            appliance: appliance,
+            settings: _recognitionSettings,
+          );
+          _loadAppliances();
         case null:
           break;
       }

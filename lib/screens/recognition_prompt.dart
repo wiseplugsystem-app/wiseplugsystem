@@ -22,6 +22,13 @@ class RegisterChoice extends PromptChoice {
   const RegisterChoice({this.typeName, this.name});
 }
 
+/// "It is [appliance], which I am still registering": this run becomes its
+/// next sample (e.g. the fan speed or charger level not done yet).
+class ContinueChoice extends PromptChoice {
+  final RegisteredAppliance appliance;
+  const ContinueChoice(this.appliance);
+}
+
 /// The question WisePlug asks about the run on one outlet, as a bottom sheet:
 ///
 ///   UNKNOWN              "New appliance detected. Register it?"
@@ -30,11 +37,16 @@ class RegisterChoice extends PromptChoice {
 ///   MATCHED_PROVISIONAL  "Is this Fan?" (the label is provisional until confirmed)
 ///
 /// Every unanswered load runs on the safe default limit, which the sheet says.
-/// Returns the choice, or null for "Not now".
+/// [unfinished]: appliances whose registration is not finished; each is
+/// offered as "It is …: continue registering", since a setting it does not
+/// have yet may look like another appliance. Returns the choice, or null for
+/// "Not now".
 Future<PromptChoice?> showRecognitionPrompt(
   BuildContext context,
   OutletSession session, {
   int defaultCutoffMinutes = 30,
+  List<RegisteredAppliance> unfinished = const [],
+  int registrationSamples = 3,
 }) => showModalBottomSheet<PromptChoice>(
   context: context,
   isScrollControlled: true,
@@ -44,6 +56,8 @@ Future<PromptChoice?> showRecognitionPrompt(
     child: RecognitionPromptSheet(
       session: session,
       defaultCutoffMinutes: defaultCutoffMinutes,
+      unfinished: unfinished,
+      registrationSamples: registrationSamples,
     ),
   ),
 );
@@ -51,10 +65,14 @@ Future<PromptChoice?> showRecognitionPrompt(
 class RecognitionPromptSheet extends StatefulWidget {
   final OutletSession session;
   final int defaultCutoffMinutes;
+  final List<RegisteredAppliance> unfinished;
+  final int registrationSamples;
   const RecognitionPromptSheet({
     super.key,
     required this.session,
     this.defaultCutoffMinutes = 30,
+    this.unfinished = const [],
+    this.registrationSamples = 3,
   });
 
   @override
@@ -113,7 +131,7 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
             const SizedBox(height: 14),
             _SafetyBanner(minutes: widget.defaultCutoffMinutes),
             const SizedBox(height: 18),
-            for (final action in _actions())
+            for (final action in _withUnfinished(_actions()))
               Padding(padding: const EdgeInsets.only(bottom: 8), child: action),
           ],
         ),
@@ -179,6 +197,38 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
         onTap: () => setState(() => _selected = c.applianceId),
       ),
   ];
+
+  /// The actions, with "It is …: continue registering" for each appliance
+  /// still being registered, just above the last one (Not now / Ask later).
+  List<Widget> _withUnfinished(List<Widget> actions) {
+    final shown = {s.applianceId, for (final c in s.candidates) c.applianceId};
+    final more = [
+      for (final a in widget.unfinished)
+        if (!shown.contains(a.id))
+          OutlinedButton(
+            onPressed: () => Navigator.pop(context, ContinueChoice(a)),
+            child: Text(
+              'It is ${a.name}: continue registering '
+              '(${a.samplesDone(widget.registrationSamples)} of '
+              '${a.samplesNeeded(widget.registrationSamples)} done)',
+              textAlign: TextAlign.center,
+            ),
+          ),
+    ];
+    if (more.isEmpty) return actions;
+    return [
+      ...actions.take(actions.length - 1),
+      Padding(
+        padding: const EdgeInsets.only(top: 6, bottom: 2),
+        child: Text(
+          'Still registering:',
+          style: TextStyle(fontSize: 16, color: context.muted),
+        ),
+      ),
+      ...more,
+      actions.last,
+    ];
+  }
 
   List<Widget> _actions() {
     void pop(PromptChoice? c) => Navigator.pop(context, c);

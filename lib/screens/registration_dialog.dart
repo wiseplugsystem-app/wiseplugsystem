@@ -29,6 +29,10 @@ enum RegistrationStep {
 
   /// That run ended before it was fully measured.
   tooShort,
+
+  /// WisePlug recognized this run as a setting the appliance already has
+  /// (e.g. the same fan speed again): it is not saved; use another setting.
+  alreadyDone,
 }
 
 /// The guided "plug it in 3 times" flow as a small state machine, without
@@ -46,7 +50,22 @@ class RegistrationTracker {
   String? _lastRecorded;
   bool _waitingForOff = false;
 
-  RegistrationTracker({required this.startedAt, this.initialEventId});
+  /// The appliance being registered, once known (after its first sample):
+  /// a run WisePlug recognizes as one of its saved settings is a repeat.
+  String? applianceId;
+
+  RegistrationTracker({
+    required this.startedAt,
+    this.initialEventId,
+    this.applianceId,
+  });
+
+  /// [s] matched a setting [applianceId] already has (alone, or as one of the
+  /// appliances it could be).
+  bool isRepeat(OutletSession s) =>
+      applianceId != null &&
+      (s.applianceId == applianceId ||
+          s.candidates.any((c) => c.applianceId == applianceId));
 
   /// [s] started after registration began (or is the run from the pop-up).
   bool isFresh(OutletSession s) =>
@@ -65,6 +84,14 @@ class RegistrationTracker {
     if (s == null || _used.contains(s.eventId)) return RegistrationStep.plugIn;
     if (!isFresh(s)) {
       return s.isOpen ? RegistrationStep.restart : RegistrationStep.plugIn;
+    }
+    // The same setting again (e.g. a fan speed already done): never saved.
+    if (isRepeat(s)) {
+      if (!s.isOpen) {
+        _used.add(s.eventId);
+        return RegistrationStep.plugIn;
+      }
+      return RegistrationStep.alreadyDone;
     }
     if (s.measured) return RegistrationStep.record;
     if (!s.isOpen) {
@@ -178,6 +205,9 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
   String? _error;
   Timer? _timer;
 
+  /// The saved setting the current run repeats (RegistrationStep.alreadyDone).
+  String? _repeatMode;
+
   /// A fan's number of speeds (1 to 4).
   int _speeds = 3;
 
@@ -250,6 +280,7 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
       _tracker = RegistrationTracker(
         startedAt: DateTime.now().toUtc(),
         initialEventId: widget.fromSession?.eventId,
+        applianceId: _appliance?.id,
       );
     });
     _poll();
@@ -278,6 +309,9 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
       } else if (mounted) {
         setState(() {
           _step = step;
+          _repeatMode = step == RegistrationStep.alreadyDone
+              ? latest?.modeName
+              : null;
           _measuringSince = step == RegistrationStep.measuring
               ? latest?.startedAt
               : null;
@@ -304,6 +338,7 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
         level: _level,
       );
       tracker.recorded(run.eventId);
+      tracker.applianceId = progress.applianceId;
       if (!mounted) return;
       setState(() {
         _applianceId = progress.applianceId;
@@ -787,6 +822,19 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
     _ => 'Then turn it on again and set it to $next. ',
   };
 
+  /// " (about 33 W)": the power of the saved setting this run repeated, when
+  /// the app has it (an appliance being continued); else nothing.
+  String _repeatWatts() {
+    final mode = _repeatMode;
+    final w = mode == null
+        ? null
+        : _appliance?.modes
+              .where((m) => m.name == mode)
+              .firstOrNull
+              ?.meanPowerW;
+    return w == null ? '' : ' (about ${w.round()} W)';
+  }
+
   /// "the fan" -> "The fan", at the start of a sentence.
   static String _cap(String s) =>
       s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);
@@ -822,6 +870,13 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
               'Step $_collected of $_required done! Now turn $name off and '
                   'wait 5 seconds. ${_nextHint(_level, _collected + 1)}'
                   'You will wait about 1 minute again.',
+            ),
+            RegistrationStep.alreadyDone => (
+              Icons.replay,
+              'That ${_isSpeed(_level) ? 'speed' : 'setting'} is already '
+                  'saved${_repeatWatts()}. It will not be saved again. Turn '
+                  '$name off, wait 5 seconds, then turn it on at a DIFFERENT '
+                  '${_isSpeed(_level) ? 'speed' : 'setting'}.',
             ),
             RegistrationStep.tooShort => (
               Icons.timer_off_outlined,
