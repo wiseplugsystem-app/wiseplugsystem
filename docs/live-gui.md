@@ -205,12 +205,12 @@ settings for each type are `levelsFor()` in `lib/models/appliance_icons.dart`.
   Choose **Keep it off** if you are not.
 - **The Power Control switch asks the same question** in this case. An outlet
   you switched off yourself turns on without asking.
-- **The button on the plug** turns the outlet on straight away: you are
-  standing at it.
+- **There is no button on the plug:** Reset Safety and Turn on again are
+  only in the app.
 
 How it works: `remoteReset()` in `safety_state.h` now leaves the outlet
 DISABLED with `resetHold`; the plug publishes `safetyResetHold` in
-telemetry_logs; only a TURN_ON (or the plug's button) clears it. The app
+telemetry_logs; only a TURN_ON from the app clears it. The app
 (`_turnOnAgain` in esp32_live_view.dart) asks before sending TURN_ON.
 
 ## Heating appliances (in plain words)
@@ -633,3 +633,26 @@ uses the same sound (`res/raw/wiseplug_alert.mp3`, Android channel
 "wiseplug_safety_v2"; the old channel with the old beeps is removed). Phones
 need app 1.2.0 or newer for the new notification sound. Where the sound comes
 from and its license are written in `assets/sounds/LICENSE.md`.
+
+## Restart WisePlug (in plain words)
+
+Settings → **Restart WisePlug** restarts the plug from the app, without
+touching it. The app asks first ("WisePlug will be offline for about 20
+seconds…"), then the plug restarts 3 seconds later and comes back online by
+itself.
+
+- **Only when nothing is running.** If an appliance is on, the plug says "An
+  appliance is running. Turn it off (or unplug it), then restart the
+  WisePlug." If an outlet is turned off for safety, press Reset Safety first.
+  (A restart during a run would lock that outlet, as after a power cut.)
+- **Kept:** appliances, history, the saved Wi-Fi, and each outlet's state
+  (off stays off).
+- **Not possible while the plug is Offline:** the command cannot reach it.
+  Then unplug it from the wall and plug it back in.
+- After it, the plug reports "restarted from the app" as its last restart.
+
+How it works: the app sends a RESTART command (like Turn on/off);
+`handleCommand` checks both outlets and answers ACCEPTED, REJECTED_RUNNING or
+REJECTED_LOCKED; `healthCheck` restarts after `APP_RESTART_DELAY_MS`. The
+Firebase rules allow the new command type: deploy them with
+`firebase deploy --only database --project wise-46f92`.

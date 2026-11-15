@@ -105,9 +105,11 @@ class DeviceRejection implements Exception {
           '"Erase All Flash Before Sketch Upload" enabled.',
     'REJECTED_STALE' =>
       'The outlet changed state before the command arrived. Try again.',
-    'REJECTED_PHYSICAL_RESET_REQUIRED' => 'This outlet was turned off for safety. Use Reset Safety in Power Control or the outlet\'s button.',
+    'REJECTED_PHYSICAL_RESET_REQUIRED' => 'This outlet was turned off for safety. Press Reset Safety in Power Control first.',
     'REJECTED_INVALID' => 'The outlet cannot do that in its current state.',
     'REJECTED_NO_APPLIANCE' => 'No appliance is plugged into this outlet, so there is nothing to switch.',
+    'REJECTED_RUNNING' => 'An appliance is running. Turn it off (or unplug it), then restart the WisePlug.',
+    'REJECTED_LOCKED' => 'An outlet is turned off for safety. Press Reset Safety first, then restart the WisePlug.',
     _ => 'The WisePlug refused the command ($code).',
   };
 }
@@ -341,7 +343,7 @@ class Esp32Service {
     final now = DateTime.now().toUtc().add(
       Duration(milliseconds: (offset as num?)?.toInt() ?? 0),
     );
-    final allowed = type == 'RESET_SAFETY'
+    final allowed = type == 'RESET_SAFETY' || type == 'RESTART'
         ? reading.isFresh(now) && reading.sessionID.isNotEmpty
         : reading.canCommand(now);
     if (!allowed) {

@@ -26,8 +26,7 @@ const _green = Color(0xFF00B744);
 const _amber = Color(0xFFF5B800);
 const _safetyNote =
     'An outlet turned off for safety stays off. Check the appliance, press '
-    'Reset Safety, then Turn on again when you want to use it. The button on '
-    'the plug turns it on too.';
+    'Reset Safety, then Turn on again when you want to use it.';
 
 /// How long a run has lasted, exact to the second: "4:07" or "1:02:15".
 /// The outlet card's timer, in words: "45 s", "12 min 34 s", "1 h 02 min".
@@ -1657,6 +1656,19 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
               ),
             ),
             const Divider(height: 1),
+            ListTile(
+              leading: const Icon(Icons.restart_alt),
+              title: const Text('Restart WisePlug'),
+              subtitle: Text(
+                connected
+                    ? 'Use this if WisePlug is acting strangely'
+                    : 'Not available: WisePlug is offline',
+              ),
+              enabled: connected,
+              trailing: const Icon(Icons.chevron_right),
+              onTap: connected ? _restartWisePlug : null,
+            ),
+            const Divider(height: 1),
             SwitchListTile(
               title: const Text('Dark mode'),
               value: widget.darkMode,
@@ -1697,6 +1709,51 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
         style: TextStyle(color: context.muted, fontSize: 14),
       ),
     ];
+  }
+
+  /// "Restart WisePlug": asks first, then sends RESTART (through Outlet A's
+  /// command channel). The plug restarts only while nothing is running and no
+  /// outlet is turned off for safety; it says so otherwise.
+  Future<void> _restartWisePlug() async {
+    final reading = _readings['A'] ?? _readings['B'];
+    if (reading == null) {
+      _notify('WisePlug has not reported yet. Try again in a moment.');
+      return;
+    }
+    // The plug would refuse anyway (and Firebase blocks commands to a locked
+    // outlet): say why at once.
+    if (_readings.values.any((r) => r.isLockedOut || r.isWarning)) {
+      _notify(const DeviceRejection('REJECTED_LOCKED').toString());
+      return;
+    }
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Restart WisePlug?'),
+        content: const Text(
+          'WisePlug will be offline for about 20 seconds, then come back by '
+          'itself. Turn off the appliances first: it only restarts when '
+          'nothing is running.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Restart'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    try {
+      await widget.service.command(reading, 'RESTART');
+      _notify('WisePlug is restarting. It will be back in about 20 seconds.');
+    } catch (error) {
+      _notify('$error'.replaceFirst('Bad state: ', ''));
+    }
   }
 
   void _openWifiSetup() => Navigator.of(context).push(

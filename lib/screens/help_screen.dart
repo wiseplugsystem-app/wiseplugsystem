@@ -39,6 +39,9 @@ class HelpScreen extends StatelessWidget {
                 'At the top of Home it should say "Online".',
                 'Says "Offline"? Go to Settings → Change Wi-Fi and connect '
                     'it to your home Wi-Fi.',
+                'Acting strangely? Turn off your appliances, then go to '
+                    'Settings → Restart WisePlug. It is back in about 20 '
+                    'seconds.',
               ],
             ),
             _Topic(

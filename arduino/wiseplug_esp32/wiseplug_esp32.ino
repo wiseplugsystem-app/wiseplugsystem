@@ -105,6 +105,11 @@ constexpr uint64_t METER_RESTART_MS = 5000;
 // ends or a later stage of the same run is waiting. Meanwhile the run keeps
 // its current (default) cutoff.
 constexpr uint64_t RECOGNITION_RETRY_MS = 5000;
+// "Restart WisePlug" in the app (RESTART command): restart at this time
+// (monotonic ms; 0 = not asked), a few seconds after it was accepted so the
+// answer reaches the app first.
+uint64_t appRestartAt = 0;
+constexpr uint64_t APP_RESTART_DELAY_MS = 3000;
 
 constexpr uint32_t MIN_SESSION_S = 10;           // shorter runs are not reported as usage
 constexpr float OVERRIDE_BUFFER = 0.20f;         // override: +20% safety buffer
@@ -497,7 +502,22 @@ void handleCommand(SocketChannel& ch, const Command& cmd, uint64_t now) {
   const char* result = "REJECTED_STALE";
   bool fresh = strcmp(cmd.session, sessionID) == 0 && cmd.revision == d.safety.revision &&
       epochMs() && cmd.expires > epochMs() && cmd.expires <= epochMs() + 30000;
-  if (strcmp(cmd.type, "RESET_SAFETY") == 0) {
+  if (strcmp(cmd.type, "RESTART") == 0) {
+    // "Restart WisePlug" in the app: only while nothing runs and nothing is
+    // locked or warning on either outlet (a restart during a run would lock
+    // it, as after a power cut). Saved states (off, reset hold) stay.
+    bool locked = false, busy = false;
+    for (const auto& o : outlets) {
+      auto st = o.data.safety.state;
+      if (st == SocketState::LockedOut || st == SocketState::Warning) locked = true;
+      else if ((st != SocketState::Idle && st != SocketState::Disabled) || o.sessionOpen) busy = true;
+    }
+    result = !fresh ? "REJECTED_STALE" : locked ? "REJECTED_LOCKED" : busy ? "REJECTED_RUNNING" : "ACCEPTED";
+    if (strcmp(result, "ACCEPTED") == 0) {
+      appRestartAt = now + APP_RESTART_DELAY_MS;
+      Serial.println("Restart asked from the app: restarting in 3 s");
+    }
+  } else if (strcmp(cmd.type, "RESET_SAFETY") == 0) {
     // The only remote command accepted while locked out.
     if (!fresh) result = "REJECTED_STALE";
     else if (!ch.storageOK && !(ch.storageOK = repairStorage(ch))) result = "REJECTED_STORAGE_FAILURE";
@@ -607,13 +627,14 @@ constexpr uint64_t LOW_MEMORY_MS = 10 * 60 * 1000ULL, TASK_STUCK_MS = 10 * 60 * 
 constexpr uint64_t PREVENTIVE_RESTART_MS = 7ULL * 24 * 3600 * 1000;
 constexpr uint64_t CLOUD_RESTART_BACKOFF_MS = 6ULL * 3600 * 1000;
 
-enum RestartWhy : int { NoRestart = 0, CloudFailing, LowMemory, TaskStuck, Preventive };
+enum RestartWhy : int { NoRestart = 0, CloudFailing, LowMemory, TaskStuck, Preventive, AppRequest };
 const char* restartText(int why) {
   switch (why) {
     case CloudFailing: return "cloud calls kept failing";
     case LowMemory: return "memory too fragmented";
     case TaskStuck: return "a network task stopped";
     case Preventive: return "preventive (7 days)";
+    case AppRequest: return "restarted from the app";
     default: return "";
   }
 }
@@ -667,6 +688,7 @@ void healthCheck(uint64_t now) {
   uint64_t nb = netBeat.load(), sb = supaBeat.load();
   if ((nb && now - nb >= TASK_STUCK_MS) || (sb && now - sb >= TASK_STUCK_MS)) requestRestart(TaskStuck);
   if (now >= PREVENTIVE_RESTART_MS) requestRestart(Preventive);
+  if (appRestartAt && now >= appRestartAt) { appRestartAt = 0; requestRestart(AppRequest); }
   int why = restartWhy.load();
   if (why == NoRestart) return;
   for (auto& ch : outlets) {

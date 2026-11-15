@@ -164,7 +164,7 @@ class Esp32OutletCard extends StatelessWidget {
               ),
               if (data.isLockedOut)
                 const Text(
-                  'LOCKED OUT — inspect the appliance, then reset it with its physical button or the safety alert.',
+                  'LOCKED OUT — inspect the appliance, then press Reset Safety in the app.',
                   style: TextStyle(
                     color: Colors.red,
                     fontWeight: FontWeight.bold,
@@ -172,7 +172,7 @@ class Esp32OutletCard extends StatelessWidget {
                 ),
               if (data.isWarning)
                 Text(
-                  'Safety limit exceeded. ${data.secondsRemaining(now)} seconds until physical lockout.',
+                  'Safety limit exceeded. ${data.secondsRemaining(now)} seconds until it turns off.',
                   style: const TextStyle(
                     color: Colors.red,
                     fontWeight: FontWeight.bold,

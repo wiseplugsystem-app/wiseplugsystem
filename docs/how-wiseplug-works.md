@@ -194,8 +194,8 @@ the thesis.
    outlet: it **stays off**, so the appliance does not start again by itself.
 3. When you are there and want to use it, press **Turn on again** and confirm
    ("Only turn it on if you are there and want to use it again").
-4. The button on the plug itself turns the outlet on directly (you are
-   standing at it).
+
+The plug has no button: Reset Safety and Turn on again are only in the app.
 
 *Firmware: remoteReset() keeps the outlet off (resetHold); app: Power Control.*
 
