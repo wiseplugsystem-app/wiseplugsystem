@@ -1418,7 +1418,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                     // Set by WisePlug: the type's default, then the learned
                     // typical use x 1.2 (recognition_config.learned_margin).
                     _Pair(
-                      'Turns off after',
+                      'Safe time',
                       _duration(a.cutoffMinutes * 60),
                       color: _green,
                     ),

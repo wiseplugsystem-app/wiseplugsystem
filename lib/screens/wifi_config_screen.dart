@@ -142,7 +142,7 @@ class _WifiConfigScreenState extends State<WifiConfigScreen> {
         enabled: !_busy,
         decoration: const InputDecoration(
           labelText: 'Wi-Fi network name',
-          helperText: 'Exactly as written, 2.4 GHz only',
+          helperText: 'Exactly as written. Not the one ending in "5G".',
           border: OutlineInputBorder(),
         ),
         validator: (value) =>
@@ -244,7 +244,7 @@ class WifiProvisioningDialog extends StatelessWidget {
                 Colors.orange,
                 'Could not join $ssid',
                 'The WisePlug went back to ${update!.network ?? 'its previous network'}. '
-                    'Check the network name and password (2.4 GHz only) and try again.',
+                    'Check the network name and password (not the Wi-Fi ending in "5G") and try again.',
               ),
               WifiProvisionStage.notReceived => (
                 Icons.timer_off,
@@ -437,8 +437,8 @@ class _NearbySetupPanelState extends State<NearbySetupPanel> {
             const Padding(
               padding: EdgeInsets.symmetric(vertical: 8),
               child: Text(
-                'No 2.4 GHz networks found. Check that your router\'s 2.4 GHz '
-                'band is on, then search again.',
+                'No Wi-Fi found. Move closer to your router and search again. '
+                'A Wi-Fi ending in "5G" does not show up: WisePlug cannot use it.',
               ),
             ),
           Wrap(

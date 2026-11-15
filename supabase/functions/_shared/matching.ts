@@ -549,14 +549,16 @@ export interface Learning {
 
 /**
  * Records one normal use (the user or the appliance switched it off; lock-outs
- * are not typical use). After learning_uses uses, the baseline is their
- * average runtime; the newest learning_uses runtimes are kept for display.
+ * are not typical use). Once there are learning_uses uses, EVERY use updates
+ * the baseline: the average runtime of the LAST learning_uses uses (a rolling
+ * window), so the safe time follows how the appliance is used now (it was
+ * computed once at the 7th use and then frozen).
  */
 export function recordUse(l: Learning, runtimeS: number, c: Config): Learning {
   if (runtimeS < c.minSessionS) return l;  // a blip teaches nothing
   const recentRuntimesS = [...l.recentRuntimesS, Math.round(runtimeS)].slice(-c.learningUses);
   const useCount = l.useCount + 1;
-  if (l.isLearned || recentRuntimesS.length < c.learningUses) {
+  if (recentRuntimesS.length < c.learningUses) {
     return { ...l, useCount, recentRuntimesS };
   }
   const baseline = Math.round(recentRuntimesS.reduce((a, b) => a + b, 0) / recentRuntimesS.length);

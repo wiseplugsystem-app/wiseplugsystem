@@ -691,3 +691,67 @@ tries; they only pause while someone is actually using the setup page or the
 app's Change Wi-Fi steps (until 1 minute after the last use), so setting up a
 new Wi-Fi is never interrupted. (`SETUP_RETRY_MS`, `SETUP_IDLE_MS` in the
 firmware.)
+
+## Fixes from the full system test (in plain words)
+
+- **After a power cut, the app no longer shows the appliance as running.**
+  The plug now sends the end of the run that the power cut stopped (it is
+  saved every 30 s), so Supabase closes it. It is kept in the history as
+  "turned off for safety" and, being cut short, does not count toward the 7
+  uses.
+- **Fewer worrying notifications.** "Meter stopped answering" reaches the
+  phone only if the meter is still silent after 20 seconds. A short dropout
+  that recovers by itself only shows on the outlet card. If the meter never
+  comes back, the outlet is turned off after 60 s and the phone is told.
+  (`SENSOR_NOTIFY_MS` in the firmware.)
+- **One word for one idea:** the appliance page says "Safe time", like the
+  pop-up ("Safe time is up") and the help.
+- **Wi-Fi words:** "Pick your normal home Wi-Fi… use the one WITHOUT '5G' at
+  the end" instead of "2.4 GHz only".
+
+## The safe time keeps learning: always the last 7 uses (in plain words)
+
+After 7 normal uses, WisePlug knows how long you usually use an appliance.
+From then on, **every normal use updates it**: WisePlug always takes the
+average of the **last 7 uses**, adds 20 %, and that is the safe time (never
+shorter than 5 minutes, never longer than the appliance type's own). So if
+you start using the fan for longer, its safe time grows with you; old uses
+drop out. (Before, it was worked out once at the 7th use and never changed
+again, so 7 short test runs could leave a fan with a 5-minute safe time.)
+Registration runs never count as uses. (`recordUse` in
+`supabase/functions/_shared/matching.ts`.)
+
+## The safe-time pop-up, every case (in plain words)
+
+**One appliance**
+1. "Safe time is up — Still using the efan?" with a 60-second countdown,
+   Turn off now / Keep it on.
+2. At 0, until the plug confirms: "No answer: WisePlug is turning it off now…"
+   (not a stuck 0).
+3. Then: "Turned off for safety — The efan on Outlet B reached its safe time,
+   so WisePlug turned it off." with Close / Reset Safety.
+
+**Two appliances at the same time** (each outlet has its own row, its own
+countdown and its own buttons)
+- Both counting down: "Two appliances reached their safe time." Each row:
+  "Turns off in 25 s", Turn off / Keep it on for that appliance only. Keeping
+  one on leaves the pop-up open for the other.
+- One already off, one counting down: the off one shows "Reached its safe
+  time: turned off" with Reset Safety; the other keeps its countdown.
+- Both off: "Both appliances reached their safe time, so WisePlug turned them
+  off." with Close / Reset both.
+
+The plug now sends each new state to the app first, so the pop-up starts at
+60 s and the "turned off" message comes right after 0 (firmware:
+`publishPending`).
+
+## The plug and the app always show the same safe time (in plain words)
+
+When you confirm an appliance in the app ("Yes, it is efan"), Supabase gives
+that run the appliance's own safe time. The plug used to hear about it only
+at its next measurement step, so a confirmation made later never reached it:
+the app said "Safe time 6 min" while the plug kept its 30-minute default.
+Now, while a run is not confirmed, the plug asks Supabase again **once a
+minute** (and right after a restart it measures again and asks within ~20 s).
+Within about a minute the plug uses the same safe time the app shows. Once
+the run is confirmed it stops asking. (`RECHECK_MS` in the firmware.)

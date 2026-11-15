@@ -95,6 +95,11 @@ constexpr uint64_t SENSOR_TIMEOUT_MS = 5000;
 // (again every METER_RESTART_MS while it stays silent): noise from a switching
 // load can leave the PZEM's UART stuck until then.
 constexpr uint64_t METER_RESTART_MS = 5000;
+// The phone hears about a silent meter only if it is still silent
+// SENSOR_NOTIFY_MS after the warning started: a short dropout that recovers
+// sends nothing (the outlet card still shows it). If it never recovers, the
+// lockout 60 s later is reported as well.
+constexpr uint64_t SENSOR_NOTIFY_MS = 20000;
 // An idle outlet stays on (as the user set it) even while its meter is
 // silent: the user chose this so both outlets stay on (the 40th commit's
 // "silent meter switches its idle outlet off" made them take turns when the
@@ -193,6 +198,7 @@ struct SocketChannel {
   char runEvent[88] = {};
   uint64_t lastCheckpoint = 0;  // last time the run's used seconds were saved
   bool resumed = false;         // continued after a restart; clock check pending
+  uint64_t sensorNotifyAt = 0;  // when to report a still-silent meter (0: none due)
   // The run's measurement for recognize-appliance (Stage 1 and Stage 2).
   RecognitionWindow rec;
   float standbyW = 0;  // smoothed draw while idle (an appliance's standby)
@@ -236,6 +242,14 @@ struct RecognitionReply {
   char status[24] = {}, applianceID[64] = {}, name[64] = {};
 };
 QueueHandle_t sessionReports, safetyReports, recognitionReports, recognitionReplies;
+// Keeping plug and app in step: while a run is not confirmed, its last
+// recognition question is asked again every RECHECK_MS (same event ID, so
+// Supabase answers with what it has stored, e.g. the user's confirmation from
+// the app and its safe time). Once confirmed, no more questions.
+constexpr uint64_t RECHECK_MS = 60000;
+RecognitionReport lastReport[2];
+bool hasReport[2] = {false, false};
+uint64_t lastAsk[2] = {0, 0};
 // One cloud connection's health: consecutive failed calls and fresh starts.
 struct CloudHealth { uint32_t fails = 0, resets = 0; };
 
@@ -352,6 +366,7 @@ void queueRecognition(SocketChannel& ch, int stage) {
     strlcpy(ch.data.recognition, "PENDING", sizeof(ch.data.recognition));
   }
   ch.stageQueued = stage;
+  { int i = int(&ch - outlets); lastReport[i] = r; hasReport[i] = true; lastAsk[i] = monotonicMs(); }
   Serial.printf("[%s] Stage %d: %.1f W, PF %.2f, %.1f V, peak x%.2f, settled %.0f s%s%s (%lu readings)\n",
                 ch.outlet, stage, r.f.avgPowerW, r.f.avgPf, r.f.avgVoltageV, r.f.startupPeakRatio,
                 r.f.settlingTimeS, r.f.hasVariation ? ", variation" : "", r.f.unstable ? ", UNSTABLE" : "",
@@ -364,6 +379,7 @@ void endSession(SocketChannel& ch, const char* reason = "ENDED") {
   ch.rec.cancel();
   reportSession(ch, reason);
   ch.runMono = 0; ch.stageQueued = 0;
+  hasReport[int(&ch - outlets)] = false;
   auto& d = ch.data;
   d.activeName[0] = d.activeProfileID[0] = 0;
   strlcpy(d.recognition, "NONE", sizeof(d.recognition));
@@ -408,8 +424,12 @@ void beginAlert(SocketChannel& ch, const char* type, uint64_t now) {
   snprintf(a.id, sizeof(a.id), "%s_%s_%lu", sessionID, ch.outlet, (unsigned long)ch.data.safety.revision);
   strlcpy(a.type, type, sizeof(a.type)); strlcpy(a.resolution, "PENDING", sizeof(a.resolution));
   a.trigger = epochMs(); a.expiry = a.trigger ? a.trigger + 60000 : 0;
-  reportSafety(ch, strcmp(type, "SAFETY_CEILING_EXCEEDED") == 0 ? "RUNTIME_WARNING" : type, a.id,
-               ch.data.sensor.power, ch.data.sensor.current);
+  if (strcmp(type, "SENSOR_UNAVAILABLE") == 0) {
+    ch.sensorNotifyAt = now + SENSOR_NOTIFY_MS;  // reported later, if still silent
+  } else {
+    reportSafety(ch, strcmp(type, "SAFETY_CEILING_EXCEEDED") == 0 ? "RUNTIME_WARNING" : type, a.id,
+                 ch.data.sensor.power, ch.data.sensor.current);
+  }
   persistSafety(ch);
   Serial.printf("[%s] WARNING %s: 60 s until lockout\n", ch.outlet, type);
 }
@@ -436,6 +456,7 @@ void meterRecovered(SocketChannel& ch) {
   auto& d = ch.data;
   if (d.safety.state != SocketState::Warning || strcmp(d.alert.type, "SENSOR_UNAVAILABLE") != 0) return;
   d.safety.state = SocketState::Active; ++d.safety.revision;
+  ch.sensorNotifyAt = 0;  // recovered in time: the phone is not bothered
   strlcpy(d.alert.resolution, "RECOVERED", sizeof(d.alert.resolution));
   persistSafety(ch);
   Serial.printf("[%s] Meter answering again: warning cleared, run continues\n", ch.outlet);
@@ -693,6 +714,16 @@ void requestRestart(int why) {
 }
 // Heartbeats of the network tasks (monotonic ms of their last loop).
 std::atomic<uint64_t> netBeat{0}, supaBeat{0};
+// The app first: when an outlet's state changes (a warning starts, it is
+// turned off for safety, reset…), the new state goes to Firebase before any
+// Supabase report takes the one secure connection. Otherwise the warning
+// reached the app seconds late (the 60 s pop-up started at ~50 s) and "Turned
+// off for safety" waited behind the run-end upload. publishPending is set by
+// the Firebase task on a change and cleared once Firebase has it; Supabase
+// waits for it, at most PUBLISH_FIRST_MAX_MS.
+std::atomic<bool> publishPending{false};
+std::atomic<uint64_t> publishPendingSince{0};
+constexpr uint64_t PUBLISH_FIRST_MAX_MS = 10000;
 
 // Counts a call made while Wi-Fi was up. Returns true when the TLS
 // connection should be closed and opened fresh.
@@ -1244,13 +1275,13 @@ input{border:1px solid #bbb}.go{background:#00A4EF;color:#fff;border:0;font-weig
 <input type="hidden" name="ssid" id="ssid"><input name="password" id="pw" type="password" maxlength="63" placeholder="Wi-Fi password">
 <button class="go">Connect</button></form>
 <p><a href="#" id="other">My network is not listed</a> &middot; <a href="#" id="again">Search again</a></p>
-<p style="color:#888;font-size:13px">Only 2.4 GHz networks can be used. A "5G" network will not appear.</p>
+<p style="color:#888;font-size:13px">Pick your normal home Wi-Fi. If your router shows two names, use the one WITHOUT "5G" at the end (WisePlug cannot use 5G Wi-Fi).</p>
 <script>
 const list=document.getElementById('list'),form=document.getElementById('form');
 function pick(n,secure){form.hidden=false;ssid.value=n;document.getElementById('name').textContent='"'+n+'"';
 pw.hidden=!secure;pw.required=secure;if(secure)pw.focus();form.scrollIntoView();}
 function load(again){list.textContent='Searching…';fetch('/networks'+(again?'?refresh=1':'')).then(r=>r.json()).then(nets=>{
-list.textContent=nets.length?'':'No 2.4 GHz networks found. Move closer to the router and search again.';
+list.textContent=nets.length?'':'No Wi-Fi found. Move closer to the router and search again (5G Wi-Fi does not show up).';
 nets.forEach(w=>{const b=document.createElement('button');b.type='button';b.className='net';
 b.textContent=(w.secure?'🔒 ':'')+w.ssid+(w.rssi>-60?'  (strong)':w.rssi>-75?'':'  (weak)');
 b.onclick=()=>pick(w.ssid,w.secure);list.appendChild(b);});});}
@@ -1437,12 +1468,21 @@ void networkTask(void*) {
     }
     if (connected) {
       if (now - lastCommands >= 1000) { lastCommands = now; readCommands(); }
-      if (available[0] && available[1] && now - lastPublish >= 1000) {
+      // A state change is published at once (not up to 1 s later), and
+      // before Supabase's reports (publishPending, see above).
+      static uint32_t publishedRev[2] = {UINT32_MAX, UINT32_MAX};
+      bool changed = available[0] && available[1] &&
+          (latest[0].safety.revision != publishedRev[0] || latest[1].safety.revision != publishedRev[1]);
+      if (changed && !publishPending) { publishPendingSince = now; publishPending = true; }
+      if (available[0] && available[1] && (changed || now - lastPublish >= 1000)) {
         lastPublish = now;
         JsonDocument root;
         for (int i = 0; i < 2; ++i) addOutlet(root, i, latest[i]);
         addStatus(root, latest);
-        firebasePatch(root);
+        if (firebasePatch(root) == HTTP_CODE_OK) {
+          publishedRev[0] = latest[0].safety.revision; publishedRev[1] = latest[1].safety.revision;
+          publishPending = false;
+        }
       }
       if (now - lastConfig >= 10000) { lastConfig = now; checkWifiConfig(); }
     }
@@ -1461,8 +1501,10 @@ void networkTask(void*) {
 void supabaseTask(void*) {
   for (;;) {
     supaBeat = monotonicMs();  // D: the safety loop checks this heartbeat
-    if (netMode == NetMode::Online && WiFi.status() == WL_CONNECTED) sendSupabase();
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    // The app gets a state change first (publishPending), at most 10 s.
+    bool appFirst = publishPending && monotonicMs() - publishPendingSince < PUBLISH_FIRST_MAX_MS;
+    if (!appFirst && netMode == NetMode::Online && WiFi.status() == WL_CONNECTED) sendSupabase();
+    vTaskDelay(pdMS_TO_TICKS(appFirst ? 200 : 1000));
   }
 }
 #endif
@@ -1474,13 +1516,14 @@ void supabaseTask(void*) {
 // cut. The used time is the saved value plus RUN_CHECKPOINT_S (the most that
 // can be missing), so the safe time is never extended; once the internet
 // clock is set, checkResumedRun() uses the real start time if it is later.
-void resumeRun(SocketChannel& ch) {
+// Loads the run saved by saveRun() (its appliance, safe time and used time)
+// into the outlet, as an open run. Returns the used ms it counts.
+uint64_t restoreRun(SocketChannel& ch) {
   auto& d = ch.data;
   auto& safety = d.safety;
   uint64_t now = monotonicMs();
   uint64_t used = uint64_t(ch.prefs.getULong("runUsed", 0) + RUN_CHECKPOINT_S) * 1000;
   uint32_t limit = ch.prefs.getULong("runLimit", DEFAULT_LIMIT_S);
-  safety.state = SocketState::Active; ++safety.revision;
   safety.started = now - min(used, now - 1);
   safety.deadline = safety.started + uint64_t(limit) * 1000;
   safety.overridden = ch.prefs.getBool("runOver", false);
@@ -1496,14 +1539,23 @@ void resumeRun(SocketChannel& ch) {
   d.startEpoch = ch.prefs.getLong64("runStart", 0);
   ch.sessionOpen = true; ch.resumed = true;
   ch.sessionStartMono = safety.started; ch.sessionStartEpoch = d.startEpoch;
-  ch.runMono = safety.started; ch.stageQueued = 2;  // measured before: no new stages
-  ch.rec.cancel();
+  ch.runMono = safety.started; ch.stageQueued = 0;
+  // Measured again from now, so this run asks Supabase for its safe time
+  // within ~20 s (same event ID: Supabase answers with what it stored,
+  // including a confirmation made in the app meanwhile).
+  ch.rec.begin(now, 0);
   ch.lastEnergySample = now; ch.sessionWh = 0; ch.lowSince = 0;
   ch.lastValid = now;  // the meter gets a moment to answer after the restart
+  return used;
+}
+void resumeRun(SocketChannel& ch) {
+  auto& d = ch.data;
+  uint64_t used = restoreRun(ch);
+  d.safety.state = SocketState::Active; ++d.safety.revision;
   persistSafety(ch);
   Serial.printf("[%s] Restart during a run (reset reason %d): %s continues, %lu s used of %lu s\n",
                 ch.outlet, int(esp_reset_reason()), d.activeName[0] ? d.activeName : "the appliance",
-                (unsigned long)(used / 1000), (unsigned long)limit);
+                (unsigned long)(used / 1000), (unsigned long)currentLimitS(d.safety));
 }
 // Once the internet clock is set: if the run really started earlier than the
 // saved time says, count from its real start (never the other way round).
@@ -1579,6 +1631,10 @@ void setup() {
       strlcpy(a.type, "POWER_CUT", sizeof(a.type));
       a.resolution[0] = 0;  // not an unanswered warning: no LOCKED_OUT report
       a.trigger = a.expiry = 0;
+      // The run the power cut stopped (saved since the 47th commit): reopen
+      // it so lock() reports its end (LOCKED_OUT) and Supabase closes it;
+      // otherwise the app kept showing the appliance as running.
+      if (hazard && wasRunning) restoreRun(ch);
       lock(ch);
     }
     else if (ch.prefs.getBool("disabled", false)) {
@@ -1640,12 +1696,13 @@ void loop() {
     if (!safety.overridden) { safety.deadline = safety.started + uint64_t(limit) * 1000; }
     ++safety.revision;
     saveRun(ch);  // the new safe time survives a restart
+    bool news = strcmp(d.recognition, reply.status) != 0 || currentLimitS(safety) != limit;
     strlcpy(d.recognition, reply.status[0] ? reply.status : "UNKNOWN", sizeof(d.recognition));
     d.confirmed = confirmed;
     bool matched = confirmed || strcmp(reply.status, "MATCHED_PROVISIONAL") == 0;
     strlcpy(d.activeProfileID, matched ? reply.applianceID : "", sizeof(d.activeProfileID));
     strlcpy(d.activeName, matched ? reply.name : "", sizeof(d.activeName));
-    Serial.printf("[%s] Stage %d: %s%s%s, cutoff %lu s\n", ch.outlet, reply.stage, reply.status,
+    if (news) Serial.printf("[%s] Stage %d: %s%s%s, cutoff %lu s\n", ch.outlet, reply.stage, reply.status,
                   matched ? " " : "", matched ? reply.name : "", (unsigned long)limit);
   }
   for (auto& ch : outlets) {
@@ -1678,6 +1735,22 @@ void loop() {
         now - ch.lastValid > SENSOR_TIMEOUT_MS) beginAlert(ch, "SENSOR_UNAVAILABLE", now);
     Command cmd;
     if (xQueueReceive(ch.commands, &cmd, 0) == pdTRUE) handleCommand(ch, cmd, now);
+    // A meter still silent SENSOR_NOTIFY_MS into its warning: now tell the phone.
+    if (ch.sensorNotifyAt && now >= ch.sensorNotifyAt) {
+      ch.sensorNotifyAt = 0;
+      if (safety.state == SocketState::Warning && strcmp(d.alert.type, "SENSOR_UNAVAILABLE") == 0) {
+        reportSafety(ch, "SENSOR_UNAVAILABLE", d.alert.id, d.sensor.power, d.sensor.current);
+      }
+    }
+    // Not confirmed yet: ask Supabase again (see RECHECK_MS).
+    {
+      int i = int(&ch - outlets);
+      if (ch.sessionOpen && !d.confirmed && hasReport[i] && ch.stageQueued == lastReport[i].stage &&
+          now - lastAsk[i] >= RECHECK_MS && recognitionReports) {
+        lastAsk[i] = now;
+        xQueueSend(recognitionReports, &lastReport[i], 0);
+      }
+    }
     // The run's used time, saved every RUN_CHECKPOINT_S for a restart.
     if (ch.sessionOpen && now - ch.lastCheckpoint >= uint64_t(RUN_CHECKPOINT_S) * 1000) {
       ch.prefs.putULong("runUsed", usedSeconds(ch));

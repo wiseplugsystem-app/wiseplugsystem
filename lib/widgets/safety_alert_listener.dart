@@ -249,9 +249,14 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
         }
       }
       await widget.onSilence();
-      if (type == 'SMART_OVERRIDE') {
-        // Accepted: close the 60-second window now instead of waiting for
-        // the next status update.
+      // Accepted: close the 60-second window now, unless another outlet is
+      // still waiting for an answer (then the pop-up stays for that one).
+      final othersWaiting = widget
+          .readings()
+          .values
+          .where((r) => r.isWarning && r.isSafeTimeAlert)
+          .any((r) => !targets.any((t) => t.outlet == r.outlet));
+      if (type == 'SMART_OVERRIDE' && !othersWaiting) {
         widget.onDismiss();
         messenger?.showSnackBar(
           const SnackBar(
@@ -288,6 +293,7 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
           .toList();
       final warnings = triggered.where((r) => r.isWarning).toList();
       final warning = warnings.isNotEmpty;
+      final single = triggered.length == 1;
       final seconds = warning
           ? warnings
                 .map((r) => r.secondsRemaining(now))
@@ -307,11 +313,9 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
               children: [
                 _Header(warning: warning),
                 const SizedBox(height: 24),
-                if (warning) ...[
+                if (single && warning) ...[
                   Text(
-                    triggered.length == 1
-                        ? 'Still using the ${_nameOf(triggered.single)}?'
-                        : 'Still using them?',
+                    'Still using the ${_nameOf(triggered.single)}?',
                     textAlign: TextAlign.center,
                     style: const TextStyle(
                       fontSize: 22,
@@ -319,49 +323,74 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
                     ),
                   ),
                   const SizedBox(height: 18),
-                  // The countdown is the focus: big, centered, alone.
+                  // The countdown is the focus: big, centered, alone. At 0
+                  // the plug is turning it off: say so instead of a stuck 0.
+                  if (seconds > 0) ...[
+                    Text(
+                      '$seconds',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 96,
+                        fontWeight: FontWeight.w800,
+                        height: 1,
+                        color: seconds <= 10
+                            ? context.readable(Colors.red)
+                            : null,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    const Text(
+                      'seconds until it turns off',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(fontSize: 18),
+                    ),
+                  ] else
+                    const Text(
+                      'No answer: WisePlug is turning it off now…',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                ] else if (single) ...[
+                  // After the cutoff: what happened, in one plain sentence.
                   Text(
-                    '$seconds',
+                    _offSentence(triggered.single),
                     textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: 96,
-                      fontWeight: FontWeight.w800,
-                      height: 1,
-                      color: seconds <= 10
-                          ? context.readable(Colors.red)
-                          : null,
+                    style: const TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.w700,
+                      height: 1.35,
                     ),
                   ),
-                  const SizedBox(height: 6),
-                  const Text(
-                    'seconds until it turns off',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 18),
-                  ),
-                ] else ...[
+                  const SizedBox(height: 10),
                   Text(
                     'Check the appliance first. After Reset Safety it stays '
                     'off until you turn it on again.',
                     textAlign: TextAlign.center,
                     style: TextStyle(color: context.muted, height: 1.4),
                   ),
+                ] else ...[
+                  // Two outlets at once: one row each, with its own state.
+                  Text(
+                    warning
+                        ? 'Two appliances reached their safe time.'
+                        : 'Both appliances reached their safe time, so '
+                              'WisePlug turned them off.',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.w800,
+                      height: 1.35,
+                    ),
+                  ),
+                  for (final r in triggered) _row(r, now),
                 ],
                 // Which appliance, with its icon and name, on which outlet.
-                for (final r in triggered) ...[
+                if (single) ...[
                   const SizedBox(height: 10),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      ApplianceIcon(_kindOf(r), size: 24, label: _nameOf(r)),
-                      const SizedBox(width: 10),
-                      Flexible(
-                        child: Text(
-                          '${_nameOf(r)} · Outlet ${r.outlet}',
-                          style: const TextStyle(fontWeight: FontWeight.w600),
-                        ),
-                      ),
-                    ],
-                  ),
+                  _applianceLine(triggered.single),
                 ],
                 if (_busy)
                   const Padding(
@@ -381,38 +410,39 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
                     ),
                   ),
                 const SizedBox(height: 24),
-                Row(
-                  children: warning
-                      ? [
-                          _choice(
-                            'Turn off now',
-                            () => _send('TURN_OFF', (r) => r.isWarning),
-                          ),
-                          const SizedBox(width: 14),
-                          _choice(
-                            'Keep it on',
-                            () => _send(
-                              'SMART_OVERRIDE',
-                              (r) => r.isWarning,
-                              fields: _override,
+                if (single || !warning)
+                  Row(
+                    children: warning
+                        ? [
+                            _choice(
+                              'Turn off now',
+                              () => _send('TURN_OFF', (r) => r.isWarning),
                             ),
-                          ),
-                        ]
-                      : [
-                          _choice('Close', widget.onDismiss),
-                          const SizedBox(width: 14),
-                          _choice(
-                            'Reset Safety',
-                            () => _send(
-                              'RESET_SAFETY',
-                              (r) =>
-                                  (r.isWarning || r.isLockedOut) &&
-                                  r.isSafeTimeAlert,
+                            const SizedBox(width: 14),
+                            _choice(
+                              'Keep it on',
+                              () => _send(
+                                'SMART_OVERRIDE',
+                                (r) => r.isWarning,
+                                fields: _override,
+                              ),
                             ),
-                            danger: true,
-                          ),
-                        ],
-                ),
+                          ]
+                        : [
+                            _choice('Close', widget.onDismiss),
+                            const SizedBox(width: 14),
+                            _choice(
+                              single ? 'Reset Safety' : 'Reset both',
+                              () => _send(
+                                'RESET_SAFETY',
+                                (r) =>
+                                    (r.isWarning || r.isLockedOut) &&
+                                    r.isSafeTimeAlert,
+                              ),
+                              danger: true,
+                            ),
+                          ],
+                  ),
                 // No Close during the countdown: the warning (and its
                 // sound) ends only with Turn off now, Keep it on or the
                 // cutoff.
@@ -423,6 +453,93 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
       );
     },
   );
+
+  /// "The efan on Outlet B reached its safe time, so WisePlug turned it off."
+  static String _offSentence(OutletReading r) =>
+      'The ${_nameOf(r)} on Outlet ${r.outlet} reached its safe time, so '
+      'WisePlug turned it off.';
+
+  Widget _applianceLine(OutletReading r) => Row(
+    mainAxisAlignment: MainAxisAlignment.center,
+    children: [
+      ApplianceIcon(_kindOf(r), size: 24, label: _nameOf(r)),
+      const SizedBox(width: 10),
+      Flexible(
+        child: Text(
+          '${_nameOf(r)} · Outlet ${r.outlet}',
+          style: const TextStyle(fontWeight: FontWeight.w600),
+        ),
+      ),
+    ],
+  );
+
+  /// One outlet when two are in the pop-up: its appliance, its own countdown
+  /// (or that it was turned off), and buttons for that outlet only.
+  Widget _row(OutletReading r, DateTime now) {
+    final left = r.secondsRemaining(now);
+    bool here(OutletReading x) => x.outlet == r.outlet;
+    return Container(
+      margin: const EdgeInsets.only(top: 12),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        border: Border.all(
+          color: r.isWarning ? Colors.red : context.muted.withValues(alpha: .4),
+        ),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _applianceLine(r),
+          const SizedBox(height: 6),
+          Text(
+            r.isWarning
+                ? left > 0
+                      ? 'Turns off in $left s'
+                      : 'Turning off now…'
+                : 'Reached its safe time: turned off',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.w800,
+              color: r.isWarning && left <= 10
+                  ? context.readable(Colors.red)
+                  : null,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: r.isWarning
+                ? [
+                    _choice(
+                      'Turn off',
+                      () => _send('TURN_OFF', (x) => here(x) && x.isWarning),
+                    ),
+                    const SizedBox(width: 10),
+                    _choice(
+                      'Keep it on',
+                      () => _send(
+                        'SMART_OVERRIDE',
+                        (x) => here(x) && x.isWarning,
+                        fields: _override,
+                      ),
+                    ),
+                  ]
+                : [
+                    _choice(
+                      'Reset Safety',
+                      () => _send(
+                        'RESET_SAFETY',
+                        (x) => here(x) && x.isLockedOut,
+                      ),
+                      danger: true,
+                    ),
+                  ],
+          ),
+        ],
+      ),
+    );
+  }
 
   /// The plug names the appliance it recognised; until then it says it does
   /// not know it, which shows the question-mark icon.
