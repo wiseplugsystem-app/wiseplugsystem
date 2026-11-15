@@ -656,3 +656,38 @@ How it works: the app sends a RESTART command (like Turn on/off);
 REJECTED_LOCKED; `healthCheck` restarts after `APP_RESTART_DELAY_MS`. The
 Firebase rules allow the new command type: deploy them with
 `firebase deploy --only database --project wise-46f92`.
+
+## The appliance keeps running if the plug restarts (in plain words)
+
+- **Wi-Fi drops for a while:** nothing changes. The appliance keeps running
+  and its timer keeps counting; the safety cutoff works without Wi-Fi.
+- **The plug restarts by itself** (watchdog, crash, Restart from the app,
+  a small power dip): the outlet is off for 1–2 seconds while the plug
+  starts, then the **same run continues with its timer**: same appliance,
+  same safe time, the time already used still counts. A rice cooker keeps
+  cooking (its own switch is still on).
+- **A real power cut** (the plug itself lost power): the outlet stays off
+  and shows "Turned off for safety" until you press Reset Safety, so nothing
+  starts again unattended. (Same as before.)
+- **An outlet already turned off for safety** stays off after a restart,
+  with its own reason.
+
+How it works: the plug saves the run (state, safe time, appliance, start
+time) whenever it changes and its used seconds every 30 s
+(`RUN_CHECKPOINT_S`). After a restart it counts the saved time **plus 30 s**
+(the most that can be missing), so the safe time is never extended; once the
+internet clock is set, it uses the real start time if that is earlier
+(`resumeRun`, `checkResumedRun` in the firmware). Serial Monitor shows:
+`[outlet_A] Restart during a run (reset reason 6): efan continues, 95 s used
+of 14400 s`.
+
+## Back online faster after the Wi-Fi returns (in plain words)
+
+When the Wi-Fi disappears for more than a minute, the plug opens its setup
+Wi-Fi "wisewp". It now tries your saved Wi-Fi again **every 30 seconds** (it
+was every 2 minutes), so it is back online about 30–50 seconds after your
+Wi-Fi returns. A phone that joined "wisewp" by itself no longer stops these
+tries; they only pause while someone is actually using the setup page or the
+app's Change Wi-Fi steps (until 1 minute after the last use), so setting up a
+new Wi-Fi is never interrupted. (`SETUP_RETRY_MS`, `SETUP_IDLE_MS` in the
+firmware.)

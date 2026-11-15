@@ -111,6 +111,14 @@ constexpr uint64_t RECOGNITION_RETRY_MS = 5000;
 uint64_t appRestartAt = 0;
 constexpr uint64_t APP_RESTART_DELAY_MS = 3000;
 
+// A run is saved (state, safe time, appliance) whenever it changes, and its
+// used seconds every RUN_CHECKPOINT_S. After a restart that was NOT a power
+// cut (watchdog, crash, software restart, brownout), the run continues with
+// its timer: the used time is the last saved value plus RUN_CHECKPOINT_S (the
+// most that can be missing), corrected from the internet clock once it is
+// set. A real power cut (power-on restart) still locks the outlet: the
+// appliance lost power and must not start again unattended.
+constexpr uint32_t RUN_CHECKPOINT_S = 30;
 constexpr uint32_t MIN_SESSION_S = 10;           // shorter runs are not reported as usage
 constexpr float OVERRIDE_BUFFER = 0.20f;         // override: +20% safety buffer
 // Electrical trips lock the outlet out at once: no countdown, no override.
@@ -180,6 +188,11 @@ struct SocketChannel {
   float lastPower = 0, sessionPeakCurrent = 0, sessionPeakPower = 0;
   uint64_t lowSince = 0;  // first of the consecutive readings below IDLE_W_THRESHOLD
   uint64_t lastValid = 0;  // last good meter reading (0: none since power-up)
+  // The run's event ID (boot session + outlet + start), kept across a
+  // restart so Supabase still knows the resumed run.
+  char runEvent[88] = {};
+  uint64_t lastCheckpoint = 0;  // last time the run's used seconds were saved
+  bool resumed = false;         // continued after a restart; clock check pending
   // The run's measurement for recognize-appliance (Stage 1 and Stage 2).
   RecognitionWindow rec;
   float standbyW = 0;  // smoothed draw while idle (an appliance's standby)
@@ -229,7 +242,12 @@ struct CloudHealth { uint32_t fails = 0, resets = 0; };
 // ==========================================
 // TIME HELPERS (never block waiting for NTP)
 // ==========================================
-uint64_t monotonicMs() { return esp_timer_get_time() / 1000; }
+// Monotonic ms start at MONO_BASE_MS (8 days) instead of 0: a run resumed
+// after a restart then still has a start time ("used seconds" ago) without
+// going below zero. uptimeMs() is the real time since boot.
+constexpr uint64_t MONO_BASE_MS = 8ULL * 24 * 3600 * 1000;
+uint64_t uptimeMs() { return esp_timer_get_time() / 1000; }
+uint64_t monotonicMs() { return uptimeMs() + MONO_BASE_MS; }
 int64_t epochMs() { time_t t = time(nullptr); return t > 1700000000 ? int64_t(t) * 1000 : 0; }
 String timestamp(int64_t ms) {
   if (!ms) return "N/A";
@@ -247,8 +265,30 @@ bool relayOnNow(const Snapshot& s) { return relayEnergized(s.safety.state); }
 void applyRelay(SocketChannel& ch) {
   digitalWrite(ch.relay, relayOnNow(ch.data) ? ch.relayOn : !ch.relayOn);
 }
+// The run in progress, for resuming it after a restart (see RUN_CHECKPOINT_S).
+uint32_t usedSeconds(const SocketChannel& ch) {
+  return uint32_t((monotonicMs() - ch.sessionStartMono) / 1000);
+}
+void saveRun(SocketChannel& ch) {
+  const auto& d = ch.data;
+  ch.prefs.putString("runEvent", ch.runEvent);
+  ch.prefs.putLong64("runStart", ch.sessionStartEpoch);
+  ch.prefs.putULong("runLimit", currentLimitS(d.safety));
+  ch.prefs.putULong("runUsed", usedSeconds(ch));
+  ch.prefs.putString("runName", d.activeName);
+  ch.prefs.putString("runId", d.activeProfileID);
+  ch.prefs.putString("runRec", d.recognition);
+  ch.prefs.putBool("runConf", d.confirmed);
+  ch.prefs.putBool("runOver", d.safety.overridden);
+  ch.prefs.putFloat("runSteady", d.steadyW);
+  ch.prefs.putFloat("runPeak", d.peak);
+  ch.lastCheckpoint = monotonicMs();
+}
 bool persistSafety(SocketChannel& ch) {
   auto state = ch.data.safety.state;
+  // The state itself, so a restart knows a run (to resume) from a lockout.
+  ch.prefs.putUChar("state", uint8_t(state));
+  if (ch.sessionOpen) saveRun(ch);
   bool hazardous = state == SocketState::Sampling || state == SocketState::Active || state == SocketState::Warning || state == SocketState::LockedOut;
   bool ok = ch.prefs.putBool("hazard", hazardous) == 1;
   ok = (ch.prefs.putBool("disabled", state == SocketState::Disabled) == 1) && ok;
@@ -303,7 +343,7 @@ void reportSession(SocketChannel& ch, const char* reason) {
 void queueRecognition(SocketChannel& ch, int stage) {
   RecognitionReport r;
   r.outlet = int(&ch - outlets); r.stage = stage;
-  snprintf(r.eventID, sizeof(r.eventID), "%s_%s_%llu", sessionID, ch.outlet, (unsigned long long)ch.sessionStartMono);
+  strlcpy(r.eventID, ch.runEvent, sizeof(r.eventID));
   r.startEpoch = ch.sessionStartEpoch; r.startMono = ch.sessionStartMono;
   r.f = ch.rec.features(stage);
   if (stage == 2) ch.data.steadyW = r.f.avgPowerW;
@@ -459,6 +499,7 @@ void handleSensor(SocketChannel& ch, const SensorSample& sample, uint64_t now) {
     ch.sessionOpen = true; ch.lowSince = 0;
     ch.sessionStartMono = now; ch.sessionStartEpoch = d.startEpoch; ch.lastEnergySample = now;
     ch.runMono = now; ch.stageQueued = 0;
+    snprintf(ch.runEvent, sizeof(ch.runEvent), "%s_%s_%llu", sessionID, ch.outlet, (unsigned long long)now);
     ch.sessionWh = 0; ch.lastPower = sample.power;
     ch.sessionPeakCurrent = sample.current; ch.sessionPeakPower = sample.power;
     ch.rec.begin(now, ch.standbyW);
@@ -646,7 +687,7 @@ void requestRestart(int why) {
   // Restarting again cannot fix what a restart did not fix (e.g. the
   // internet is down): at most one such restart every CLOUD_RESTART_BACKOFF_MS.
   if (why == CloudFailing && strcmp(lastRestart, restartText(CloudFailing)) == 0 &&
-      monotonicMs() < CLOUD_RESTART_BACKOFF_MS) return;
+      uptimeMs() < CLOUD_RESTART_BACKOFF_MS) return;
   int none = NoRestart;
   if (restartWhy.compare_exchange_strong(none, why)) Serial.printf("Self-restart requested: %s\n", restartText(why));
 }
@@ -687,7 +728,7 @@ void healthCheck(uint64_t now) {
   }
   uint64_t nb = netBeat.load(), sb = supaBeat.load();
   if ((nb && now - nb >= TASK_STUCK_MS) || (sb && now - sb >= TASK_STUCK_MS)) requestRestart(TaskStuck);
-  if (now >= PREVENTIVE_RESTART_MS) requestRestart(Preventive);
+  if (uptimeMs() >= PREVENTIVE_RESTART_MS) requestRestart(Preventive);
   if (appRestartAt && now >= appRestartAt) { appRestartAt = 0; requestRestart(AppRequest); }
   int why = restartWhy.load();
   if (why == NoRestart) return;
@@ -928,7 +969,7 @@ void addStatus(JsonDocument& root, const Snapshot* s) {
   root[b + "wifiSSID"] = WiFi.SSID();  // lets the app confirm a Wi-Fi change
   // Health, for checking a plug that runs for weeks (not shown in the app).
   JsonObject h = root[b + "health"].to<JsonObject>();
-  h["uptimeS"] = uint32_t(monotonicMs() / 1000);
+  h["uptimeS"] = uint32_t(uptimeMs() / 1000);
   h["freeHeap"] = ESP.getFreeHeap();
   h["largestBlock"] = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
   h["lastRestart"] = lastRestart;
@@ -1009,9 +1050,7 @@ bool sendRecognition(const RecognitionReport& r) {
   for (const auto& ch : outlets) {
     uint64_t run = ch.runMono.load();
     if (!run) continue;
-    char id[88];
-    snprintf(id, sizeof(id), "%s_%s_%llu", sessionID, ch.outlet, (unsigned long long)run);
-    running.add(id);
+    running.add(ch.runEvent);  // also a run resumed after a restart
   }
   String body, response; serializeJson(doc, body);
   int code = supabasePost("recognize-appliance", body, &response);
@@ -1123,7 +1162,13 @@ void sendSupabase() {
 // from setup returns to "wisewp". No reboot: it would lock a running outlet.
 // ==========================================
 constexpr const char* SETUP_AP_SSID = "wisewp";
-constexpr uint64_t CONNECT_TIMEOUT_MS = 20000, OFFLINE_TO_SETUP_MS = 60000, SETUP_RETRY_MS = 120000;
+// Back online quickly: while "wisewp" is up, the saved Wi-Fi is retried
+// every SETUP_RETRY_MS (it was 2 min). A phone joined to "wisewp" blocks the
+// retry only while someone is using the setup page (a request in the last
+// SETUP_IDLE_MS): phones that join the open "wisewp" by themselves no longer
+// keep the plug offline.
+constexpr uint64_t CONNECT_TIMEOUT_MS = 20000, OFFLINE_TO_SETUP_MS = 60000, SETUP_RETRY_MS = 30000;
+constexpr uint64_t SETUP_IDLE_MS = 60000;
 
 enum class NetMode { Connecting, Online, Setup };
 NetMode netMode = NetMode::Connecting;
@@ -1132,6 +1177,7 @@ String savedSsid, savedPass;  // last network that worked
 String trialSsid, trialPass;  // being tried; saved once connected
 bool trialFromSetup = false, legacyCredentials = false;
 uint64_t modeSince = 0, lastConnected = 0;
+uint64_t setupUsedAt = 0;  // last request to the setup page or the app's setup calls
 int64_t appliedConfig = 0;
 WebServer setupServer(80);
 DNSServer setupDns;
@@ -1218,6 +1264,7 @@ void sendCors() {
   setupServer.sendHeader("Access-Control-Allow-Private-Network", "true");
 }
 void handleSaveWifi() {
+  setupUsedAt = monotonicMs();
   sendCors();
   if (setupServer.method() == HTTP_OPTIONS) {
     setupServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -1242,12 +1289,17 @@ void handleSaveWifi() {
   if (!error) { queuedSsid = ssid; queuedPass = pass; queued = true; queuedAt = monotonicMs(); }
 }
 void setupRoutes() {
-  setupServer.on("/", HTTP_GET, [] { setupServer.send_P(200, "text/html", SETUP_PAGE); });
+  setupServer.on("/", HTTP_GET, [] {
+    setupUsedAt = monotonicMs();
+    setupServer.send_P(200, "text/html", SETUP_PAGE);
+  });
   setupServer.on("/status", HTTP_GET, [] {
+    setupUsedAt = monotonicMs();
     sendCors();
     setupServer.send(200, "application/json", String("{\"device\":\"") + DEVICE_ID + "\",\"mode\":\"setup\"}");
   });
   setupServer.on("/networks", HTTP_GET, [] {
+    setupUsedAt = monotonicMs();
     if (setupServer.hasArg("refresh") || !scannedAt) scanNetworks();
     sendCors();
     setupServer.send(200, "application/json", networksJson);
@@ -1298,7 +1350,8 @@ void updateWifi(uint64_t now) {
       if (queued && now - queuedAt > 1000) {  // let the reply reach the phone first
         queued = false;
         startConnect(queuedSsid, queuedPass, true, true);
-      } else if (now - modeSince > SETUP_RETRY_MS && WiFi.softAPgetStationNum() == 0 &&
+      } else if (now - modeSince > SETUP_RETRY_MS &&
+                 (WiFi.softAPgetStationNum() == 0 || now - setupUsedAt > SETUP_IDLE_MS) &&
                  (savedSsid.length() || legacyCredentials)) {
         startConnect(savedSsid, savedPass, false, false);
       }
@@ -1417,6 +1470,66 @@ void supabaseTask(void*) {
 // ==========================================
 // SETUP & CONTROL LOOP (core 1)
 // ==========================================
+// Continues the run saved by saveRun() after a restart that was not a power
+// cut. The used time is the saved value plus RUN_CHECKPOINT_S (the most that
+// can be missing), so the safe time is never extended; once the internet
+// clock is set, checkResumedRun() uses the real start time if it is later.
+void resumeRun(SocketChannel& ch) {
+  auto& d = ch.data;
+  auto& safety = d.safety;
+  uint64_t now = monotonicMs();
+  uint64_t used = uint64_t(ch.prefs.getULong("runUsed", 0) + RUN_CHECKPOINT_S) * 1000;
+  uint32_t limit = ch.prefs.getULong("runLimit", DEFAULT_LIMIT_S);
+  safety.state = SocketState::Active; ++safety.revision;
+  safety.started = now - min(used, now - 1);
+  safety.deadline = safety.started + uint64_t(limit) * 1000;
+  safety.overridden = ch.prefs.getBool("runOver", false);
+  safety.runtimeWarning = false;
+  ch.prefs.getString("runEvent", ch.runEvent, sizeof(ch.runEvent));
+  ch.prefs.getString("runName", d.activeName, sizeof(d.activeName));
+  ch.prefs.getString("runId", d.activeProfileID, sizeof(d.activeProfileID));
+  ch.prefs.getString("runRec", d.recognition, sizeof(d.recognition));
+  if (!d.recognition[0]) strlcpy(d.recognition, "UNKNOWN", sizeof(d.recognition));
+  d.confirmed = ch.prefs.getBool("runConf", false);
+  d.steadyW = ch.prefs.getFloat("runSteady", 0);
+  d.peak = ch.prefs.getFloat("runPeak", 0);
+  d.startEpoch = ch.prefs.getLong64("runStart", 0);
+  ch.sessionOpen = true; ch.resumed = true;
+  ch.sessionStartMono = safety.started; ch.sessionStartEpoch = d.startEpoch;
+  ch.runMono = safety.started; ch.stageQueued = 2;  // measured before: no new stages
+  ch.rec.cancel();
+  ch.lastEnergySample = now; ch.sessionWh = 0; ch.lowSince = 0;
+  ch.lastValid = now;  // the meter gets a moment to answer after the restart
+  persistSafety(ch);
+  Serial.printf("[%s] Restart during a run (reset reason %d): %s continues, %lu s used of %lu s\n",
+                ch.outlet, int(esp_reset_reason()), d.activeName[0] ? d.activeName : "the appliance",
+                (unsigned long)(used / 1000), (unsigned long)limit);
+}
+// Once the internet clock is set: if the run really started earlier than the
+// saved time says, count from its real start (never the other way round).
+void checkResumedRun(SocketChannel& ch) {
+  if (!ch.resumed) return;
+  if (!ch.sessionOpen) { ch.resumed = false; return; }
+  int64_t nowEpoch = epochMs();
+  if (!nowEpoch) return;  // not yet
+  ch.resumed = false;
+  auto& d = ch.data;
+  uint64_t now = monotonicMs();
+  uint64_t usedNow = now - ch.sessionStartMono;
+  if (!d.startEpoch) {  // the clock was not set when it started
+    d.startEpoch = ch.sessionStartEpoch = nowEpoch - int64_t(usedNow);
+    saveRun(ch);
+    return;
+  }
+  uint64_t real = nowEpoch > d.startEpoch ? uint64_t(nowEpoch - d.startEpoch) : 0;
+  if (real <= usedNow || d.safety.overridden) return;
+  uint64_t shift = min(real - usedNow, ch.sessionStartMono - 1);
+  uint32_t limit = currentLimitS(d.safety);
+  d.safety.started -= shift; d.safety.deadline = d.safety.started + uint64_t(limit) * 1000;
+  ch.sessionStartMono = d.safety.started; ch.runMono = d.safety.started; ++d.safety.revision;
+  saveRun(ch);
+}
+
 void setup() {
   // Relays stay off until the persisted safety state is known.
   for (const auto& h : OUTLET_HW) { digitalWrite(h.relay, !h.relayOn); pinMode(h.relay, OUTPUT); }
@@ -1445,8 +1558,20 @@ void setup() {
     ch.storageOK = ch.prefs.begin(ch.ns, false);
     ch.prefs.getBytes("alert", &ch.data.alert, sizeof(AlertRecord));
     ch.data.alert.id[79] = 0; ch.data.alert.type[39] = 0; ch.data.alert.resolution[15] = 0;
-    // A reboot during a running session (e.g. power cut) locks out: nothing restarts unattended.
-    if (!ch.storageOK || ch.prefs.getBool("hazard", false)) {
+    // A restart during a run: continue it (with its timer) unless the power
+    // was cut; a lockout stays locked with its own reason. Firmware older
+    // than this saved no "state" (255): as before, a power-cut lock.
+    uint8_t saved = ch.prefs.getUChar("state", 255);
+    bool wasRunning = saved == uint8_t(SocketState::Sampling) || saved == uint8_t(SocketState::Active) ||
+        saved == uint8_t(SocketState::Warning);
+    esp_reset_reason_t why = esp_reset_reason();
+    bool powerCut = why == ESP_RST_POWERON || why == ESP_RST_UNKNOWN;
+    bool hazard = ch.storageOK && ch.prefs.getBool("hazard", false);
+    if (hazard && wasRunning && !powerCut) {
+      resumeRun(ch);
+    } else if (hazard && saved == uint8_t(SocketState::LockedOut)) {
+      lock(ch);  // still locked, for its own reason (safe time, overcurrent...)
+    } else if (!ch.storageOK || ch.prefs.getBool("hazard", false)) {
       // Its own reason (not a saved, older one): the app shows a power cut on
       // the outlet card, never as the "safe time is up" pop-up.
       auto& a = ch.data.alert;
@@ -1462,7 +1587,13 @@ void setup() {
     }
     applyRelay(ch);
   }
-  configASSERT(xTaskCreatePinnedToCore(sensorTask, "meters", 4096, nullptr, 1, nullptr, 0) == pdPASS);
+  // The meters come first on core 0: priority 2, above the network tasks
+  // (1). A secure connection (Supabase, then Firebase again) is heavy work on
+  // the same core; at equal priority it crowded out the meter task, a meter
+  // answer was missed, and both meters looked silent right after each upload.
+  // The meter task still sleeps 200 ms every round, so the network tasks and
+  // core 0's idle task always get their turn.
+  configASSERT(xTaskCreatePinnedToCore(sensorTask, "meters", 4096, nullptr, 2, nullptr, 0) == pdPASS);
   configASSERT(xTaskCreatePinnedToCore(networkTask, "firebase", 16384, nullptr, 1, nullptr, 0) == pdPASS);
 #ifdef SUPABASE_FUNCTIONS_URL
   configASSERT(xTaskCreatePinnedToCore(supabaseTask, "supabase", 12288, nullptr, 1, nullptr, 0) == pdPASS);
@@ -1508,6 +1639,7 @@ void loop() {
     // Time the user granted with "Yes, Override" is not taken back.
     if (!safety.overridden) { safety.deadline = safety.started + uint64_t(limit) * 1000; }
     ++safety.revision;
+    saveRun(ch);  // the new safe time survives a restart
     strlcpy(d.recognition, reply.status[0] ? reply.status : "UNKNOWN", sizeof(d.recognition));
     d.confirmed = confirmed;
     bool matched = confirmed || strcmp(reply.status, "MATCHED_PROVISIONAL") == 0;
@@ -1546,6 +1678,12 @@ void loop() {
         now - ch.lastValid > SENSOR_TIMEOUT_MS) beginAlert(ch, "SENSOR_UNAVAILABLE", now);
     Command cmd;
     if (xQueueReceive(ch.commands, &cmd, 0) == pdTRUE) handleCommand(ch, cmd, now);
+    // The run's used time, saved every RUN_CHECKPOINT_S for a restart.
+    if (ch.sessionOpen && now - ch.lastCheckpoint >= uint64_t(RUN_CHECKPOINT_S) * 1000) {
+      ch.prefs.putULong("runUsed", usedSeconds(ch));
+      ch.lastCheckpoint = now;
+    }
+    checkResumedRun(ch);
     applyRelay(ch);
     if (now - ch.lastSnapshot >= 250) {
       ch.lastSnapshot = now; d.capturedMono = now; d.capturedEpoch = epochMs();
