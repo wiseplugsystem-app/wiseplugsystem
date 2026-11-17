@@ -878,7 +878,7 @@ int firebaseRequest(const char* method, const String& path, const String& body =
   bool get = strcmp(method, "GET") == 0;
   if (http.begin(tls, "https://" + firebaseHost + "/" + path + ".json?auth=" + firebaseAuth() +
                           (get ? "" : "&print=silent"))) {
-    http.setTimeout(5000);
+    http.setTimeout(10000);  // slow or weak connections: 10 s (was 5)
     if (get) code = http.GET();
     else { http.addHeader("Content-Type", "application/json"); code = silentOk(http.sendRequest(method, body)); }
     if (response && code == HTTP_CODE_OK) *response = http.getString();
@@ -902,7 +902,7 @@ int firebasePatch(const JsonDocument& root) {
   }
   int code = -1;
   if (http.begin(tls, "https://" + firebaseHost + "/.json?auth=" + firebaseAuth() + "&print=silent")) {
-    http.setTimeout(5000);
+    http.setTimeout(10000);  // slow or weak connections: 10 s (was 5)
     http.addHeader("Content-Type", "application/json");
     code = silentOk(http.sendRequest("PATCH", reinterpret_cast<uint8_t*>(patchBuffer), n));
     http.end();
@@ -1028,7 +1028,7 @@ int supabasePost(const char* function, const String& body, String* response = nu
   http.end(); tls.stop();  // free Firebase's connection for this one
   supaLastBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
   if (supaHttp.begin(supaTls, String(SUPABASE_FUNCTIONS_URL) + "/" + function)) {
-    supaHttp.setTimeout(8000);
+    supaHttp.setTimeout(15000);  // slow or weak connections: 15 s (was 8)
     supaHttp.addHeader("Content-Type", "application/json");
     supaHttp.addHeader("x-device-key", SUPABASE_DEVICE_KEY);
     code = supaHttp.POST(body);
@@ -1186,9 +1186,10 @@ void sendSupabase() {
 // the plug can see, so the user taps theirs, types its password and is done.
 // The app can do the same through /status, /networks and /save-wifi. The
 // station never searches while "wisewp" is up, so the setup network stays on
-// one channel and phones stay joined. While nobody is joined, the saved
-// router is retried every 2 minutes (after a power cut the router often boots
-// slower than the plug). New details are saved only once they connect; a
+// one channel and phones stay joined. While nobody is using the setup page,
+// the saved router is retried every 30 s in the background, with "wisewp"
+// staying on, so every phone nearby keeps seeing it (after a power cut the
+// router often boots slower than the plug). New details are saved only once they connect; a
 // failed change made from the app rolls back to the saved network, one made
 // from setup returns to "wisewp". No reboot: it would lock a running outlet.
 // ==========================================
@@ -1198,7 +1199,10 @@ constexpr const char* SETUP_AP_SSID = "wisewp";
 // retry only while someone is using the setup page (a request in the last
 // SETUP_IDLE_MS): phones that join the open "wisewp" by themselves no longer
 // keep the plug offline.
-constexpr uint64_t CONNECT_TIMEOUT_MS = 20000, OFFLINE_TO_SETUP_MS = 60000, SETUP_RETRY_MS = 30000;
+// Weak or unstable Wi-Fi: the plug keeps reconnecting to the saved network
+// for OFFLINE_TO_SETUP_MS (3 min; was 1 min) before it opens "wisewp", so a
+// short drop in a low-signal spot never sends it into setup mode.
+constexpr uint64_t CONNECT_TIMEOUT_MS = 20000, OFFLINE_TO_SETUP_MS = 180000, SETUP_RETRY_MS = 30000;
 constexpr uint64_t SETUP_IDLE_MS = 60000;
 
 enum class NetMode { Connecting, Online, Setup };
@@ -1215,6 +1219,15 @@ DNSServer setupDns;
 String queuedSsid, queuedPass;  // received by /save-wifi
 bool queued = false;
 uint64_t queuedAt = 0;
+// "wisewp" always visible: while it is up, the saved Wi-Fi is retried in the
+// background (station only) and "wisewp" stays on. Before, every retry
+// switched "wisewp" off for ~20 s, so phones scanning then did not list it.
+uint64_t bgTryAt = 0;  // when the background retry started (0: none running)
+void stopBackgroundTry() {
+  if (!bgTryAt) return;
+  bgTryAt = 0;
+  WiFi.disconnect();  // the station only; "wisewp" stays on
+}
 String networksJson = "[]";  // last scan, for the setup page and the app
 uint64_t scannedAt = 0;
 
@@ -1226,6 +1239,7 @@ bool storedByEspIdf() {
 // Networks the plug can actually join (it only hears 2.4 GHz): strongest
 // first, one entry per name, names exactly as broadcast (spaces included).
 void scanNetworks() {
+  stopBackgroundTry();  // a scan cannot run while the station is connecting
   int n = WiFi.scanNetworks();
   std::vector<int> order;
   for (int i = 0; i < n; ++i) if (WiFi.SSID(i).length()) order.push_back(i);
@@ -1245,8 +1259,16 @@ void scanNetworks() {
   networksJson = ""; serializeJson(doc, networksJson); scannedAt = monotonicMs();
 }
 void startConnect(const String& ssid, const String& pass, bool trial, bool fromSetup) {
+  bgTryAt = 0;  // WiFi.disconnect() below ends a background retry
   if (netMode == NetMode::Setup) { setupServer.stop(); setupDns.stop(); WiFi.softAPdisconnect(true); }
   WiFi.mode(WIFI_STA); WiFi.disconnect(); WiFi.setAutoReconnect(true);
+  // Weak signal: no Wi-Fi power saving (it misses the router's beacons and
+  // drops), full transmit power, and join the strongest access point of that
+  // name (a scan of all channels, e.g. a mesh or a router with a repeater).
+  WiFi.setSleep(false);
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);
+  WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+  WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
   trialSsid = trial ? ssid : ""; trialPass = trial ? pass : ""; trialFromSetup = fromSetup;
   if (ssid.length()) WiFi.begin(ssid.c_str(), pass.c_str());
   else WiFi.begin();  // whatever the ESP-IDF has stored
@@ -1254,6 +1276,7 @@ void startConnect(const String& ssid, const String& pass, bool trial, bool fromS
   Serial.printf("Wi-Fi: connecting to \"%s\"\n", ssid.length() ? ssid.c_str() : "stored network");
 }
 void startSetup() {
+  bgTryAt = 0;
   WiFi.setAutoReconnect(false); WiFi.disconnect();
   WiFi.mode(WIFI_AP_STA);  // the station stays idle; it is only used to list networks
   scanNetworks();          // before the AP starts, so the scan cannot disturb phones
@@ -1381,10 +1404,30 @@ void updateWifi(uint64_t now) {
       if (queued && now - queuedAt > 1000) {  // let the reply reach the phone first
         queued = false;
         startConnect(queuedSsid, queuedPass, true, true);
-      } else if (now - modeSince > SETUP_RETRY_MS &&
+      } else if (bgTryAt && connected) {
+        // The home Wi-Fi is back: close "wisewp"; the station stays connected
+        // and Connecting takes it online (clock, saved details) as usual.
+        bgTryAt = 0;
+        setupServer.stop(); setupDns.stop(); WiFi.softAPdisconnect(true);
+        trialSsid = "";
+        netMode = NetMode::Connecting; modeSince = now;
+        Serial.println("Wi-Fi: home network back, \"wisewp\" closed");
+      } else if (bgTryAt && now - bgTryAt > CONNECT_TIMEOUT_MS) {
+        stopBackgroundTry();  // not reachable yet: "wisewp" stays, try again later
+        modeSince = now;
+      } else if (!bgTryAt && now - modeSince > SETUP_RETRY_MS &&
                  (WiFi.softAPgetStationNum() == 0 || now - setupUsedAt > SETUP_IDLE_MS) &&
                  (savedSsid.length() || legacyCredentials)) {
-        startConnect(savedSsid, savedPass, false, false);
+        // Same weak-signal radio settings as startConnect().
+        WiFi.setSleep(false);
+        WiFi.setTxPower(WIFI_POWER_19_5dBm);
+        WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+        WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
+        if (savedSsid.length()) WiFi.begin(savedSsid.c_str(), savedPass.c_str());
+        else WiFi.begin();  // whatever the ESP-IDF has stored
+        bgTryAt = now;
+        Serial.printf("Wi-Fi: trying \"%s\" again (\"wisewp\" stays on)\n",
+                      savedSsid.length() ? savedSsid.c_str() : "stored network");
       }
       break;
   }

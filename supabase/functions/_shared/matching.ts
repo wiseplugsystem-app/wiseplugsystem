@@ -74,6 +74,9 @@ export interface Appliance {
   lastOutlet: string | null;
   /** The outlet it is running on right now (an open outlet session), or null. */
   activeOn: { deviceId: string; outlet: string } | null;
+  /** A charger: its power follows the battery (fast when low, slow when nearly
+   * full), so its power is compared with floor_power_pct_charger. */
+  varyingPower?: boolean;
   profiles: Profile[];
 }
 
@@ -104,6 +107,9 @@ export interface Config {
   samplesPerLevel: number;
   /** recognition_config.samples_per_charger: a charger's samples (its power varies). */
   samplesPerCharger: number;
+  /** recognition_config.floor_power_pct_charger: a charger's power tolerance
+   * (its power drops as the battery fills: 120 W -> 50 W in one charge). */
+  floorPowerPctCharger: number;
   /** recognition_config.rest_gap_s: a heating load may rest at 0 W this long and stay on. */
   restGapS: number;
   /** recognition_config.rest_gap_min_w: a run peaking at or above this is a heating load. */
@@ -155,6 +161,7 @@ export function configFromRow(r: Row): Config {
     samplesPerLevel: Number.isFinite(Number(r.samples_per_level)) ? Number(r.samples_per_level) : 1,
     samplesPerCharger: Number.isFinite(Number(r.samples_per_charger)) ? Number(r.samples_per_charger) : 3,
     restGapS: Number.isFinite(Number(r.rest_gap_s)) ? Number(r.rest_gap_s) : 180,
+    floorPowerPctCharger: Number.isFinite(Number(r.floor_power_pct_charger)) ? Number(r.floor_power_pct_charger) : 0.5,
     restGapMinW: Number.isFinite(Number(r.rest_gap_min_w)) ? Number(r.rest_gap_min_w) : 500,
   };
 }
@@ -266,7 +273,10 @@ export function evaluateProfile(x: Features, a: Appliance, p: Profile, stage: St
     const mean = p.mean[f];
     if (!has(value) || !has(mean)) continue;
     if (f === "settling_time_s" && (x.unstable || neverSettled(value) || neverSettled(mean))) continue;
-    const tol = tolerance(f, p, c);
+    // A charger's power follows its battery: the wide charger floor applies.
+    const tol = f === "avg_power_w" && a.varyingPower
+      ? Math.max(tolerance(f, p, c), Math.abs(mean) * c.floorPowerPctCharger)
+      : tolerance(f, p, c);
     const normalized = Math.abs(value - mean) / tol;
     checks.push({ feature: f, value, mean, tolerance: tol, normalized, pass: normalized <= 1 + EDGE });
   }
