@@ -39,6 +39,8 @@ export const STAGE_FEATURES: Record<1 | 2, readonly Feature[]> = {
   2: FEATURES,
 };
 export type Stage = 1 | 2;
+/** Not compared for a charger (Appliance.varyingPower): they follow its battery. */
+export const CHARGER_SKIPPED: readonly Feature[] = ["startup_peak_ratio", "power_variation", "settling_time_s"];
 
 /** One summary from the plug. Null / missing = not measured (skipped). */
 export type Features = Partial<Record<Feature, number | null>> & {
@@ -110,6 +112,9 @@ export interface Config {
   /** recognition_config.floor_power_pct_charger: a charger's power tolerance
    * (its power drops as the battery fills: 120 W -> 50 W in one charge). */
   floorPowerPctCharger: number;
+  /** recognition_config.floor_pf_charger: a charger's power-factor tolerance
+   * (its PF follows its power: 0.91 at 120 W, 0.77 at 48 W in one charge). */
+  floorPfCharger: number;
   /** recognition_config.rest_gap_s: a heating load may rest at 0 W this long and stay on. */
   restGapS: number;
   /** recognition_config.rest_gap_min_w: a run peaking at or above this is a heating load. */
@@ -162,6 +167,7 @@ export function configFromRow(r: Row): Config {
     samplesPerCharger: Number.isFinite(Number(r.samples_per_charger)) ? Number(r.samples_per_charger) : 3,
     restGapS: Number.isFinite(Number(r.rest_gap_s)) ? Number(r.rest_gap_s) : 180,
     floorPowerPctCharger: Number.isFinite(Number(r.floor_power_pct_charger)) ? Number(r.floor_power_pct_charger) : 0.5,
+    floorPfCharger: Number.isFinite(Number(r.floor_pf_charger)) ? Number(r.floor_pf_charger) : 0.1,
     restGapMinW: Number.isFinite(Number(r.rest_gap_min_w)) ? Number(r.rest_gap_min_w) : 500,
   };
 }
@@ -273,9 +279,17 @@ export function evaluateProfile(x: Features, a: Appliance, p: Profile, stage: St
     const mean = p.mean[f];
     if (!has(value) || !has(mean)) continue;
     if (f === "settling_time_s" && (x.unstable || neverSettled(value) || neverSettled(mean))) continue;
-    // A charger's power follows its battery: the wide charger floor applies.
+    // A charger's start-up surge, steadiness and settling follow its battery
+    // (empty: a big surge and a changing draw; nearly full: almost none), so
+    // one registered sample cannot predict them, on either outlet. A charger
+    // is compared on its power (wide floor below) and power factor only.
+    if (a.varyingPower && CHARGER_SKIPPED.includes(f)) continue;
+    // A charger's power, and with it its power factor, follow its battery:
+    // the wide charger floors apply.
     const tol = f === "avg_power_w" && a.varyingPower
       ? Math.max(tolerance(f, p, c), Math.abs(mean) * c.floorPowerPctCharger)
+      : f === "avg_pf" && a.varyingPower
+      ? Math.max(tolerance(f, p, c), c.floorPfCharger)
       : tolerance(f, p, c);
     const normalized = Math.abs(value - mean) / tol;
     checks.push({ feature: f, value, mean, tolerance: tol, normalized, pass: normalized <= 1 + EDGE });
