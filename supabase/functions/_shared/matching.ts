@@ -39,6 +39,8 @@ export const STAGE_FEATURES: Record<1 | 2, readonly Feature[]> = {
   2: FEATURES,
 };
 export type Stage = 1 | 2;
+/** Not compared for a charger (Appliance.varyingPower): they follow its battery. */
+export const CHARGER_SKIPPED: readonly Feature[] = ["startup_peak_ratio", "power_variation", "settling_time_s"];
 
 /** One summary from the plug. Null / missing = not measured (skipped). */
 export type Features = Partial<Record<Feature, number | null>> & {
@@ -304,6 +306,8 @@ export function evaluateProfile(x: Features, a: Appliance, p: Profile, stage: St
     // fills) and on/off cycling follow the phone on it, not the charger: so
     // Stage 2 judges a charger exactly as Stage 1 did.
     if (a.varyingPower && (f === "startup_peak_ratio" || f === "power_variation" || f === "cycle_period_s")) continue;
+    // Also the remote rule: settling follows the battery too (CHARGER_SKIPPED).
+    if (a.varyingPower && CHARGER_SKIPPED.includes(f)) continue;
     // A charger's power follows its battery and the phone on it, and its
     // power factor follows that load: the wide charger floors apply.
     // Its power also follows whichever phone or laptop is on it: anything

@@ -778,3 +778,37 @@ else keep ±10 %.
 - Each request may take up to 10 s (Firebase) / 15 s (Supabase) before it
   counts as failed (was 5 s / 8 s), so a slow connection still gets through.
 - Safety never depends on any of this: timing and cutoff run on the plug.
+
+## "wisewp" stays visible for every phone (in plain words)
+
+- When the plug cannot reach your home Wi-Fi, it opens its own Wi-Fi
+  "wisewp". It now **stays on the whole time**, so every phone nearby can see
+  it and join it.
+- Before, the plug switched "wisewp" off for about 20 seconds every half
+  minute to try your home Wi-Fi again, and phones that looked during that
+  gap did not see it.
+- The plug still tries your home Wi-Fi every 30 seconds, now in the
+  background. When it connects, "wisewp" closes by itself and the plug is
+  online again.
+- While someone is using the setup page, the plug does not try in the
+  background, so the page is not interrupted.
+
+## Recognised on both outlets (in plain words)
+
+- Outlet A and Outlet B each have their own meter. Two meters read the same
+  appliance's "power factor" (how it uses electricity) a little differently.
+- Appliances are registered with one sample, so that small difference was
+  enough to make a registered appliance look "new" when it was moved to the
+  other outlet.
+- The power-factor margin is now 0.05 (was 0.02), set in
+  `recognition_config.floor_pf`. An appliance registered on one outlet is
+  recognised on the other. Power (within 10 %) still tells appliances apart,
+  and if two appliances both fit, the app asks which one it is.
+- Chargers: how hard a charger starts, how steady it is and how fast it
+  settles all follow the battery, so they are no longer compared for a
+  charger. A charger is recognised by its power (within 50 %) and its power
+  factor (within 0.10, `recognition_config.floor_pf_charger`), which also
+  follows the battery. Every other appliance keeps all its checks.
+- Checked on the real runs: the laptop charger registered on Outlet B is now
+  recognised on Outlet A from about 48 W to 115 W; the fan is still
+  recognised on both outlets and never taken for the charger.
