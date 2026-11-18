@@ -153,7 +153,7 @@ serve(async (req) => {
   if (profileId != null && !/^[A-Za-z0-9_-]{1,63}$/.test(profileId)) {
     throw new HttpError(400, "register.profileId must match [A-Za-z0-9_-]{1,63}");
   }
-  const maxRuntimeMins = register.maxRuntimeMins == null ? 240 : Number(register.maxRuntimeMins);
+  const maxRuntimeMins = register.maxRuntimeMins == null ? 10080 : Number(register.maxRuntimeMins);
   if (!Number.isInteger(maxRuntimeMins) || maxRuntimeMins < 1 || maxRuntimeMins > 10080) {
     throw new HttpError(400, "register.maxRuntimeMins must be 1-10080");
   }

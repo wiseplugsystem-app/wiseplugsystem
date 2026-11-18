@@ -51,6 +51,7 @@ serve(async (req) => {
   const counts = learning.countsTowardLearning === true;
   const profileId = typeof body.profileId === "string" && body.profileId ? body.profileId.slice(0, 63) : null;
   const applianceName = typeof body.applianceName === "string" ? body.applianceName.slice(0, 63) : "Unknown appliance";
+  const config = await loadConfig();
 
   const { data: device, error: deviceError } = await db.from("devices")
     .update({ last_seen_at: new Date().toISOString() }).eq("id", deviceId).select("id").maybeSingle();
@@ -90,7 +91,7 @@ serve(async (req) => {
           current,
           powerFactor: Number.isFinite(pf) && pf > 0 ? pf : null,
         });
-        const limitS = Number(learning.limitS) || 4 * 3600;
+        const limitS = Number(learning.limitS) || config.defaultCutoffS;
         const { data: created, error: insertError } = await db.from("appliances").insert({
           device_id: deviceId,
           profile_id: profileId,
@@ -158,7 +159,6 @@ serve(async (req) => {
     // (its ~1-minute runs would make the learned usual time far too short).
     if (open.status === "MATCHED_CONFIRMED" && open.confirmed_by !== "registration" && open.appliance_id &&
         NORMAL_ENDS.includes(endReason)) {
-      const config = await loadConfig();
       const { data: a, error: aError } = await db.from("appliance_instances")
         .select("use_count, recent_runtimes_s, is_learned, baseline_runtime_s").eq("id", open.appliance_id).single();
       if (aError) throw aError;

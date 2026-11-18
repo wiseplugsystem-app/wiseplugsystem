@@ -33,6 +33,10 @@ class OutletReading {
   final DateTime? countdownExpiry, safetyDeadline;
   final bool runtimeWarning;
 
+  /// The firmware's explicit lock-out flag; null from firmware that does not
+  /// send it yet (then the older currentState/status check applies).
+  final bool? lockedOut;
+
   /// Running on extra time granted by "Yes, Override", past its limit.
   final bool overridden;
 
@@ -44,8 +48,17 @@ class OutletReading {
   /// Empty from firmware that does not send it.
   final String alertType;
 
+  /// The firmware's own seconds left in the 60-second warning, when this
+  /// reading was taken (countdownRemaining); null from firmware without it.
+  final int? countdownRemaining;
+
+  /// When the app received this reading (the phone's clock).
+  final DateTime receivedAt;
+
   OutletReading.fromMap(this.outlet, Map<String, dynamic> map)
-    : currentState = map['currentState']?.toString() ?? '',
+    : countdownRemaining = (map['countdownRemaining'] as num?)?.toInt(),
+      receivedAt = DateTime.now(),
+      currentState = map['currentState']?.toString() ?? '',
       sessionID = map['sessionID']?.toString() ?? '',
       alertID = map['alertID']?.toString() ?? '',
       profileID = map['profileID']?.toString() ?? '',
@@ -53,6 +66,7 @@ class OutletReading {
       countdownExpiry = deviceTime(map['countdownExpiry']),
       safetyDeadline = deviceTime(map['safetyDeadline']),
       runtimeWarning = map['runtime_warning'] == true,
+      lockedOut = map['lockedOut'] is bool ? map['lockedOut'] as bool : null,
       overridden = map['overridden'] == true,
       safetyResetHold =
           map['safetyResetHold'] == true && map['currentState'] == 'DISABLED',
@@ -75,15 +89,26 @@ class OutletReading {
       now.difference(lastUpdated!).inSeconds >= -10 &&
       now.difference(lastUpdated!) <= const Duration(seconds: 30);
   bool get isActive => status.toLowerCase() == 'active';
-  // The meter detects a running load, not physical plug insertion.
+  // The meter detects a running load, not physical plug insertion. The
+  // firmware's state machine decides whether a run is on: one missed meter
+  // answer (sensor_valid false for one update) does not end it, and a meter
+  // that stays silent gets its own SENSOR_UNAVAILABLE warning. Only old
+  // firmware without currentState needs the meter to vouch for the load.
   bool hasConnectedAppliance(DateTime now) =>
       isFresh(now) &&
-      sensorValid != false &&
       (currentState.isEmpty
-          ? isActive
+          ? isActive && sensorValid != false
           : ['ACTIVE', 'SAMPLING', 'WARNING'].contains(currentState));
+
+  /// The live power, or null while the meter is not answering (the firmware
+  /// then sends 0, which is not a reading).
+  double? get livePower => sensorValid == false ? null : activePower;
+
+  /// New firmware: its explicit lockedOut flag. Firmware without the flag
+  /// (not re-flashed yet): the previous check, kept so the APK still shows
+  /// the lock-out pop-up and Reset Safety with the plug as it is now.
   bool get isLockedOut =>
-      currentState == 'LOCKED_OUT' || status == 'LOCKED_OUT';
+      lockedOut ?? (currentState == 'LOCKED_OUT' || status == 'LOCKED_OUT');
   bool get isWarning => currentState == 'WARNING';
 
   /// The warning or cutoff is about the safe time running out: the only one
@@ -96,11 +121,51 @@ class OutletReading {
   /// or locked out for safety).
   bool get switchedOn => currentState != 'DISABLED' && !isLockedOut;
   int secondsRemaining(DateTime now) => countdownExpiry == null
-      ? 0
+      // The plug's clock is not synced (no countdownExpiry): its own
+      // countdown, counted down on the phone since the reading arrived.
+      ? (countdownRemaining == null
+            ? 0
+            : (countdownRemaining! - now.difference(receivedAt).inSeconds)
+                  .clamp(0, 60))
       : ((countdownExpiry!.difference(now).inMilliseconds + 999) ~/ 1000).clamp(
           0,
           60,
         );
+
+  /// The safe-time alert in this reading is still going on, for the pop-up.
+  /// isFresh(now) as before, or one of: the plug's clock is not synced yet
+  /// (last_updated 0: its age cannot be judged), a lock-out (it lasts until
+  /// Reset Safety, however long the plug waits before its next update), or
+  /// a warning whose 60-second countdown has not run out yet. Whether the
+  /// plug is online is checked separately (GadgetStatus.isOnline).
+  bool isCurrentForAlert(DateTime now) {
+    if (isFresh(now)) return true;
+    final updated = lastUpdated;
+    if (updated == null || updated.year < 2023) return true;
+    if (isLockedOut) return true;
+    final expiry = countdownExpiry;
+    if (isWarning && expiry == null) {
+      return now.difference(receivedAt) <= const Duration(seconds: 75);
+    }
+    return isWarning &&
+        expiry != null &&
+        now.isBefore(expiry.add(const Duration(seconds: 15)));
+  }
+
+  /// How much of the safe time has passed, 0.0 to 1.0, measured as the plug
+  /// measures it: from the run's start to its deadline (safetyDeadline, any
+  /// "Keep it on" time included). Exactly 1.0 when the safe time is up, the
+  /// moment the pop-up opens (WARNING), and after the cutoff. Null when the
+  /// plug gives no deadline.
+  double? safeTimeProgress(DateTime now) {
+    if (isSafeTimeAlert && (isWarning || isLockedOut)) return 1;
+    final start = startTime, end = safetyDeadline;
+    if (start == null || end == null) return null;
+    final total = end.difference(start).inMilliseconds;
+    if (total <= 0) return 1;
+    return (now.difference(start).inMilliseconds / total).clamp(0.0, 1.0);
+  }
+
   bool canCommand(DateTime now) =>
       isFresh(now) && sessionID.isNotEmpty && !isLockedOut;
 

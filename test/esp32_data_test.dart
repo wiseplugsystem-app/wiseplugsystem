@@ -42,6 +42,7 @@ void main() {
       OutletReading.fromMap('A', {
         ...data,
         'currentState': 'LOCKED_OUT',
+        'lockedOut': true,
       }).canCommand(now),
       false,
     );
@@ -57,12 +58,15 @@ void main() {
           body: Esp32OutletCard(
             outlet: 'A',
             now: DateTime.utc(2026),
-            reading: OutletReading.fromMap('A', {'currentState': 'LOCKED_OUT'}),
+            reading: OutletReading.fromMap('A', {
+              'currentState': 'LOCKED_OUT',
+              'lockedOut': true,
+            }),
           ),
         ),
       ),
     );
-    expect(find.textContaining('physical button'), findsOneWidget);
+    expect(find.textContaining('Reset Safety in the app'), findsOneWidget);
   });
   test('maps original Arduino field names and UTC+8 local timestamps', () {
     final readings = parseOutlets({

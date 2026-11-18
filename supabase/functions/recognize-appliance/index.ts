@@ -32,7 +32,7 @@
 import { deviceIdOf, requireDevice } from "../_shared/auth.ts";
 import { db } from "../_shared/db.ts";
 import { HttpError, json, outletOf, readJson, serve } from "../_shared/http.ts";
-import { type Recognition, parseFeatures, recognize, type Stage } from "../_shared/matching.ts";
+import { type Recognition, parseFeatures, recognize, recognizeWithChargers, type Stage } from "../_shared/matching.ts";
 import {
   learnFromConfirmed,
   loadAppliance,
@@ -122,10 +122,16 @@ serve(async (req) => {
         cutoffS: config.defaultCutoffS, reason: "The plug has no owner, so it has no registered appliances.",
       };
     }
-    return recognize({
+    // recognize() + a charger reading is never offered as a new appliance.
+    return recognizeWithChargers({
       features, stage, here: { deviceId, outlet },
       appliances: await loadAppliances(owner, eventId),
       previousApplianceId: (existing?.appliance_id as string | null) ?? null,
+      // Stage 1 asked "A or B?" (not answered yet): Stage 2 keeps asking.
+      previousCandidateIds: existing?.status === "AMBIGUOUS"
+        ? (((existing.candidates as Row | null)?.candidates as Row[] | undefined) ?? [])
+          .map((k) => String(k.applianceId))
+        : [],
       config,
     });
   };
@@ -151,6 +157,8 @@ serve(async (req) => {
       applianceName: r.match?.appliance.name ?? null,
       modeName: r.match?.profile.modeName ?? null,
       reason: r.reason,
+      // Charger: the app shows only "confirm" / "which charger", no register.
+      chargerChoice: r.chargerChoice ?? false,
     },
     prompt_text: r.promptText,
     features,

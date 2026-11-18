@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:wiseplug/models/gadget_status.dart';
 import 'package:wiseplug/screens/wifi_config_screen.dart';
+import 'package:wiseplug/services/esp32_service.dart';
 import 'package:wiseplug/services/wifi_provisioning.dart';
 
 const updatedAt = 1792060000000, ackAt = 1792060008000;
@@ -33,7 +34,42 @@ const acked = {
   'ackAt': ackAt,
 };
 
+class WifiDevice extends Fake implements Esp32Service {
+  final config = StreamController<Map<String, dynamic>>.broadcast();
+  final status = StreamController<GadgetStatus>.broadcast();
+
+  @override
+  Stream<Map<String, dynamic>> streamWifiConfig() => config.stream;
+
+  @override
+  Stream<GadgetStatus> streamGadgetStatus() => status.stream;
+
+  Future<void> close() async {
+    await config.close();
+    await status.close();
+  }
+}
+
 void main() {
+  testWidgets('changing Wi-Fi starts with empty name and password fields', (
+    tester,
+  ) async {
+    final device = WifiDevice();
+    await tester.pumpWidget(
+      MaterialApp(home: WifiConfigScreen(service: device)),
+    );
+    device.config.add({'ssid': 'OldNetwork', 'password': 'old-password'});
+    device.status.add(online(DateTime.now().millisecondsSinceEpoch, 'OldNetwork'));
+    await tester.pumpAndSettle();
+
+    final fields = tester.widgetList<TextFormField>(find.byType(TextFormField));
+    expect(fields, hasLength(2));
+    expect(fields.first.controller?.text, isEmpty);
+    expect(fields.last.controller?.text, isEmpty);
+    await tester.pumpWidget(const SizedBox());
+    await device.close();
+  });
+
   test('confirms only once back online on the requested network', () async {
     expect(
       await run(

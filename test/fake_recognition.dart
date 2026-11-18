@@ -10,6 +10,9 @@ class FakeRecognition extends Fake implements RecognitionService {
   List<RegisteredAppliance> list = [];
   final calls = <String>[];
 
+  /// The icon keys registration sent with a new type.
+  final iconKeys = <String>[];
+
   /// What latestSession returns next, per outlet (the last one repeats).
   final latest = <String, List<OutletSession?>>{};
   int collected = 0;
@@ -25,13 +28,6 @@ class FakeRecognition extends Fake implements RecognitionService {
 
   @override
   Future<List<RegisteredAppliance>> appliances() async => list;
-
-  /// What runs() returns, per appliance id.
-  final history = <String, List<ApplianceRun>>{};
-
-  @override
-  Future<List<ApplianceRun>> runs(String applianceId, {int limit = 10}) async =>
-      history[applianceId] ?? const [];
 
   @override
   Future<OutletSession?> latestSession(String outlet) async {
@@ -50,28 +46,55 @@ class FakeRecognition extends Fake implements RecognitionService {
     String? applianceId,
     String? typeName,
     String? name,
+    String? iconKey,
+    List<String>? levels,
+    String? level,
   }) async {
+    if (iconKey != null) iconKeys.add(iconKey);
+    if (levels != null) plannedLevels = levels;
+    sentLevels.add(level);
     calls.add(
       'register $eventId ${applianceId ?? 'new'} ${typeName ?? ''} ${name ?? ''}'
           .trim(),
     );
     collected++;
+    // Like register-sample: one sample per setting when registered by level.
+    final planned = plannedLevels;
+    final required = planned?.length ?? 3;
     return RegistrationProgress.fromJson({
       'appliance': {'id': 'new-1', 'name': name ?? 'Fan 2'},
-      'profile': {'id': 'p-1', 'modeName': 'Normal'},
+      'profile': {'id': 'p-1', 'modeName': level ?? 'Normal'},
       'samplesCollected': collected,
-      'samplesRequired': 3,
-      'complete': collected >= 3,
+      'samplesRequired': required,
+      'complete': collected >= required,
+      'nextLevel': planned != null && collected < planned.length
+          ? planned[collected]
+          : null,
     });
   }
+
+  /// The settings of the appliance being registered, and the setting each
+  /// sample was sent for.
+  List<String>? plannedLevels;
+  final sentLevels = <String?>[];
 
   @override
   Future<void> rename(String applianceId, String name) async =>
       calls.add('rename $applianceId $name');
 
   @override
-  Future<void> deleteAppliance(String applianceId) async =>
-      calls.add('delete $applianceId');
+  Future<void> changeType(
+    String applianceId,
+    String typeName,
+    String? iconKey, {
+    List<String> idleOutlets = const [],
+  }) async => calls.add('type $applianceId $typeName $iconKey');
+
+  @override
+  Future<void> deleteAppliance(
+    String applianceId, {
+    List<String> idleOutlets = const [],
+  }) async => calls.add('delete $applianceId');
 
   Future<void> close() => sessions.close();
 }

@@ -53,7 +53,7 @@ test("1. Fan registered entirely on A is recognised on B with no re-registration
   assert.equal(onB1.match?.appliance.id, "Fan");
   const onB2 = run(B, [registeredOnA()], 2, "Fan", { ...reading, power_variation: 0.021 });
   assert.equal(onB2.status, "MATCHED_CONFIRMED");
-  assert.equal(onB2.cutoffS, 4 * 3600);
+  assert.equal(onB2.cutoffS, C.defaultCutoffS);  // confirmed, still learning: the 30-min default
 });
 
 test("2. Plug-ins split over the outlets (1 on A, 2-3 on B) make one profile that works on both", () => {

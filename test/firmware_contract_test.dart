@@ -12,6 +12,7 @@ Map<String, dynamic> outlet(
 }) => {
   'status': state == 'IDLE' ? 'Idle' : 'Active',
   'currentState': state,
+  'lockedOut': state == 'LOCKED_OUT',
   'sessionID': '949bf6920469f276',
   'revision': 3,
   'appliance': profile.isEmpty ? 'None' : profile,
@@ -53,6 +54,29 @@ void main() {
     expect(a.isFresh(DateTime.now()), isTrue);
     expect(a.sensorValid, isFalse);
     expect(a.hasConnectedAppliance(DateTime.now()), isFalse);
+  });
+
+  test('the explicit lockout flag wins; firmware without it keeps the old check', () {
+    // Firmware not re-flashed yet (no flag): still locked out, so the APK
+    // shows the pop-up and Reset Safety.
+    final oldPayload = OutletReading.fromMap('A', {
+      'currentState': 'LOCKED_OUT',
+      'status': 'LOCKED_OUT',
+    });
+    final lockedPayload = OutletReading.fromMap('A', {
+      'currentState': 'LOCKED_OUT',
+      'status': 'LOCKED_OUT',
+      'lockedOut': true,
+    });
+    // New firmware says it is not locked: a leftover status is ignored.
+    final clearedPayload = OutletReading.fromMap('A', {
+      'currentState': 'IDLE',
+      'status': 'LOCKED_OUT',
+      'lockedOut': false,
+    });
+    expect(oldPayload.isLockedOut, isTrue);
+    expect(lockedPayload.isLockedOut, isTrue);
+    expect(clearedPayload.isLockedOut, isFalse);
   });
 
   test('appliance on/off follows the firmware state machine', () {

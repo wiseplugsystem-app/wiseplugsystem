@@ -59,30 +59,44 @@ class PopupDevice extends Fake implements Esp32Service {
   }
 }
 
-OutletReading reading({String state = 'ACTIVE', int session = 1}) =>
-    OutletReading.fromMap('A', {
-      'status': 'Active',
-      'currentState': state,
-      'sessionID': 'boot',
-      'profileID': 'signature',
-      'start_time': DateTime.now()
-          .subtract(Duration(minutes: session))
-          .millisecondsSinceEpoch,
-      'last_updated_ms': DateTime.now().millisecondsSinceEpoch,
-      'sensor_valid': true,
-      'power_W': 42,
-      'appliance': 'UNNAMED_DEVICE_1',
-      'alertID': 'alert-1',
-      'countdownExpiry': DateTime.now()
-          .add(const Duration(seconds: 45))
-          .millisecondsSinceEpoch,
-    });
+OutletReading reading({
+  String state = 'ACTIVE',
+  int session = 1,
+  String alertType = 'SAFETY_CEILING_EXCEEDED',
+}) => OutletReading.fromMap('A', {
+  'alertType': alertType,
+  'status': 'Active',
+  'currentState': state,
+  'lockedOut': state == 'LOCKED_OUT',
+  'sessionID': 'boot',
+  'profileID': 'signature',
+  'start_time': DateTime.now()
+      .subtract(Duration(minutes: session))
+      .millisecondsSinceEpoch,
+  'last_updated_ms': DateTime.now().millisecondsSinceEpoch,
+  'sensor_valid': true,
+  'power_W': 42,
+  'appliance': 'UNNAMED_DEVICE_1',
+  'alertID': 'alert-1',
+  'countdownExpiry': DateTime.now()
+      .add(const Duration(seconds: 45))
+      .millisecondsSinceEpoch,
+});
 
-class FakeAlarm implements SafetyAlarmManager {
+/// Any warning sound counts as playing: the warning pattern, or the cutoff
+/// beep when the alert opens on an outlet already switched off.
+class FakeAlarm extends Fake implements SafetyAlarmManager {
   bool playing = false;
   int plays = 0;
   @override
-  Future<void> playSafetyAlarm() async {
+  Future<void> playSafetyAlarm({Duration? Function()? remaining}) async {
+    if (playing) return;
+    playing = true;
+    plays++;
+  }
+
+  @override
+  Future<void> playCutoff() async {
     if (playing) return;
     playing = true;
     plays++;
@@ -142,7 +156,7 @@ void main() {
       device.readings.add({'A': reading()});
       device.gadget.add(status(remaining: 120));
       await tester.pumpAndSettle();
-      expect(find.text('WARNING'), findsNothing);
+      expect(find.byType(Dialog), findsNothing);
       expect(alarm.plays, 0);
       // Stale data from an offline gadget never raises the alarm.
       device.gadget.add(
@@ -152,15 +166,46 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.text('WARNING'), findsNothing);
+      expect(find.byType(Dialog), findsNothing);
+      device.readings.add({'A': reading(state: 'WARNING')});
       device.gadget.add(status(remaining: 0));
       await tester.pumpAndSettle();
-      expect(find.text('WARNING'), findsOneWidget);
+      expect(find.byType(Dialog), findsOneWidget);
       expect(alarm.playing, isTrue);
       device.gadget.add(status(remaining: 30));
       await tester.pumpAndSettle();
-      expect(find.text('WARNING'), findsNothing);
+      expect(find.byType(Dialog), findsNothing);
       expect(alarm.playing, isFalse);
+      await tester.pumpWidget(const SizedBox());
+      await device.close();
+    },
+  );
+
+  testWidgets(
+    'the pop-up is only for the safe time: a silent meter or too much power is not',
+    (tester) async {
+      final device = PopupDevice();
+      final alarm = FakeAlarm();
+      await mount(tester, device, alarm: alarm);
+      device.profiles.add([]);
+      for (final (state, type) in [
+        ('WARNING', 'SENSOR_UNAVAILABLE'),
+        ('LOCKED_OUT', 'OVERCURRENT'),
+        ('LOCKED_OUT', 'POWER_ANOMALY'),
+      ]) {
+        device.readings.add({'A': reading(state: state, alertType: type)});
+        device.gadget.add(status(triggered: true));
+        await tester.pumpAndSettle();
+        expect(find.byType(Dialog), findsNothing, reason: type);
+      }
+      expect(alarm.plays, 0);
+      // The safe time running out still opens it.
+      device.readings.add({'A': reading(state: 'WARNING')});
+      device.gadget.add(status(triggered: true));
+      await tester.pumpAndSettle();
+      expect(find.byType(Dialog), findsOneWidget);
+      await tester.tap(inDialog(find.text('Turn off now')));
+      await tester.pumpAndSettle();
       await tester.pumpWidget(const SizedBox());
       await device.close();
     },
@@ -176,42 +221,40 @@ void main() {
       device.readings.add({'A': reading(state: 'WARNING')});
       device.gadget.add(status(triggered: true));
       await tester.pumpAndSettle();
-      expect(inDialog(find.text('Seconds Remaining')), findsOneWidget);
-      expect(
-        inDialog(find.text('Are you still using the Appliance?')),
-        findsOneWidget,
-      );
-      await tester.tap(find.text('Turn Off Now'));
+      expect(inDialog(find.text('seconds until it turns off')), findsOneWidget);
+      expect(inDialog(find.textContaining('Still using')), findsOneWidget);
+      await tester.tap(inDialog(find.text('Turn off now')));
       await tester.pumpAndSettle();
       expect(device.commands, ['TURN_OFF']);
       expect(alarm.playing, isFalse);
       device.readings.add({'A': reading(state: 'LOCKED_OUT')});
       device.gadget.add(status(triggered: true));
       await tester.pumpAndSettle();
-      expect(inDialog(find.text('Power cut')), findsOneWidget);
-      expect(find.text('Turn Off Now'), findsNothing);
-      await tester.tap(find.text('Reset Safety'));
+      expect(inDialog(find.text('Turned off for safety')), findsOneWidget);
+      expect(find.text('Turn off now'), findsNothing);
+      await tester.tap(inDialog(find.text('Reset Safety')));
       await tester.pumpAndSettle();
       expect(device.commands, ['TURN_OFF', 'RESET_SAFETY']);
       device.readings.add({'A': reading(state: 'IDLE')});
       device.gadget.add(status());
       await tester.pumpAndSettle();
-      expect(find.text('WARNING'), findsNothing);
+      expect(find.byType(Dialog), findsNothing);
 
+      device.readings.add({'A': reading(state: 'LOCKED_OUT')});
       device.gadget.add(status(triggered: true));
       await tester.pumpAndSettle();
-      expect(find.text('WARNING'), findsOneWidget);
-      await tester.tap(find.text('Dismiss'));
+      expect(find.byType(Dialog), findsOneWidget);
+      await tester.tap(find.text('Close'));
       await tester.pumpAndSettle();
       device.gadget.add(status(triggered: true));
       await tester.pumpAndSettle();
-      expect(find.text('WARNING'), findsNothing);
+      expect(find.byType(Dialog), findsNothing);
       device.gadget.add(status());
       device.gadget.add(status(triggered: true));
       await tester.pumpAndSettle();
-      expect(find.text('WARNING'), findsOneWidget);
+      expect(find.byType(Dialog), findsOneWidget);
       expect(alarm.plays, 3);
-      await tester.tap(find.text('Dismiss'));
+      await tester.tap(find.text('Close'));
       await tester.pumpAndSettle();
       await tester.pumpWidget(const SizedBox());
       await device.close();
@@ -234,7 +277,7 @@ void main() {
       );
       expect(int.parse(number.data!), inInclusiveRange(43, 45));
       expect(number.style!.fontSize, greaterThanOrEqualTo(80));
-      await tester.tap(find.text('Yes, Override'));
+      await tester.tap(find.text('Keep it on'));
       await tester.pump();
       expect(device.commands, ['SMART_OVERRIDE']);
       // Ran 1 min: 20% is 12 s, so the 1 min minimum applies.
@@ -245,10 +288,32 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 500));
       // Accepted: the 60-second window closes and a notice says why.
-      expect(find.text('Yes, Override'), findsNothing);
-      expect(find.textContaining('near its limit'), findsOneWidget);
+      expect(find.text('Keep it on'), findsNothing);
+      expect(find.textContaining('stays on a little longer'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
       await device.close();
     },
   );
+
+  testWidgets('the warning sounds and there is no way to mute it', (
+    tester,
+  ) async {
+    final device = PopupDevice();
+    final alarm = FakeAlarm();
+    await mount(tester, device, alarm: alarm);
+    device.profiles.add([]);
+    device.readings.add({'A': reading(state: 'WARNING')});
+    device.gadget.add(status(triggered: true));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(alarm.playing, isTrue);
+    expect(find.textContaining('Mute'), findsNothing);
+    expect(inDialog(find.text('Close')), findsNothing);
+    expect(find.byIcon(Icons.volume_off), findsNothing);
+    await tester.pump(const Duration(seconds: 5));
+    expect(alarm.playing, isTrue); // still sounding
+    expect(inDialog(find.text('Turn off now')), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    await device.close();
+  });
 }

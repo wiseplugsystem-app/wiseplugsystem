@@ -74,6 +74,9 @@ export interface Appliance {
   lastOutlet: string | null;
   /** The outlet it is running on right now (an open outlet session), or null. */
   activeOn: { deviceId: string; outlet: string } | null;
+  /** A charger: its power follows the battery (fast when low, slow when nearly
+   * full), so its power is compared with floor_power_pct_charger. */
+  varyingPower?: boolean;
   profiles: Profile[];
 }
 
@@ -104,6 +107,29 @@ export interface Config {
   samplesPerLevel: number;
   /** recognition_config.samples_per_charger: a charger's samples (its power varies). */
   samplesPerCharger: number;
+  /** recognition_config.floor_power_pct_charger: a charger's power tolerance
+   * (its power drops as the battery fills: 120 W -> 50 W in one charge). */
+  floorPowerPctCharger: number;
+  /** recognition_config.floor_pf_charger: a charger's power-factor tolerance
+   * (its PF follows the load, i.e. the phone or laptop on it). */
+  floorPfCharger: number;
+  /** recognition_config.charger_max_power_w: a charger's power passes from 0
+   * up to this, whatever phone or laptop is on it. */
+  chargerMaxPowerW: number;
+  /** recognition_config.ask_when_several_match: several registered appliances
+   * pass -> the user picks (AMBIGUOUS), instead of the best score winning. */
+  askWhenSeveralMatch: boolean;
+  /** recognition_config.ask_chargers: a charger match is never confirmed by
+   * itself at Stage 2; it stays "Is this …?" until the user answers. */
+  askChargers: boolean;
+  /** recognition_config.charger_no_register: a reading that is a registered
+   * charger's (it passes, or its PF is within charger_near_pf) is never
+   * offered as a new appliance: the pop-up only confirms the charger or picks
+   * which charger / phone it is. Optional: undefined counts as on. */
+  chargerNoRegister?: boolean;
+  /** recognition_config.charger_near_pf: how far a reading's PF may be from a
+   * registered charger's and still be "that charger" instead of a new one. */
+  chargerNearPf?: number;
   /** recognition_config.rest_gap_s: a heating load may rest at 0 W this long and stay on. */
   restGapS: number;
   /** recognition_config.rest_gap_min_w: a run peaking at or above this is a heating load. */
@@ -155,6 +181,14 @@ export function configFromRow(r: Row): Config {
     samplesPerLevel: Number.isFinite(Number(r.samples_per_level)) ? Number(r.samples_per_level) : 1,
     samplesPerCharger: Number.isFinite(Number(r.samples_per_charger)) ? Number(r.samples_per_charger) : 3,
     restGapS: Number.isFinite(Number(r.rest_gap_s)) ? Number(r.rest_gap_s) : 180,
+    floorPowerPctCharger: Number.isFinite(Number(r.floor_power_pct_charger)) ? Number(r.floor_power_pct_charger) : 0.5,
+    floorPfCharger: Number.isFinite(Number(r.floor_pf_charger)) ? Number(r.floor_pf_charger) : 0.15,
+    chargerMaxPowerW: Number.isFinite(Number(r.charger_max_power_w)) ? Number(r.charger_max_power_w) : 140,
+    askWhenSeveralMatch: r.ask_when_several_match !== false,
+    askChargers: r.ask_chargers !== false,
+    chargerNoRegister: r.charger_no_register !== false,
+    chargerNearPf: r.charger_near_pf != null && Number.isFinite(Number(r.charger_near_pf))
+      ? Number(r.charger_near_pf) : 0.25,
     restGapMinW: Number.isFinite(Number(r.rest_gap_min_w)) ? Number(r.rest_gap_min_w) : 500,
   };
 }
@@ -266,7 +300,24 @@ export function evaluateProfile(x: Features, a: Appliance, p: Profile, stage: St
     const mean = p.mean[f];
     if (!has(value) || !has(mean)) continue;
     if (f === "settling_time_s" && (x.unstable || neverSettled(value) || neverSettled(mean))) continue;
-    const tol = tolerance(f, p, c);
+    // A charger's startup peak, steadiness (power tapers as the battery
+    // fills) and on/off cycling follow the phone on it, not the charger: so
+    // Stage 2 judges a charger exactly as Stage 1 did.
+    if (a.varyingPower && (f === "startup_peak_ratio" || f === "power_variation" || f === "cycle_period_s")) continue;
+    // A charger's power follows its battery and the phone on it, and its
+    // power factor follows that load: the wide charger floors apply.
+    // Its power also follows whichever phone or laptop is on it: anything
+    // from 0 to charger_max_power_w passes (mean +- tol covers that range).
+    const tol = f === "avg_power_w" && a.varyingPower
+      ? Math.max(
+        tolerance(f, p, c),
+        Math.abs(mean) * c.floorPowerPctCharger,
+        Math.abs(mean),
+        c.chargerMaxPowerW - mean,
+      )
+      : f === "avg_pf" && a.varyingPower
+      ? Math.max(tolerance(f, p, c), c.floorPfCharger)
+      : tolerance(f, p, c);
     const normalized = Math.abs(value - mean) / tol;
     checks.push({ feature: f, value, mean, tolerance: tol, normalized, pass: normalized <= 1 + EDGE });
   }
@@ -337,6 +388,8 @@ export interface Candidate {
   profileId: string;
   modeName: string;
   score: number;
+  /** A charger (phone or laptop): the app offers it as "which charger". */
+  charger?: boolean;
 }
 
 export interface Recognition {
@@ -353,6 +406,9 @@ export interface Recognition {
   /** The cutoff the plug must apply (seconds). */
   cutoffS: number;
   reason: string;
+  /** Charger readings: the pop-up only confirms or picks the charger, it
+   * never offers "Register new appliance" (recognizeWithChargers). */
+  chargerChoice?: boolean;
 }
 
 export interface RecognizeInput {
@@ -364,6 +420,9 @@ export interface RecognizeInput {
   appliances: Appliance[];
   /** Stage 1's provisional appliance for this run, if any. */
   previousApplianceId?: string | null;
+  /** The appliances Stage 1 asked the user to choose from (AMBIGUOUS), if any
+   * and not answered yet: Stage 2 keeps offering them. */
+  previousCandidateIds?: string[];
   config: Config;
 }
 
@@ -382,7 +441,8 @@ const candidate = (r: ProfileResult): Candidate => ({
  * runtime x learned_margin, at least min_learned_cutoff, never above its own.
  */
 export function confirmedCutoffS(a: Appliance, c: Config): number {
-  if (!a.isLearned || !has(a.baselineRuntimeS)) return a.ownCutoffS;
+  // Still learning: the default, or a heating cap if shorter (a kettle: 15 min).
+  if (!a.isLearned || !has(a.baselineRuntimeS)) return Math.min(c.defaultCutoffS, a.ownCutoffS);
   const learned = Math.max(a.baselineRuntimeS * c.learnedMargin, c.minLearnedCutoffS);
   return Math.round(Math.min(learned, a.ownCutoffS));
 }
@@ -420,6 +480,41 @@ export function recognize(input: RecognizeInput): Recognition {
     promptText, cutoffS: c.defaultCutoffS, reason, ...extra,
   });
 
+  // "Is this A or B?" with the same appliances in the same order every time
+  // (by name; the 3 best scores), "Last used here" pre-selected.
+  const askAmong = (fits: ProfileResult[], reason: string): Recognition => {
+    const contenders = [...fits].sort((a, b) => a.score - b.score).slice(0, 3)
+      .sort((a, b) => a.appliance.name.localeCompare(b.appliance.name));
+    const names = contenders.map((r) => r.appliance.name);
+    const question = names.length === 2
+      ? `Is this ${names[0]} or ${names[1]}?`
+      : `Is this ${names.slice(0, -1).join(", ")} or ${names[names.length - 1]}?`;
+    const best = [...contenders].sort((a, b) => a.score - b.score)[0];
+    return unconfirmed("AMBIGUOUS", question, reason, {
+      candidates: contenders.map(candidate),
+      suggested: candidate(contenders.find((r) => lastUsedHere(r.appliance, here)) ?? best),
+    });
+  };
+
+  // Consistency: Stage 1 asked "A or B?" and the user has not answered.
+  // Stage 2 measures more (e.g. how steady the power is) and may leave only
+  // one of them; it keeps asking about all of them instead of switching to
+  // "Is this A?" or confirming A by itself. (An appliance now running on
+  // another outlet is dropped: it cannot be in two sockets.)
+  const earlier = stage === 2 && c.askWhenSeveralMatch ? (input.previousCandidateIds ?? []) : [];
+  if (earlier.length >= 2) {
+    const kept = appliances
+      .filter((a) => earlier.includes(a.id) && !eligible.some((r) => r.appliance.id === a.id))
+      .filter((a) => a.activeOn == null || isAt(a, here))
+      .map((a) => closestProfile(x, a, stage, c))
+      .filter((r): r is ProfileResult => r != null);
+    const fits = [...eligible, ...kept];
+    if (fits.length >= 2) {
+      return askAmong(fits, `${fits.map((r) => r.appliance.name).join(" and ")} were offered at Stage 1; ` +
+        "still the user's choice.");
+    }
+  }
+
   if (!eligible.length) {
     if (busy.length) {
       // It passes as an appliance that is running elsewhere: another unit of that type.
@@ -444,9 +539,19 @@ export function recognize(input: RecognizeInput): Recognition {
   const clear = !second ||
     (second.score >= c.clearWinnerRatio * best.score && second.score - best.score > c.tieMargin);
 
+  // Several registered appliances fit (e.g. the same wattage): the user picks
+  // one of them, or registers a new appliance, instead of the best score.
+  if (clear && second && c.askWhenSeveralMatch) {
+    return askAmong(eligible,
+      `${eligible.slice(0, 3).map((r) => r.appliance.name).join(" and ")} all fit this reading ` +
+        `(best ${best.appliance.name}, score ${best.score.toFixed(2)}); the user chooses.`);
+  }
+
   if (!clear) {
     const contenders = eligible.filter((r) => r.score < c.clearWinnerRatio * best.score || r.score - best.score <= c.tieMargin)
-      .slice(0, 3);
+      .slice(0, 3)
+      // Same order every time (by name), as askAmong.
+      .sort((a, b) => a.appliance.name.localeCompare(b.appliance.name));
     // Last-known outlet: among the tied ones, pre-select the one last used here.
     // Readings decide the TYPE; they cannot tell two identical units apart.
     const tied = contenders.filter((r) => r.score - best.score <= c.tieMargin);
@@ -465,7 +570,10 @@ export function recognize(input: RecognizeInput): Recognition {
 
   // A clear winner. Stage 2 agreeing with Stage 1 confirms it; otherwise it
   // stays provisional (a Stage 2 that changes the answer corrects it).
-  const confirmed = stage === 2 && input.previousApplianceId === best.appliance.id;
+  // A charger is only ever confirmed by the user (ask_chargers): the meter
+  // sees the phone on it, so another charger can look the same.
+  const confirmed = stage === 2 && input.previousApplianceId === best.appliance.id &&
+    !(best.appliance.varyingPower && c.askChargers);
   return {
     status: confirmed ? "MATCHED_CONFIRMED" : "MATCHED_PROVISIONAL",
     match: best,
@@ -480,6 +588,99 @@ export function recognize(input: RecognizeInput): Recognition {
       (best.voltageCorrected ? "; voltage-corrected" : "") +
       (stage === 2 && !confirmed && input.previousApplianceId ? "; corrected at Stage 2" : ""),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Chargers: never "a new appliance" (charger_no_register)
+// ---------------------------------------------------------------------------
+
+/**
+ * recognize(), plus one rule for chargers. A wall meter sees the phone on a
+ * charger, not the charger, so the same charger gives a different reading
+ * with every phone. When the reading is a registered charger's, WisePlug does
+ * not ask to register a new appliance: the pop-up only confirms the charger
+ * ("Is this Purple charger?") or lets the user pick which charger / phone it
+ * is ("Which charger is this?"), with every registered charger that is free.
+ *
+ * A charger's reading is one that recognize() matched to a charger, offered a
+ * charger among its choices, or (UNKNOWN) whose PF is within charger_near_pf
+ * of a registered charger at up to charger_max_power_w. Everything else is
+ * exactly what recognize() decided. Unconfirmed runs keep the default cutoff.
+ */
+export function recognizeWithChargers(input: RecognizeInput): Recognition {
+  const r = recognize(input);
+  const { features: x, stage, here, appliances, config: c } = input;
+  if (c.chargerNoRegister === false) return r;
+  const chargerIds = new Set(appliances.filter((a) => a.varyingPower).map((a) => a.id));
+  if (!chargerIds.size) return r;
+  const mark = (k: Candidate): Candidate => chargerIds.has(k.applianceId) ? { ...k, charger: true } : k;
+  const nearPf = c.chargerNearPf ?? 0.25;
+
+  // Every registered charger that is ready and not running on another outlet.
+  const free = appliances.filter((a) =>
+    a.varyingPower && (a.activeOn == null || isAt(a, here)) && a.profiles.some((p) => isReady(p, c)));
+
+  // The charger(s) offered: one -> "Is this X?"; several -> "Which charger?".
+  const offer = (first: Appliance | null, why: string): Recognition | null => {
+    const results = free
+      .map((a) => closestProfile(x, a, stage, c))
+      .filter((k): k is ProfileResult => k != null);
+    if (!results.length) return null;
+    const top = (first && results.find((k) => k.appliance.id === first.id)) ??
+      [...results].sort((a, b) => a.score - b.score)[0];
+    if (results.length === 1) {
+      return {
+        status: "MATCHED_PROVISIONAL", match: top, candidates: [mark(candidate(top))], suggested: null,
+        registerAs: null, promptText: `Is this ${top.appliance.name}?`, cutoffS: c.defaultCutoffS,
+        reason: why, chargerChoice: true,
+      };
+    }
+    // Same order every time (by name), "Last used here" pre-selected.
+    const sorted = [...results].sort((a, b) => a.appliance.name.localeCompare(b.appliance.name));
+    const names = sorted.map((k) => k.appliance.name);
+    return {
+      status: "AMBIGUOUS", match: null, candidates: sorted.map((k) => mark(candidate(k))),
+      suggested: mark(candidate(sorted.find((k) => lastUsedHere(k.appliance, here)) ?? top)), registerAs: null,
+      promptText: `Which charger is this: ${names.slice(0, -1).join(", ")} or ${names[names.length - 1]}?`,
+      cutoffS: c.defaultCutoffS, reason: why, chargerChoice: true,
+    };
+  };
+
+  switch (r.status) {
+    case "MATCHED_PROVISIONAL":
+      if (r.match && chargerIds.has(r.match.appliance.id)) {
+        return offer(r.match.appliance, `${r.reason}; a charger: confirm it or pick the charger, no new appliance.`) ??
+          { ...r, candidates: r.candidates.map(mark), chargerChoice: true };
+      }
+      return r;
+    case "AMBIGUOUS":
+      if (r.candidates.some((k) => chargerIds.has(k.applianceId))) {
+        return { ...r, candidates: r.candidates.map(mark), suggested: r.suggested && mark(r.suggested),
+          chargerChoice: true };
+      }
+      return r;
+    case "UNKNOWN": {
+      // Close to a registered charger (its PF a little outside
+      // floor_pf_charger, e.g. a nearly full phone): that charger, not new.
+      const pf = x.avg_pf, w = x.avg_power_w;
+      const near = has(w) && w <= c.chargerMaxPowerW && has(pf)
+        ? free.filter((a) => a.profiles.some((p) => {
+          const m = p.mean.avg_pf;
+          return isReady(p, c) && has(m) && Math.abs(pf - m) <= nearPf;
+        }))
+        : [];
+      if (!near.length) return r;
+      const closest = near
+        .map((a) => closestProfile(x, a, stage, c))
+        .filter((k): k is ProfileResult => k != null)
+        .sort((a, b) => a.score - b.score)[0];
+      return offer(closest?.appliance ?? near[0],
+        `Close to ${near.map((a) => a.name).join(" and ")} (charger PF within ${nearPf}); ` +
+          "a charger: confirm it or pick the charger, no new appliance.") ?? r;
+    }
+    default:
+      return r;
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -755,3 +755,26 @@ Now, while a run is not confirmed, the plug asks Supabase again **once a
 minute** (and right after a restart it measures again and asks within ~20 s).
 Within about a minute the plug uses the same safe time the app shows. Once
 the run is confirmed it stops asking. (`RECHECK_MS` in the firmware.)
+
+## Chargers are recognised at any battery level (in plain words)
+
+A laptop charger draws a lot when the battery is low and little when it is
+nearly full (one real charge: 120 W at the start, 48 W near the end). It was
+compared like a fan (±10 %), so most of a charge looked like "something new",
+and the same charger ended up registered several times. A charger is now
+compared with **±50 %** of its registered power
+(`recognition_config.floor_power_pct_charger` = 0.50); its power factor and
+the other measurements still tell it apart from a fan. Fans and everything
+else keep ±10 %.
+
+## Weak or unstable Wi-Fi (in plain words)
+
+- The plug keeps trying your Wi-Fi for **3 minutes** after it drops (was 1)
+  before it opens "wisewp", so a weak spot that drops now and then does not
+  send it into setup mode.
+- Wi-Fi power saving is off (it made weak connections drop), the plug
+  transmits at full power and joins the strongest access point with your
+  Wi-Fi's name (mesh or repeater).
+- Each request may take up to 10 s (Firebase) / 15 s (Supabase) before it
+  counts as failed (was 5 s / 8 s), so a slow connection still gets through.
+- Safety never depends on any of this: timing and cutoff run on the plug.

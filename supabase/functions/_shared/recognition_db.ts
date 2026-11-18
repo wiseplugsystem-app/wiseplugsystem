@@ -9,6 +9,7 @@ import {
   configFromRow,
   emaUpdate,
   FEATURES,
+  isCharger,
   type Features,
   parseFeatures,
   profileColumns,
@@ -70,7 +71,7 @@ export async function ownerOf(deviceId: string): Promise<string | null> {
 export async function loadAppliances(ownerUid: string, exceptEventId?: string): Promise<Appliance[]> {
   const [instances, profiles, open] = await Promise.all([
     db.from("appliance_instances")
-      .select("id, name, type_id, max_runtime_mins, is_learned, baseline_runtime_s, last_device_id, last_outlet, appliance_types(name)")
+      .select("id, name, type_id, max_runtime_mins, is_learned, baseline_runtime_s, last_device_id, last_outlet, appliance_types(name, icon_key)")
       .eq("owner_uid", ownerUid),
     db.from("appliance_profiles").select("*, appliance_instances!inner(owner_uid)")
       .eq("appliance_instances.owner_uid", ownerUid),
@@ -102,6 +103,7 @@ export function applianceFromRow(
     lastOutlet: (r.last_outlet as string | null) ?? null,
     activeOn: activeOn.get(String(r.id)) ?? null,
     profiles: profileRows.filter((p) => p.appliance_id === r.id).map(profileFromRow),
+    varyingPower: isCharger((r.appliance_types as Row | null)?.icon_key),
   };
 }
 

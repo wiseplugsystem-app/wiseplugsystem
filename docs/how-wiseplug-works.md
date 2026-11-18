@@ -148,9 +148,9 @@ Until you confirm, the run keeps the **30-minute** default.
 | Situation | Safe time |
 |---|---|
 | Not recognised yet / not confirmed | **30 minutes** |
-| Confirmed appliance | Its type's safe time (normally 4 hours) |
+| Confirmed appliance, still learning | **30 minutes** until its 7 uses are learned |
 | Heating appliances | Shorter: kettle 15, hair dryer 15, microwave 30, flat iron / air fryer / heater 60, rice cooker 90 minutes |
-| After 7 confirmed uses (normal runs after registration; the registration samples do not count) | WisePlug learns how long you usually use it and allows **1.2 ×** that (20 % more), never more than the safe time above |
+| After 7 confirmed uses (normal runs after registration; the registration samples do not count) | WisePlug learns how long you usually use it and allows **1.2 ×** that (20 % more), at least 5 minutes. No upper limit, except a heating appliance's safe time above |
 
 Each time you answer "Yes, it is the fan", that run also refines the
 appliance's fingerprint, so recognition gets better with use.

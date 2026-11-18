@@ -35,7 +35,7 @@ class _WifiConfigScreenState extends State<WifiConfigScreen> {
   final _ssid = TextEditingController(), _password = TextEditingController();
   final _subscriptions = <StreamSubscription<dynamic>>[];
   GadgetStatus? _status;
-  bool _busy = false, _obscure = true, _prefilled = false;
+  bool _busy = false, _obscure = true;
   bool? _nearbyChoice;
 
   bool get _online => _status?.isOnline(DateTime.now()) == true;
@@ -48,23 +48,18 @@ class _WifiConfigScreenState extends State<WifiConfigScreen> {
   @override
   void initState() {
     super.initState();
-    _subscriptions
-      ..add(
-        widget.service.streamWifiConfig().listen((value) {
-          if (!mounted || _prefilled) return;
-          _prefilled = true;
-          if (_ssid.text.isEmpty) _ssid.text = value['ssid']?.toString() ?? '';
-        }, onError: (Object _) {}),
-      )
-      ..add(
-        widget.service.streamGadgetStatus().listen((value) {
-          if (!mounted) return;
-          setState(() {
-            _status = value;
-            _nearbyChoice ??= !_online;
-          });
-        }, onError: (Object _) {}),
-      );
+    // The name and password start empty: changing Wi-Fi means typing the new
+    // network. (devices/.../wifi_config still holds the last name sent, for
+    // the ESP32; it is never copied into this form.)
+    _subscriptions.add(
+      widget.service.streamGadgetStatus().listen((value) {
+        if (!mounted) return;
+        setState(() {
+          _status = value;
+          _nearbyChoice ??= !_online;
+        });
+      }, onError: (Object _) {}),
+    );
   }
 
   @override
@@ -90,7 +85,10 @@ class _WifiConfigScreenState extends State<WifiConfigScreen> {
           updates: widget.service.provisionWifi(ssid, _password.text),
         ),
       );
-      if (result?.stage == WifiProvisionStage.connected) _password.clear();
+      if (result?.stage == WifiProvisionStage.connected) {
+        _ssid.clear();
+        _password.clear();
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }

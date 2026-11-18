@@ -159,6 +159,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
   final _updates = ValueNotifier<int>(0);
   final _subscriptions = <StreamSubscription<dynamic>>[];
   Map<String, OutletReading> _readings = {};
+  final Map<String, int> _loadSamples = {};
   bool _readError = false, _loading = true;
   String _version = 'Loading…';
   int _tab = 0;
@@ -303,6 +304,27 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _checkPopups());
   }
 
+  void _observeLoadSamples(Map<String, OutletReading> readings) {
+    final now = DateTime.now();
+    for (final outlet in const ['A', 'B']) {
+      final reading = readings[outlet];
+      final loadDetected =
+          reading != null &&
+          reading.isFresh(now) &&
+          reading.sensorValid == true &&
+          reading.currentState != 'DISABLED' &&
+          !reading.isLockedOut &&
+          ((reading.activePower ?? 0) >= 1.0 || (reading.current ?? 0) >= 0.02);
+      _loadSamples[outlet] = loadDetected ? (_loadSamples[outlet] ?? 0) + 1 : 0;
+    }
+  }
+
+  bool _hasConnectedLoad(OutletReading reading, DateTime now) =>
+      reading.hasConnectedAppliance(now) ||
+      ((_loadSamples[reading.outlet] ?? 0) >= 2 &&
+          reading.currentState != 'DISABLED' &&
+          !reading.isLockedOut);
+
   @override
   void initState() {
     super.initState();
@@ -322,6 +344,8 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
               }
             }
           }
+          _observeLoadSamples(value);
+          _trackMeterSilence(value);
           _readings = value;
           _readError = false;
           _loading = false;
@@ -588,8 +612,10 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
   /// the question-mark "unknown" while WisePlug does not know it, null when
   /// nothing runs.
   ApplianceKind? _outletKind(OutletReading? reading, DateTime now) {
-    if (_readError || reading?.hasConnectedAppliance(now) != true) return null;
-    final session = _sessions[reading!.outlet];
+    if (_readError || reading == null || !_hasConnectedLoad(reading, now)) {
+      return null;
+    }
+    final session = _sessions[reading.outlet];
     final matched =
         session != null &&
         (session.status == RecognitionStatus.provisional ||
@@ -608,15 +634,18 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
   /// The plug publishes the name Supabase recognised ("Fan 1"), or "Unknown
   /// appliance" / "Recognizing appliance" until then.
   String? _applianceName(OutletReading? reading, DateTime now) {
-    if (_readError || reading?.hasConnectedAppliance(now) != true) return null;
-    final session = _sessions[reading!.outlet];
+    if (_readError || reading == null || !_hasConnectedLoad(reading, now)) {
+      return null;
+    }
+    final session = _sessions[reading.outlet];
     final matched =
         session != null &&
         (session.status == RecognitionStatus.provisional ||
             session.status == RecognitionStatus.confirmed);
     if (matched) return session.applianceName ?? reading.appliance;
-    return _recognizing(reading)
-        ? 'Finding out what it is…'
+    if (_recognizing(reading)) return 'Finding out what it is…';
+    return reading.appliance == 'None'
+        ? 'Unknown appliance'
         : reading.appliance;
   }
 
@@ -752,6 +781,31 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
 
   /// What an outlet card says when nothing is running: one headline, one
   /// plain sentence saying what to do, an icon and a colour.
+  /// When each outlet's meter stopped answering (fresh updates with
+  /// sensor_valid false, back to back); gone once it answers again.
+  final _meterSilentSince = <String, DateTime>{};
+
+  /// How long the meter must stay silent before the card says
+  /// "Not measuring": a few updates, so one missed answer does not flicker.
+  static const _meterSilentAfter = Duration(seconds: 10);
+
+  void _trackMeterSilence(Map<String, OutletReading> readings) {
+    final now = DateTime.now();
+    for (final key in ['A', 'B']) {
+      final r = readings[key];
+      if (r != null && r.isFresh(now) && r.sensorValid == false) {
+        _meterSilentSince.putIfAbsent(key, () => now);
+      } else {
+        _meterSilentSince.remove(key);
+      }
+    }
+  }
+
+  bool _meterSilent(String outlet, DateTime now) {
+    final since = _meterSilentSince[outlet];
+    return since != null && now.difference(since) >= _meterSilentAfter;
+  }
+
   ({String headline, String hint, IconData icon, Color color}) _cardState(
     OutletReading? reading,
     DateTime now,
@@ -795,7 +849,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
         color: Colors.red,
       );
     }
-    if (reading.sensorValid == false) {
+    if (_meterSilent(reading.outlet, now)) {
       return (
         headline: 'Not measuring',
         hint:
@@ -832,11 +886,19 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
   Widget _summary(String key, DateTime now) {
     final reading = _readings[key];
     final connected =
-        !_readError && reading?.hasConnectedAppliance(now) == true;
+        !_readError && reading != null && _hasConnectedLoad(reading, now);
     final idle = _cardState(reading, now);
     // A known appliance is "Active" (green) even while the plug is still
     // measuring it; amber is for "still finding out" and "near the limit".
-    final running = connected ? _status(reading, now) : null;
+    final liveDrawOnly =
+        connected &&
+        _loadSamples[key]! >= 2 &&
+        !reading.hasConnectedAppliance(now);
+    final running = connected
+        ? liveDrawOnly
+              ? 'Active'
+              : _status(reading, now)
+        : null;
     final color = running == null
         ? idle.color
         : _statusColor(
@@ -866,7 +928,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
           ),
           const SizedBox(height: 14),
           if (connected)
-            ..._running(key, reading!, now, color)
+            ..._running(key, reading, now, color)
           else ...[
             Row(
               children: [
@@ -946,7 +1008,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
             ),
           ),
           Text(
-            measurement(reading.activePower, 'W'),
+            measurement(reading.livePower, 'W'),
             style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
           ),
         ],
@@ -994,9 +1056,11 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
       if (seconds != null) ...[
         const SizedBox(height: 10),
         Text(
+          // The safe time ends at safetyDeadline: the safety pop-up opens
+          // then, and the plug turns it off 60 s later if nobody answers.
           seconds == 0
-              ? 'Turning off now'
-              : 'Turns off in ${_duration(seconds)}',
+              ? 'Safe time is up'
+              : 'Safety pop-up in ${_duration(seconds)}',
           style: TextStyle(
             fontWeight: FontWeight.w700,
             color: context.readable(color),
@@ -1004,9 +1068,35 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
         ),
         const SizedBox(height: 6),
         LinearProgressIndicator(
-          value: limit != null ? (1 - seconds / limit).clamp(0.0, 1.0) : 0,
+          key: const ValueKey('safe-time-bar'),
+          // From the run's start to the plug's own deadline, so the bar is
+          // full exactly when the pop-up opens. The session's cutoff only
+          // if the plug sends no start time.
+          value:
+              reading.safeTimeProgress(now) ??
+              (limit != null ? (1 - seconds / limit).clamp(0.0, 1.0) : 0),
           color: color,
           backgroundColor: Colors.grey.withValues(alpha: .15),
+        ),
+      ] else if (reading.isWarning && reading.isSafeTimeAlert) ...[
+        // The safe time is up (the plug no longer sends a deadline): the bar
+        // stays full and says what happens next, with the pop-up's seconds.
+        const SizedBox(height: 10),
+        Text(
+          reading.secondsRemaining(now) > 0
+              ? 'Safe time is up: turns off in '
+                    '${reading.secondsRemaining(now)} s unless you answer'
+              : 'Turning off now',
+          style: TextStyle(
+            fontWeight: FontWeight.w700,
+            color: context.readable(Colors.red),
+          ),
+        ),
+        const SizedBox(height: 6),
+        const LinearProgressIndicator(
+          key: ValueKey('safe-time-bar'),
+          value: 1,
+          color: Colors.red,
         ),
       ],
       // Still being registered: say so, instead of "Confirmed".
@@ -1171,6 +1261,9 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
   String _whereText(RegisteredAppliance a) => a.lastOutlet == null
       ? 'Not plugged in'
       : 'Not plugged in · last used on Outlet ${outletLetter(a.lastOutlet!)}';
+
+  static bool _isCharger(RegisteredAppliance a) =>
+      a.kind.key == 'laptop_charger' || a.kind.key == 'phone_charger';
 
   String _usageText(RegisteredAppliance a) {
     if (!a.isReady(_recognitionSettings.registrationSamples)) {
@@ -1419,7 +1512,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                     // typical use x 1.2 (recognition_config.learned_margin).
                     _Pair(
                       'Safe time',
-                      _duration(a.cutoffMinutes * 60),
+                      _duration(a.safeTimeSeconds(_recognitionSettings)),
                       color: _green,
                     ),
                     // The 7-use learning.
@@ -1440,6 +1533,13 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                             ? 'Not measured yet'
                             : m.meanPowerW == null
                             ? 'Not measured yet'
+                            // A charger's power follows the battery and the
+                            // phone or laptop on it: the registered value is
+                            // what it is recognised by, not what it uses now
+                            // (the outlet card shows the live power).
+                            : _isCharger(a)
+                            ? '${m.meanPowerW!.round()} W when registered; '
+                                  'changes with the battery'
                             : '${m.meanPowerW!.round()} W',
                       ),
                   ],

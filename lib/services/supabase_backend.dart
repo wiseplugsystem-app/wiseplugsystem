@@ -199,7 +199,7 @@ class SupabaseBackend {
     required String name,
     String applianceType = 'Other',
     String? profileId,
-    int maxRuntimeMins = 240,
+    int maxRuntimeMins = 10080,
   }) async {
     return SignatureMatch.fromJson(
       await _invoke('match-signature', {

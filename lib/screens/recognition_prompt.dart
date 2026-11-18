@@ -92,6 +92,9 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
   Widget build(BuildContext context) {
     final outlet = 'Outlet ${s.outletName}';
     final title = switch (s.status) {
+      // A charger: "which charger / phone is it", never a new appliance.
+      RecognitionStatus.ambiguous when s.chargerChoice =>
+        'Which charger is on $outlet?',
       RecognitionStatus.sameTypeInUse =>
         'Another ${s.registerAs?.typeName ?? 'appliance'}?',
       RecognitionStatus.ambiguous => 'Which appliance is on $outlet?',
@@ -205,15 +208,18 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
     final more = [
       for (final a in widget.unfinished)
         if (!shown.contains(a.id))
-          OutlinedButton(
-            onPressed: () => Navigator.pop(context, ContinueChoice(a)),
-            child: Text(
-              'It is ${a.name}: continue registering '
-              '(${a.samplesDone(widget.registrationSamples)} of '
-              '${a.samplesNeeded(widget.registrationSamples)} done)',
-              textAlign: TextAlign.center,
+          // A charger's reading: only other chargers may be offered.
+          if (!s.chargerChoice ||
+              const {'phone_charger', 'laptop_charger'}.contains(a.kind.key))
+            OutlinedButton(
+              onPressed: () => Navigator.pop(context, ContinueChoice(a)),
+              child: Text(
+                'It is ${a.name}: continue registering '
+                '(${a.samplesDone(widget.registrationSamples)} of '
+                '${a.samplesNeeded(widget.registrationSamples)} done)',
+                textAlign: TextAlign.center,
+              ),
             ),
-          ),
     ];
     if (more.isEmpty) return actions;
     return [
@@ -236,6 +242,44 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
       onPressed: () => pop(null),
       child: const Text('Not now'),
     );
+    // A charger's reading: confirm it, or pick which charger / phone it is.
+    // No "Register new appliance" (charger_no_register).
+    if (s.chargerChoice) {
+      switch (s.status) {
+        case RecognitionStatus.ambiguous:
+          final chosen = s.candidates
+              .where((c) => c.applianceId == _selected)
+              .firstOrNull;
+          return [
+            FilledButton(
+              onPressed: chosen == null
+                  ? null
+                  : () => pop(ConfirmChoice(chosen.applianceId, chosen.name)),
+              child: Text(
+                chosen == null ? 'Confirm' : 'Yes, it is ${chosen.name}',
+              ),
+            ),
+            TextButton(
+              onPressed: () => pop(null),
+              child: const Text('Ask me later'),
+            ),
+          ];
+        case RecognitionStatus.provisional:
+          return [
+            FilledButton(
+              onPressed: s.applianceId == null
+                  ? null
+                  : () => pop(
+                      ConfirmChoice(s.applianceId!, s.applianceName ?? ''),
+                    ),
+              child: Text('Yes, it is ${s.applianceName}'),
+            ),
+            notNow,
+          ];
+        default:
+          break; // the usual actions below
+      }
+    }
     switch (s.status) {
       case RecognitionStatus.sameTypeInUse:
         final r = s.registerAs;

@@ -99,6 +99,78 @@ void main() {
     expect(profiles.first.hasSafetyLimit, false);
   });
 
+  testWidgets('after a safety reset the outlet stays off until the user '
+      'confirms Turn on again', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(420, 2400));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final device = TestDevice();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Esp32Dashboard(
+          service: device,
+          darkMode: false,
+          onDarkModeChanged: (_) {},
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 500)); // it subscribes first
+    device.readings.add({
+      'A': OutletReading.fromMap('A', {
+        'currentState': 'DISABLED',
+        'status': 'Idle',
+        'sessionID': 'boot',
+        'safetyResetHold': true,
+        'sensor_valid': true,
+        'last_updated_ms': DateTime.now().millisecondsSinceEpoch,
+      }),
+    });
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.text('Reset done'), findsOneWidget);
+    expect(find.textContaining('Off · reset done'), findsOneWidget);
+    final again = find.text('Turn on again');
+    await tester.ensureVisible(again);
+    await tester.pump(const Duration(milliseconds: 500));
+    // Keep it off: nothing is sent.
+    await tester.tap(again);
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(
+      find.textContaining('Only turn it on if you are there'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Keep it off'));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(device.commands, isEmpty);
+    // The switch asks too, instead of turning on at once.
+    await tester.tap(find.byType(Switch).first);
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(device.commands, isEmpty);
+    expect(
+      find.textContaining('Only turn it on if you are there'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Turn on'));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(device.commands, ['A:TURN_ON']);
+    // An outlet switched off normally turns on without asking.
+    device.commands.clear();
+    device.readings.add({
+      'A': OutletReading.fromMap('A', {
+        'currentState': 'DISABLED',
+        'status': 'Idle',
+        'sessionID': 'boot',
+        'sensor_valid': true,
+        'last_updated_ms': DateTime.now().millisecondsSinceEpoch,
+      }),
+    });
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.text('Turn on again'), findsNothing);
+    await tester.tap(find.byType(Switch).first);
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(device.commands, ['A:TURN_ON']);
+    await tester.pumpWidget(const SizedBox());
+    await device.close();
+  });
+
   testWidgets(
     'live dashboard updates, filters and profile details use device data',
     (tester) async {
@@ -167,8 +239,8 @@ void main() {
       device.readings.add(readings(321));
       device.gadget.add(online(321));
       await tester.pumpAndSettle();
-      expect(find.text('321 W'), findsOneWidget);
-      expect(find.text('1 / 2'), findsOneWidget);
+      // The running outlet's card shows its watts (the total boxes are gone).
+      expect(find.text('1 / 2'), findsNothing);
       expect(tester.takeException(), isNull);
       if (const bool.fromEnvironment('CAPTURE_GUI')) {
         await tester.runAsync(() async {
@@ -187,11 +259,52 @@ void main() {
       device.readings.add(readings(654));
       device.gadget.add(online(654));
       await tester.pumpAndSettle();
-      expect(find.text('654 W'), findsOneWidget);
       // The name is the one the plug publishes (recognised by Supabase).
       expect(find.text('Live appliance'), findsWidgets);
       expect(find.text('p1'), findsNothing); // the internal ID stays hidden
       expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+      await device.close();
+    },
+  );
+
+  testWidgets(
+    'outlet card debounces a valid live draw even while firmware state is idle',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(420, 1200));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final device = TestDevice();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Esp32Dashboard(
+            service: device,
+            darkMode: false,
+            onDarkModeChanged: (_) {},
+          ),
+        ),
+      );
+      await tester.pump();
+      device.profiles.add([]);
+      Map<String, OutletReading> outletB() => {
+        'B': OutletReading.fromMap('B', {
+          'currentState': 'IDLE',
+          'status': 'Idle',
+          'sessionID': 'boot',
+          'appliance': 'None',
+          'sensor_valid': true,
+          'power_W': 18.4,
+          'current_A': 0.08,
+          'last_updated_ms': DateTime.now().millisecondsSinceEpoch,
+        }),
+      };
+      device.readings.add(outletB());
+      await tester.pumpAndSettle();
+      expect(find.text('18.4 W'), findsNothing); // one sample is not enough
+      device.readings.add(outletB());
+      await tester.pumpAndSettle();
+      expect(find.text('In use'), findsOneWidget);
+      expect(find.text('18.4 W'), findsOneWidget);
+      expect(find.text('Not measuring'), findsNothing);
       await tester.pumpWidget(const SizedBox());
       await device.close();
     },
@@ -224,12 +337,8 @@ void main() {
       device.profiles.add([]);
       await tester.pumpAndSettle();
       expect(find.textContaining('Old fan'), findsNothing);
-      await tester.scrollUntilVisible(
-        find.text('— / 2'),
-        200,
-        scrollable: find.byType(Scrollable).first,
-      );
-      expect(find.text('— / 2'), findsOneWidget);
+      // Old readings: the card says so instead of showing stale numbers.
+      expect(find.text('No connection'), findsWidgets);
       expect(find.text('847 W'), findsNothing);
       // The switches sit just below the Power Control heading.
       await tester.scrollUntilVisible(
@@ -269,7 +378,13 @@ void main() {
       expect(device.commands, ['A:TURN_OFF', 'A:TURN_ON']);
       await tester.tap(find.text('Settings').last);
       await tester.pumpAndSettle();
-      expect(find.text('gadget-1 · Offline'), findsOneWidget);
+      expect(
+        find.text('Offline · check that it is plugged into the wall'),
+        findsOneWidget,
+      );
+      // Restart WisePlug is there, but not while the plug is offline.
+      expect(find.text('Restart WisePlug'), findsOneWidget);
+      expect(find.text('Not available: WisePlug is offline'), findsOneWidget);
       // Alert settings are gone: device and safety alerts are always on.
       expect(find.text('Alert Types'), findsNothing);
       expect(find.text('Device Alerts'), findsNothing);
@@ -297,55 +412,6 @@ void main() {
       findsOneWidget,
     );
     expect(find.byType(Esp32LiveView), findsNothing);
-    await device.close();
-  });
-
-  testWidgets('outlets active counts running appliances, not relays', (
-    tester,
-  ) async {
-    await tester.binding.setSurfaceSize(const Size(420, 920));
-    addTearDown(() => tester.binding.setSurfaceSize(null));
-    final device = TestDevice();
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Esp32Dashboard(
-          service: device,
-          darkMode: false,
-          onDarkModeChanged: (_) {},
-        ),
-      ),
-    );
-    await tester.pump();
-    final now = DateTime.now().millisecondsSinceEpoch;
-    // Both relays on, meter A dead, outlet B idle: nothing is running.
-    device.profiles.add([]);
-    device.readings.add({
-      'A': OutletReading.fromMap('A', {
-        'currentState': 'IDLE',
-        'status': 'Idle',
-        'sensor_valid': false,
-        'last_updated_ms': now,
-      }),
-      'B': OutletReading.fromMap('B', {
-        'currentState': 'IDLE',
-        'status': 'Idle',
-        'sensor_valid': true,
-        'power_W': 0,
-        'last_updated_ms': now,
-      }),
-    });
-    device.gadget.add(
-      GadgetStatus(
-        outletA: true,
-        outletB: true,
-        connectionStatus: 'Online',
-        lastSeen: DateTime.now(),
-      ),
-    );
-    await tester.pumpAndSettle();
-    expect(find.text('0 / 2'), findsOneWidget);
-    expect(find.text('2 / 2'), findsNothing);
-    await tester.pumpWidget(const SizedBox());
     await device.close();
   });
 
@@ -380,7 +446,7 @@ void main() {
     });
     await tester.pumpAndSettle();
     await tester.scrollUntilVisible(
-      find.text('Outlet B · On · monitoring enabled'),
+      find.text('Outlet B · On'),
       200,
       scrollable: find.byType(Scrollable).first,
     );
@@ -412,6 +478,7 @@ void main() {
       'B': OutletReading.fromMap('B', {
         'currentState': 'LOCKED_OUT',
         'status': 'LOCKED_OUT',
+        'lockedOut': true,
         'sessionID': 'boot',
         'last_updated_ms': DateTime.now().millisecondsSinceEpoch,
       }),
@@ -438,7 +505,10 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(device.commands, ['B:RESET_SAFETY']);
-    expect(find.text('Outlet B is back on.'), findsOneWidget);
+    expect(
+      find.textContaining('Outlet B is reset and stays off'),
+      findsOneWidget,
+    );
     await tester.pumpWidget(const SizedBox());
     await device.close();
   });

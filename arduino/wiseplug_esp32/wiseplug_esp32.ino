@@ -878,7 +878,7 @@ int firebaseRequest(const char* method, const String& path, const String& body =
   bool get = strcmp(method, "GET") == 0;
   if (http.begin(tls, "https://" + firebaseHost + "/" + path + ".json?auth=" + firebaseAuth() +
                           (get ? "" : "&print=silent"))) {
-    http.setTimeout(5000);
+    http.setTimeout(10000);  // slow or weak connections: 10 s (was 5)
     if (get) code = http.GET();
     else { http.addHeader("Content-Type", "application/json"); code = silentOk(http.sendRequest(method, body)); }
     if (response && code == HTTP_CODE_OK) *response = http.getString();
@@ -902,7 +902,7 @@ int firebasePatch(const JsonDocument& root) {
   }
   int code = -1;
   if (http.begin(tls, "https://" + firebaseHost + "/.json?auth=" + firebaseAuth() + "&print=silent")) {
-    http.setTimeout(5000);
+    http.setTimeout(10000);  // slow or weak connections: 10 s (was 5)
     http.addHeader("Content-Type", "application/json");
     code = silentOk(http.sendRequest("PATCH", reinterpret_cast<uint8_t*>(patchBuffer), n));
     http.end();
@@ -945,6 +945,7 @@ void addOutlet(JsonDocument& root, int i, const Snapshot& s) {
   bool sensorOK = s.sensor.valid && s.capturedMono - s.sensor.captured < SENSOR_TIMEOUT_MS;
   root[b + "status"] = st == SocketState::LockedOut ? "LOCKED_OUT" : (running ? "Active" : "Idle");
   root[b + "currentState"] = stateName(st); root[b + "sessionID"] = sessionID;
+  root[b + "lockedOut"] = st == SocketState::LockedOut;
   root[b + "revision"] = s.safety.revision; root[b + "runtime_warning"] = s.safety.runtimeWarning;
   root[b + "overridden"] = running && s.safety.overridden;
   // Off after a safety reset, waiting for the user to turn it on again.
@@ -1028,7 +1029,7 @@ int supabasePost(const char* function, const String& body, String* response = nu
   http.end(); tls.stop();  // free Firebase's connection for this one
   supaLastBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
   if (supaHttp.begin(supaTls, String(SUPABASE_FUNCTIONS_URL) + "/" + function)) {
-    supaHttp.setTimeout(8000);
+    supaHttp.setTimeout(15000);  // slow or weak connections: 15 s (was 8)
     supaHttp.addHeader("Content-Type", "application/json");
     supaHttp.addHeader("x-device-key", SUPABASE_DEVICE_KEY);
     code = supaHttp.POST(body);
@@ -1198,7 +1199,10 @@ constexpr const char* SETUP_AP_SSID = "wisewp";
 // retry only while someone is using the setup page (a request in the last
 // SETUP_IDLE_MS): phones that join the open "wisewp" by themselves no longer
 // keep the plug offline.
-constexpr uint64_t CONNECT_TIMEOUT_MS = 20000, OFFLINE_TO_SETUP_MS = 60000, SETUP_RETRY_MS = 30000;
+// Weak or unstable Wi-Fi: the plug keeps reconnecting to the saved network
+// for OFFLINE_TO_SETUP_MS (3 min; was 1 min) before it opens "wisewp", so a
+// short drop in a low-signal spot never sends it into setup mode.
+constexpr uint64_t CONNECT_TIMEOUT_MS = 20000, OFFLINE_TO_SETUP_MS = 180000, SETUP_RETRY_MS = 30000;
 constexpr uint64_t SETUP_IDLE_MS = 60000;
 
 enum class NetMode { Connecting, Online, Setup };
@@ -1247,6 +1251,13 @@ void scanNetworks() {
 void startConnect(const String& ssid, const String& pass, bool trial, bool fromSetup) {
   if (netMode == NetMode::Setup) { setupServer.stop(); setupDns.stop(); WiFi.softAPdisconnect(true); }
   WiFi.mode(WIFI_STA); WiFi.disconnect(); WiFi.setAutoReconnect(true);
+  // Weak signal: no Wi-Fi power saving (it misses the router's beacons and
+  // drops), full transmit power, and join the strongest access point of that
+  // name (a scan of all channels, e.g. a mesh or a router with a repeater).
+  WiFi.setSleep(false);
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);
+  WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+  WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
   trialSsid = trial ? ssid : ""; trialPass = trial ? pass : ""; trialFromSetup = fromSetup;
   if (ssid.length()) WiFi.begin(ssid.c_str(), pass.c_str());
   else WiFi.begin();  // whatever the ESP-IDF has stored

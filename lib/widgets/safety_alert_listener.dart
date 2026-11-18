@@ -48,10 +48,17 @@ class _SafetyAlertListenerState extends State<SafetyAlertListener> {
   DialogRoute<void>? _route;
   bool _dismissed = false;
   bool _warningSounding = false; // the warning pattern is playing
+  bool _wasCleared = false; // the plug's safety flag went off since the alert
 
   /// The outlets whose safe time is up: warning, or turned off by it.
+  // isCurrentForAlert: fresh, or a lock-out / running countdown that the
+  // plug has not updated within 30 s (or its clock is not synced): the
+  // pop-up must not disappear then.
   Iterable<OutletReading> get _safeTime => _readings.values.where(
-    (r) => (r.isWarning || r.isLockedOut) && r.isSafeTimeAlert,
+    (r) =>
+        r.isCurrentForAlert(DateTime.now()) &&
+        (r.isWarning || r.isLockedOut) &&
+        r.isSafeTimeAlert,
   );
 
   /// Time left until the soonest cutoff among the outlets in warning.
@@ -83,10 +90,13 @@ class _SafetyAlertListenerState extends State<SafetyAlertListener> {
 
   bool get _alertActive {
     final status = _status;
+    final now = DateTime.now();
+    final readings = _safeTime;
+    final lockedOut = readings.any((r) => r.isLockedOut);
+    final warning = readings.any((r) => r.isWarning);
     return status != null &&
-        status.isOnline(DateTime.now()) &&
-        status.needsSafetyAlert &&
-        _safeTime.isNotEmpty;
+        status.isOnline(now) &&
+        (lockedOut || (status.needsSafetyAlert && warning));
   }
 
   @override
@@ -95,6 +105,14 @@ class _SafetyAlertListenerState extends State<SafetyAlertListener> {
     _subscriptions
       ..add(
         widget.service.streamGadgetStatus().listen((status) {
+          // A new event: the plug cleared its safety flag, then raised it
+          // again. A pop-up closed for the previous event opens again.
+          final before = _status?.needsSafetyAlert ?? false;
+          if (status.needsSafetyAlert && !before && _wasCleared) {
+            _dismissed = false;
+          }
+          if (!status.needsSafetyAlert) _wasCleared = true;
+          if (status.needsSafetyAlert && !before) _wasCleared = false;
           _status = status;
           _evaluate();
         }, onError: (Object _) {}),
@@ -112,7 +130,7 @@ class _SafetyAlertListenerState extends State<SafetyAlertListener> {
     if (!mounted) return;
     _updates.value++;
     if (!_alertActive) {
-      _dismissed = false;
+      if (!_readings.values.any((r) => r.isLockedOut)) _dismissed = false;
       _close();
       return;
     }
@@ -289,7 +307,12 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
       final triggered = widget
           .readings()
           .values
-          .where((r) => (r.isWarning || r.isLockedOut) && r.isSafeTimeAlert)
+          .where(
+            (r) =>
+                r.isCurrentForAlert(now) &&
+                (r.isWarning || r.isLockedOut) &&
+                r.isSafeTimeAlert,
+          )
           .toList();
       final warnings = triggered.where((r) => r.isWarning).toList();
       final warning = warnings.isNotEmpty;
@@ -343,6 +366,19 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
                       'seconds until it turns off',
                       textAlign: TextAlign.center,
                       style: TextStyle(fontSize: 18),
+                    ),
+                    // The 60-second answer window, emptying with the
+                    // countdown above (the same seconds, every second).
+                    const SizedBox(height: 12),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: LinearProgressIndicator(
+                        key: const ValueKey('safety-countdown-bar'),
+                        value: (seconds / 60).clamp(0.0, 1.0),
+                        minHeight: 10,
+                        color: seconds <= 10 ? Colors.red : Colors.orange,
+                        backgroundColor: Colors.grey.withValues(alpha: .2),
+                      ),
                     ),
                   ] else
                     const Text(
@@ -435,9 +471,7 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
                               single ? 'Reset Safety' : 'Reset both',
                               () => _send(
                                 'RESET_SAFETY',
-                                (r) =>
-                                    (r.isWarning || r.isLockedOut) &&
-                                    r.isSafeTimeAlert,
+                                (r) => r.isLockedOut && r.isSafeTimeAlert,
                               ),
                               danger: true,
                             ),

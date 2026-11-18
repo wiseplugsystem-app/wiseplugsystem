@@ -24,15 +24,19 @@ int main() {
   // A monotonic clock beyond millis() wrap still enforces the deadline.
   s.physicalPress(); s.begin(0xffffffffULL - 500, 1); s.state = SocketState::Active;
   s.tick(0xffffffffULL + 500, 1); assert(s.state == SocketState::Warning);
-  // Remote reset clears warning and lockout, and nothing else.
-  assert(s.remoteReset()); assert(s.state == SocketState::Idle && !s.overridden);
+  // Remote reset clears warning and lockout but keeps the outlet off
+  // (resetHold) until the user turns it on again on purpose.
+  assert(s.remoteReset()); assert(s.state == SocketState::Disabled && s.resetHold && !s.overridden);
   assert(!s.remoteReset());
+  assert(s.remotePower(true)); assert(s.state == SocketState::Idle && !s.resetHold);
   // A long learned use can be granted in one override; a new session clears it.
   s.begin(0, 1); s.state = SocketState::Active; s.tick(1000, 1);
   assert(s.overrideRuntime(1000, 3 * 3600) && s.overridden);
   s.begin(20000000, 1); assert(!s.overridden);
   s.begin(0, 1); s.state = SocketState::Active; assert(!s.remoteReset());
   s.tick(1000, 1); s.tick(61000, 1); assert(s.state == SocketState::LockedOut);
-  assert(s.remoteReset()); assert(s.state == SocketState::Idle && !s.runtimeWarning);
+  assert(s.remoteReset()); assert(s.state == SocketState::Disabled && s.resetHold && !s.runtimeWarning);
+  // The plug's own button also turns it on (someone is at the plug).
+  s.physicalPress(); assert(s.state == SocketState::Idle && !s.resetHold);
   return 0;
 }

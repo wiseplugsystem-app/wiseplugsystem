@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  tooPowerful,
   type Appliance,
   type Config,
   configFromRow,
@@ -88,7 +89,7 @@ test("3. Fan unplugged from A, plugged into B -> MATCHED_PROVISIONAL, confirmed 
   assert.equal(stage1.cutoffS, C.defaultCutoffS);  // provisional: still the safe default
   const stage2 = run({ ...fanReading, power_variation: 0.023 }, [fan()], B, 2, stage1.match!.appliance.id);
   assert.equal(stage2.status, "MATCHED_CONFIRMED");
-  assert.equal(stage2.cutoffS, 4 * HOUR);  // now its own limit
+  assert.equal(stage2.cutoffS, C.defaultCutoffS);  // confirmed, but still learning
 });
 
 test("4. Two registered appliances pass with close scores -> AMBIGUOUS", () => {
@@ -236,7 +237,162 @@ test("7-use learning: baseline after 7 uses, cutoff = baseline x 1.5 within limi
   assert.equal(confirmedCutoffS(fan({ isLearned: true, baselineRuntimeS: 1200 }), C), 1800);
   assert.equal(confirmedCutoffS(fan({ isLearned: true, baselineRuntimeS: 60 }), C), 300);        // at least 5 min
   assert.equal(confirmedCutoffS(fan({ isLearned: true, baselineRuntimeS: 4 * HOUR }), C), 4 * HOUR);  // never above its own
-  assert.equal(confirmedCutoffS(fan(), C), 4 * HOUR);  // not learned yet: its own
+  assert.equal(confirmedCutoffS(fan(), C), C.defaultCutoffS);  // not learned yet: safe default
+  assert.equal(confirmedCutoffS(fan({ ownCutoffS: 15 * 60 }), C), 15 * 60);  // a kettle's cap is shorter
+  // No generic ceiling (7 days, migration 20261118): usually 5 h -> 7.5 h (x1.5 here).
+  assert.equal(confirmedCutoffS(fan({ ownCutoffS: 10080 * 60, isLearned: true, baselineRuntimeS: 5 * HOUR }), C), 7.5 * HOUR);
+});
+
+test("a laptop charger is recognised at any battery level (its power drifts 120 W -> 48 W)", () => {
+  // Registered once at 80.4 W (one sample), as on the real plug.
+  const charger = appliance("luziecharger", "Laptop charger", [
+    { ...profile("lc-charging", "Charging", [{ avg_power_w: 80.4, avg_pf: 0.95, avg_voltage_v: 220 }]), requiredSamples: 1 },
+  ], { varyingPower: true });
+  for (const w of [119, 107, 98, 80, 73, 67, 54, 48]) {  // one real charge, measured
+    const r = run({ avg_power_w: w, avg_pf: 0.95, avg_voltage_v: 220 }, [charger]);
+    assert.notEqual(r.status, "UNKNOWN", `${w} W should be the charger`);
+  }
+  // The same profile without the charger rule: only about 72-88 W pass.
+  const plain = { ...charger, varyingPower: false };
+  assert.equal(run({ avg_power_w: 54, avg_pf: 0.95, avg_voltage_v: 220 }, [plain]).status, "UNKNOWN");
+  // A fan is not a charger: its own +-10 % still applies.
+  assert.equal(run({ avg_power_w: 40, avg_pf: 0.92, startup_peak_ratio: 1.5, settling_time_s: 4 }, [fan()]).status, "UNKNOWN");
+});
+
+test("one phone charger, two different phones: still the same charger", () => {
+  // Registered with a slow phone: 10 W, PF 0.48, little inrush.
+  const charger = appliance("Phone charger", "Phone charger", [
+    { ...profile("pc-charging", "Charging", [{ avg_power_w: 10, avg_pf: 0.48, startup_peak_ratio: 1.2 }]), requiredSamples: 1 },
+  ], { varyingPower: true });
+  // A fast-charging phone on it: more power, higher PF, a bigger inrush.
+  const otherPhone = { avg_power_w: 14.5, avg_pf: 0.58, startup_peak_ratio: 2.4 };
+  assert.notEqual(run(otherPhone, [charger]).status, "UNKNOWN");
+  const checks = evaluateProfile(otherPhone, charger, charger.profiles[0], 1, C).checks;
+  assert.equal(checks.find((k) => k.feature === "avg_pf")!.tolerance, C.floorPfCharger);
+  assert.equal(checks.some((k) => k.feature === "startup_peak_ratio"), false);  // skipped for chargers
+  // Without the charger rules the same phone looks new (PF 0.10 apart > 0.02).
+  assert.equal(run(otherPhone, [{ ...charger, varyingPower: false }]).status, "UNKNOWN");
+  // A PF far from any charger's (a fan's 0.92) is still not this charger.
+  assert.equal(run({ avg_power_w: 12, avg_pf: 0.92 }, [charger]).status, "UNKNOWN");
+});
+
+test("registered once with a slow phone, the charger is recognised with any phone (no re-registering)", () => {
+  const charger = appliance("Phone charger", "Phone charger", [
+    { ...profile("pc", "Charging", [{ avg_power_w: 10, avg_pf: 0.48, startup_peak_ratio: 1.2 }]), requiredSamples: 1 },
+  ], { varyingPower: true });
+  // Nearly full, a fast-charging phone, a tablet, a laptop on a USB-C charger.
+  for (const w of [3, 18, 25, 45, 100, 140]) {
+    const r = run({ avg_power_w: w, avg_pf: 0.55 }, [charger]);
+    assert.notEqual(r.status, "UNKNOWN", `${w} W should be the charger`);
+  }
+  // Above any charger (charger_max_power_w): not this charger.
+  assert.equal(run({ avg_power_w: 300, avg_pf: 0.55 }, [charger]).status, "UNKNOWN");
+});
+
+test("a charger is never confirmed by itself: a different charger is asked about, not labelled", () => {
+  const purple = appliance("purple charger", "Phone charger", [
+    { ...profile("pc", "Charging", [{ avg_power_w: 10, avg_pf: 0.5 }]), requiredSamples: 1 },
+  ], { varyingPower: true });
+  const other = { avg_power_w: 2.9, avg_pf: 0.45 };  // another charger, nearly full phone
+  const s1 = run(other, [purple], A, 1);
+  assert.equal(s1.status, "MATCHED_PROVISIONAL");  // "Is this purple charger?" Yes / No, register new
+  const s2 = run(other, [purple], A, 2, "purple charger");
+  assert.equal(s2.status, "MATCHED_PROVISIONAL");  // still asked: never auto-confirmed
+  assert.equal(s2.cutoffS, C.defaultCutoffS);
+  // ask_chargers off: the previous automatic confirmation.
+  const auto = recognize({ features: other, stage: 2, here: A, appliances: [purple],
+    previousApplianceId: "purple charger", config: { ...C, askChargers: false } });
+  assert.equal(auto.status, "MATCHED_CONFIRMED");
+  // A fan is still confirmed at Stage 2 as before.
+  assert.equal(run(fanReading, [fan()], B, 2, "Fan").status, "MATCHED_CONFIRMED");
+});
+
+test("same wattage: when several registered appliances fit, the user picks (or registers a new one)", () => {
+  // Two fans, 57 W and 58 W: both pass, the 57 W one scores best.
+  const fan2 = appliance("Fan 2", "Fan", [profile("fan2", "Normal", fanSamples(58, 0.92))]);
+  const r = run(fanReading, [fan(), fan2], B, 2, "Fan");
+  assert.equal(r.status, "AMBIGUOUS");  // "Is this Fan or Fan 2?" + Register new appliance
+  assert.deepEqual(r.candidates.map((k) => k.applianceId).sort(), ["Fan", "Fan 2"]);
+  assert.equal(r.cutoffS, C.defaultCutoffS);
+  // ask_when_several_match off: the best score wins, as before.
+  const auto = recognize({ features: fanReading, stage: 2, here: B, appliances: [fan(), fan2],
+    previousApplianceId: "Fan", config: { ...C, askWhenSeveralMatch: false } });
+  assert.notEqual(auto.status, "AMBIGUOUS");
+  // Only one fits: no question beyond the usual.
+  assert.equal(run(fanReading, [fan()], B, 2, "Fan").status, "MATCHED_CONFIRMED");
+});
+
+test("consistent: two chargers with the same readings get the same question every time", () => {
+  const czh = appliance("czhaczha charger", "Phone charger", [
+    { ...profile("cz", "Charging", [{ avg_power_w: 3.1, avg_pf: 0.46 }]), requiredSamples: 1 },
+  ], { varyingPower: true });
+  const purple = appliance("purple charger", "Phone charger", [
+    { ...profile("pu", "Charging", [{ avg_power_w: 10, avg_pf: 0.5 }]), requiredSamples: 1 },
+  ], { varyingPower: true });
+  const ids = (r: ReturnType<typeof run>) => r.candidates.map((k) => k.name);
+  // Different readings, either outlet, either order of registration: always
+  // "czhaczha charger or purple charger?", in that order.
+  for (const reading of [{ avg_power_w: 3.0, avg_pf: 0.46 }, { avg_power_w: 9.5, avg_pf: 0.5 }, { avg_power_w: 20, avg_pf: 0.52 }]) {
+    for (const here of [A, B]) {
+      for (const list of [[czh, purple], [purple, czh]]) {
+        const r = run(reading, list, here);
+        assert.equal(r.status, "AMBIGUOUS");
+        assert.deepEqual(ids(r), ["czhaczha charger", "purple charger"]);
+        assert.equal(r.promptText, "Is this czhaczha charger or purple charger?");
+      }
+    }
+  }
+  // Stage 2 judges a charger like Stage 1: its tapering power is not checked.
+  const stage2 = run({ avg_power_w: 3.0, avg_pf: 0.46, power_variation: 0.4 }, [czh, purple], A, 2);
+  assert.equal(stage2.status, "AMBIGUOUS");
+});
+
+test("consistent: Stage 2 keeps asking about what Stage 1 offered, until the user answers", () => {
+  const fan2 = appliance("Fan 2", "Fan", [profile("fan2", "Normal", fanSamples(58, 0.92))]);
+  const s1 = run(fanReading, [fan(), fan2], B, 1);
+  assert.equal(s1.status, "AMBIGUOUS");
+  // Stage 2's extra measurement leaves only Fan passing (Fan 2's steadiness is off):
+  const narrowed = { ...fanReading, power_variation: 0.023 };
+  const fan2Unsteady = appliance("Fan 2", "Fan", [profile("fan2", "Normal",
+    fanSamples(58, 0.92).map((s) => ({ ...s, power_variation: 0.3 })))]);
+  const fresh = run(narrowed, [fan(), fan2Unsteady], B, 2);
+  assert.equal(fresh.status, "MATCHED_PROVISIONAL");  // without Stage 1's list it would pick Fan
+  const s2 = recognize({ features: narrowed, stage: 2, here: B, appliances: [fan(), fan2Unsteady],
+    previousCandidateIds: s1.candidates.map((k) => k.applianceId), config: C });
+  assert.equal(s2.status, "AMBIGUOUS");  // still "Is this Fan or Fan 2?"
+  assert.deepEqual(s2.candidates.map((k) => k.name), ["Fan", "Fan 2"]);
+  // One of them now running on the other outlet: it cannot be this one.
+  const s2b = recognize({ features: narrowed, stage: 2, here: B,
+    appliances: [fan(), { ...fan2Unsteady, activeOn: A }],
+    previousCandidateIds: s1.candidates.map((k) => k.applianceId), config: C });
+  assert.notEqual(s2b.status, "AMBIGUOUS");
+});
+
+test("charger rules stay on chargers: a fan and a charger on the two outlets are told apart", () => {
+  const charger = appliance("Laptop charger", "Laptop charger", [
+    { ...profile("lc", "Charging", [{ avg_power_w: 60, avg_pf: 0.55, startup_peak_ratio: 1.1 }]), requiredSamples: 1 },
+  ], { varyingPower: true });
+  // The fan on A is the fan, not the 60 W charger.
+  const onA = run(fanReading, [fan(), charger], A);
+  assert.equal(onA.match?.appliance.id, "Fan");
+  // The charger on B is the charger, not the 57 W fan.
+  const onB = run({ avg_power_w: 58, avg_pf: 0.6, startup_peak_ratio: 1.0 }, [fan(), charger], B);
+  assert.equal(onB.match?.appliance.id, "Laptop charger");
+  // The fan keeps the usual PF floor (+-0.02 at least, not the charger's 0.15).
+  const fanPf = evaluateProfile(fanReading, fan(), fan().profiles[0], 1, C).checks.find((k) => k.feature === "avg_pf")!;
+  assert.ok(fanPf.tolerance < C.floorPfCharger);
+});
+
+test("7-use learning keeps adjusting: every use averages the LAST 7", () => {
+  let l = { useCount: 0, recentRuntimesS: [] as number[], isLearned: false, baselineRuntimeS: null as number | null };
+  for (let i = 0; i < 7; i++) l = recordUse(l, 240, C);  // 7 short test runs: 4 min
+  assert.equal(l.baselineRuntimeS, 240);
+  l = recordUse(l, 3600, C);  // an 8th, normal 1-hour use: the safe time moves at once
+  assert.deepEqual(l.recentRuntimesS, [240, 240, 240, 240, 240, 240, 3600]);
+  assert.equal(l.baselineRuntimeS, Math.round((6 * 240 + 3600) / 7));
+  for (let i = 0; i < 6; i++) l = recordUse(l, 3600, C);  // the test runs are now all gone
+  assert.equal(l.baselineRuntimeS, 3600);
+  assert.equal(l.useCount, 14);
 });
 
 test("Names: 'Fan 2' after 'Fan'; gaps filled; case-insensitive", () => {
@@ -249,4 +405,14 @@ test("parseFeatures validates the plug's summary", () => {
   assert.equal(parseFeatures({ avg_pf: 0.9 }), "features.avg_power_w is required");
   assert.equal(parseFeatures({ avg_power_w: 57, avg_pf: 1.4 }), "features.avg_pf must be 0..1");
   assert.deepEqual(parseFeatures({ avg_power_w: 57, unstable: true, extra: 1 }), { avg_power_w: 57, unstable: true });
+});
+
+test("hardware limit: a load above max_appliance_w is too powerful to register", () => {
+  assert.equal(C.maxApplianceW, 1760); // the default when the row has no value
+  assert.equal(tooPowerful({ avg_power_w: 1500 }, C), false);
+  assert.equal(tooPowerful({ avg_power_w: 1760 }, C), false);
+  assert.equal(tooPowerful({ avg_power_w: 1900 }, C), true);
+  assert.equal(tooPowerful({ avg_pf: 1 }, C), false); // no power measured: not refused here
+  const lower = configFromRow({ ...CONFIG_ROW, max_appliance_w: "880.0" });
+  assert.equal(tooPowerful({ avg_power_w: 1000 }, lower), true);
 });

@@ -6,7 +6,6 @@ import 'package:wiseplug/models/activity_event.dart';
 import 'package:wiseplug/models/esp32_data.dart';
 import 'package:wiseplug/models/gadget_status.dart';
 import 'package:wiseplug/models/recognition.dart';
-import 'package:wiseplug/screens/activity_screen.dart';
 import 'package:wiseplug/screens/auth_gate.dart';
 import 'package:wiseplug/screens/esp32_dashboard.dart';
 import 'package:wiseplug/screens/recognition_prompt.dart';
@@ -14,13 +13,16 @@ import 'package:wiseplug/screens/registration_dialog.dart';
 import 'package:wiseplug/screens/wifi_config_screen.dart';
 import 'package:wiseplug/services/esp32_service.dart';
 import 'package:wiseplug/services/safety_alarm_manager.dart';
+import 'package:wiseplug/theme.dart';
 import 'package:wiseplug/widgets/safety_alert_listener.dart';
 
 import 'fake_recognition.dart';
 
-class SilentAlarm implements SafetyAlarmManager {
+class SilentAlarm extends Fake implements SafetyAlarmManager {
   @override
-  Future<void> playSafetyAlarm() async {}
+  Future<void> playSafetyAlarm({Duration? Function()? remaining}) async {}
+  @override
+  Future<void> playCutoff() async {}
   @override
   Future<void> stopAlarm() async {}
 }
@@ -73,6 +75,7 @@ class SmallScreenDevice extends Fake implements Esp32Service {
       'sensor_valid': true,
       'last_updated_ms': _now,
       'alertID': 'a1',
+      'alertType': 'SAFETY_CEILING_EXCEEDED',
       'countdownExpiry': _now + 42000,
     }),
   });
@@ -111,16 +114,24 @@ class SmallScreenDevice extends Fake implements Esp32Service {
       ]);
 }
 
-Future<void> show(WidgetTester tester, Widget home) async {
-  await tester.binding.setSurfaceSize(const Size(320, 568));
+/// A small phone (320 x 568) at the largest text size (2x, the phone's
+/// "largest text" setting, which the app caps at 1.3x) with the app's real
+/// theme and text fitting.
+Future<void> show(
+  WidgetTester tester,
+  Widget home, {
+  Size size = const Size(320, 568),
+}) async {
+  await tester.binding.setSurfaceSize(size);
   addTearDown(() => tester.binding.setSurfaceSize(null));
   await tester.pumpWidget(
     MediaQuery(
-      data: const MediaQueryData(
-        size: Size(320, 568),
-        textScaler: TextScaler.linear(1.3),
+      data: MediaQueryData(size: size, textScaler: const TextScaler.linear(2)),
+      child: MaterialApp(
+        theme: wisePlugTheme(Brightness.light),
+        builder: fitTextToScreen,
+        home: home,
       ),
-      child: MaterialApp(home: home),
     ),
   );
   await tester.pump();
@@ -134,7 +145,13 @@ Future<void> noOverflow(
 ) async {
   final errors = <String>[];
   final previous = FlutterError.onError;
-  FlutterError.onError = (details) => errors.add(details.exceptionAsString());
+  FlutterError.onError = (details) {
+    errors.add(details.exceptionAsString());
+    // Where it happened, so a failure names the widget (file:line).
+    final where = RegExp(r'lib/[\w/]+\.dart:\d+')
+        .firstMatch(details.toString());
+    if (where != null) errors.add('  at ${where.group(0)}');
+  };
   try {
     await body();
   } finally {
@@ -185,13 +202,56 @@ void main() {
       await tester.pump(const Duration(milliseconds: 500));
       await tester.drag(find.byType(Scrollable).first, const Offset(0, -2000));
       await tester.pump();
-      await tester.tap(find.text('Profiles'));
+      await tester.tap(find.text('Appliances'));
       await tester.pump(const Duration(milliseconds: 500));
       await tester.drag(find.byType(Scrollable).first, const Offset(0, -2000));
+      await tester.pump();
+      // The appliance detail screen, with a long name, on the same phone.
+      final kettle = find.widgetWithText(
+        ListTile,
+        'Electric kettle in the kitchen corner',
+      );
+      // The test font's letters are square, so at 2x text this tile is
+      // taller than the screen: bring its top in and tap there.
+      await tester.ensureVisible(kettle);
+      await tester.pump();
+      await tester.tapAt(tester.getTopLeft(kettle) + const Offset(140, 30));
+      await tester.pump(); // a new page is first built off screen
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(find.text('Appliance'), findsOneWidget);
+      await tester.drag(find.byType(Scrollable).last, const Offset(0, -2000));
       await tester.pump();
     });
     await tester.pumpWidget(const SizedBox());
   });
+
+  // Small phone, common Android phones, a large phone and a tablet.
+  for (final size in const [
+    Size(320, 568),
+    Size(360, 640),
+    Size(393, 852),
+    Size(430, 932),
+    Size(800, 1280),
+  ]) {
+    testWidgets(
+      'Home, Profiles and Settings fit ${size.width} x ${size.height}',
+      (tester) async {
+        await noOverflow(tester, () async {
+          await show(tester, dashboard(SmallScreenDevice()), size: size);
+          await tester.drag(
+            find.byType(Scrollable).first,
+            const Offset(0, -2000),
+          );
+          await tester.pump();
+          await tester.tap(find.text('Appliances'));
+          await tester.pump(const Duration(milliseconds: 500));
+          await tester.tap(find.text('Settings'));
+          await tester.pump(const Duration(milliseconds: 500));
+        });
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+  }
 
   testWidgets('the recognition pop-up fits a small phone', (tester) async {
     final recognition = FakeRecognition();
@@ -248,23 +308,16 @@ void main() {
         ),
       );
       await tester.pump(const Duration(seconds: 1));
-      expect(find.text('Seconds Remaining'), findsOneWidget);
+      expect(find.text('seconds until it turns off'), findsOneWidget);
     });
     await tester.pumpWidget(const SizedBox());
   });
 
-  testWidgets('sign-in, Wi-Fi and activity screens fit a small phone', (
-    tester,
-  ) async {
+  testWidgets('sign-in and Wi-Fi screens fit a small phone', (tester) async {
     final device = SmallScreenDevice();
     await noOverflow(tester, () async {
       await show(tester, const SignInScreen());
       await show(tester, WifiConfigScreen(service: device));
-      await show(
-        tester,
-        ActivityScreen(service: device, nameFor: (_) => 'Bedroom ceiling fan'),
-      );
-      expect(find.textContaining('Safety limit reached'), findsOneWidget);
     });
   });
 

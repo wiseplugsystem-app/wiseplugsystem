@@ -33,12 +33,16 @@ class RecognitionCandidate {
   final String applianceId, name, typeName, modeName;
   final double? score;
 
+  /// A charger (phone or laptop): offered as "which charger is it".
+  final bool charger;
+
   RecognitionCandidate.fromJson(Map<String, dynamic> j)
     : applianceId = j['applianceId'].toString(),
       name = j['name']?.toString() ?? 'Appliance',
       typeName = j['typeName']?.toString() ?? '',
       modeName = j['modeName']?.toString() ?? '',
-      score = sensorNumber(j['score']);
+      score = sensorNumber(j['score']),
+      charger = j['charger'] == true;
 }
 
 /// SAME_TYPE_IN_USE: "This looks like another Fan. Register as Fan 2?"
@@ -63,6 +67,10 @@ class OutletSession {
   final RecognitionCandidate? suggested;
   final RegisterSuggestion? registerAs;
   final String? promptText, reason;
+
+  /// A charger's reading (recognizeWithChargers): the pop-up only confirms
+  /// the charger or picks which charger / phone it is, never "register new".
+  final bool chargerChoice;
   final int cutoffSeconds;
   final DateTime startedAt;
   final DateTime? endedAt;
@@ -94,6 +102,7 @@ class OutletSession {
           : null,
       promptText = r['prompt_text'] as String?,
       reason = _map(r['candidates'])['reason'] as String?,
+      chargerChoice = _map(r['candidates'])['chargerChoice'] == true,
       cutoffSeconds = (r['cutoff_s'] as num?)?.toInt() ?? 1800,
       startedAt = DateTime.parse(r['started_at'].toString()).toUtc(),
       endedAt = r['ended_at'] == null
@@ -157,6 +166,26 @@ class RegisteredAppliance {
        baselineRuntimeSeconds = (r['baseline_runtime_s'] as num?)?.toInt(),
        lastOutlet = r['last_outlet'] as String?;
 
+  /// The safe time the plug enforces, in seconds. [cutoffMinutes]
+  /// (max_runtime_mins) is only a ceiling: a heating appliance's cap (iron
+  /// 60 min...), otherwise 7 days, i.e. none. Until its 7 uses are learned:
+  /// the default (30 min). Then: its usual time x learned_margin, at least
+  /// min_learned_cutoff, never above that ceiling. The same rule as confirmedCutoffS()
+  /// (supabase/functions/_shared/matching.ts), which sets the plug's cutoff.
+  int safeTimeSeconds(RecognitionSettings s) {
+    final own = cutoffMinutes * 60;
+    final usual = baselineRuntimeSeconds;
+    // Still learning: the default, or a heating cap if shorter (a kettle).
+    if (!isLearned || usual == null) {
+      return (s.defaultCutoffMinutes * 60).clamp(0, own);
+    }
+    final learned = (usual * s.learnedMargin).clamp(
+      s.minLearnedCutoffMinutes * 60.0,
+      double.infinity,
+    );
+    return learned.round().clamp(0, own);
+  }
+
   /// What it is, for its icon (lib/models/appliance_icons.dart).
   ApplianceKind get kind => kindForType(typeName, iconKey: typeIconKey);
 
@@ -207,15 +236,25 @@ class RecognitionSettings {
 
   /// A charger's samples: its power changes with the battery.
   final int samplesPerCharger;
+
+  /// After the 7 uses: safe time = usual time x [learnedMargin], at least
+  /// [minLearnedCutoffMinutes].
+  final double learnedMargin;
+  final int minLearnedCutoffMinutes;
   const RecognitionSettings({
     this.registrationSamples = 3,
     this.defaultCutoffMinutes = 30,
     this.learningUses = 7,
     this.samplesPerLevel = 1,
     this.samplesPerCharger = 3,
+    this.learnedMargin = 1.2,
+    this.minLearnedCutoffMinutes = 5,
   });
   RecognitionSettings.fromRow(Map<String, dynamic> r)
-    : registrationSamples = (r['registration_samples'] as num?)?.toInt() ?? 3,
+    : learnedMargin = sensorNumber(r['learned_margin']) ?? 1.2,
+      minLearnedCutoffMinutes =
+          (r['min_learned_cutoff_minutes'] as num?)?.toInt() ?? 5,
+      registrationSamples = (r['registration_samples'] as num?)?.toInt() ?? 3,
       samplesPerLevel = (r['samples_per_level'] as num?)?.toInt() ?? 1,
       samplesPerCharger = (r['samples_per_charger'] as num?)?.toInt() ?? 3,
       defaultCutoffMinutes =
