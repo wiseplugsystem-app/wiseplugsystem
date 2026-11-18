@@ -13,6 +13,8 @@ update public.recognition_config set floor_pf = 0.05;
 --    laptop charger, one charge: PF 0.91 at 120 W, 0.86 at 78 W, 0.77 at
 --    48 W), so a charger gets its own, wider floor. A fan (PF 0.96-1.00)
 --    still does not pass as a charger registered at PF 0.86.
+--    (If 20261118010000_charger_pf_range already added it, at 0.15 for
+--    chargers with any phone, it is kept as it is.)
 alter table public.recognition_config
-  add column floor_pf_charger numeric(4, 3) not null default 0.10
+  add column if not exists floor_pf_charger numeric(4, 3) not null default 0.10
     check (floor_pf_charger between 0.01 and 0.5);

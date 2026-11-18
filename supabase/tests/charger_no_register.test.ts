@@ -120,3 +120,42 @@ test("charger_no_register off: the previous prompts", () => {
   assert.equal(C.chargerNoRegister, true);
   assert.equal(C.chargerNearPf, 0.25);
 });
+
+// User test with the live settings (after the pending migrations): floor_pf
+// 0.05, floor_pf_charger 0.15, charger_max_power_w 140, both outlets.
+test("user journey: a phone charger with different phones, both outlets, never 'register new'", () => {
+  const LIVE = configFromRow({ ...CONFIG_ROW, floor_pf: "0.0500", floor_pf_charger: "0.15", charger_max_power_w: "140" });
+  const purple = charger("Purple charger", 10, 0.5);
+  const fanA = fan();
+  const phones = [
+    { avg_power_w: 10, avg_pf: 0.5 },    // the phone it was registered with
+    { avg_power_w: 18, avg_pf: 0.6 },    // a fast-charging phone
+    { avg_power_w: 4, avg_pf: 0.4 },     // nearly full
+    { avg_power_w: 2.5, avg_pf: 0.3 },   // almost done (PF 0.20 away)
+    { avg_power_w: 25, avg_pf: 0.68 },   // a tablet
+  ];
+  for (const here of [A, B]) {
+    for (const reading of phones) {
+      for (const stage of [1, 2] as const) {
+        const r = recognizeWithChargers({ features: reading, stage, here, appliances: [purple, fanA], config: LIVE });
+        assert.notEqual(r.status, "UNKNOWN", `${JSON.stringify(reading)} on ${here.outlet} stage ${stage}`);
+        assert.notEqual(r.status, "SAME_TYPE_IN_USE");
+        assert.notEqual(r.status, "MATCHED_CONFIRMED");  // only the user confirms a charger
+        assert.equal(r.chargerChoice, true);
+        assert.equal(r.cutoffS, LIVE.defaultCutoffS);    // safe default until confirmed
+        assert.ok(r.candidates.every((k) => k.charger));  // the fan is never offered
+      }
+    }
+  }
+  // The fan on the other outlet is still the fan, confirmed at Stage 2.
+  const f = recognizeWithChargers({
+    features: { avg_power_w: 57.1, avg_pf: 0.92, startup_peak_ratio: 1.5, settling_time_s: 4, power_variation: 0.022 },
+    stage: 2, here: B, appliances: [purple, fanA], previousApplianceId: "Fan", config: LIVE,
+  });
+  assert.equal(f.status, "MATCHED_CONFIRMED");
+  assert.equal(f.match?.appliance.id, "Fan");
+  // Something that is not a charger (a 1000 W iron, PF 1.0): still "new".
+  const iron = recognizeWithChargers({ features: { avg_power_w: 1000, avg_pf: 1 }, stage: 1, here: A,
+    appliances: [purple, fanA], config: LIVE });
+  assert.equal(iron.status, "UNKNOWN");
+});

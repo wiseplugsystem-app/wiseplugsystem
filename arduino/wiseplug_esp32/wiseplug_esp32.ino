@@ -724,6 +724,17 @@ std::atomic<uint64_t> netBeat{0}, supaBeat{0};
 std::atomic<bool> publishPending{false};
 std::atomic<uint64_t> publishPendingSince{0};
 constexpr uint64_t PUBLISH_FIRST_MAX_MS = 10000;
+// Safety quiet window. publishPending only stops a NEW Supabase upload; one
+// already running holds the single secure connection for up to ~19 s (TLS
+// handshake + 15 s timeout), then Firebase must reconnect, so the warning and
+// "Turned off for safety" reached the app up to ~30 s late. So from
+// SAFETY_QUIET_BEFORE_MS before an outlet's deadline, and for the whole
+// 60-second warning, no Supabase upload starts: Firebase keeps its connection,
+// and the warning, the user's Turn off / Keep it on and the lock-out go
+// through within ~1 s. Set by loop() (safety task), read by the Supabase task.
+// Uploads only wait (they stay queued); safety never depends on them.
+constexpr uint64_t SAFETY_QUIET_BEFORE_MS = 25000;
+std::atomic<bool> safetyQuiet{false};
 
 // Counts a call made while Wi-Fi was up. Returns true when the TLS
 // connection should be closed and opened fresh.
@@ -1547,6 +1558,8 @@ void supabaseTask(void*) {
     supaBeat = monotonicMs();  // D: the safety loop checks this heartbeat
     // The app gets a state change first (publishPending), at most 10 s.
     bool appFirst = publishPending && monotonicMs() - publishPendingSince < PUBLISH_FIRST_MAX_MS;
+    // Safety quiet window: an outlet is about to warn, or is warning.
+    if (safetyQuiet) appFirst = true;
     if (!appFirst && netMode == NetMode::Online && WiFi.status() == WL_CONNECTED) sendSupabase();
     vTaskDelay(pdMS_TO_TICKS(appFirst ? 200 : 1000));
   }
@@ -1749,6 +1762,7 @@ void loop() {
     if (news) Serial.printf("[%s] Stage %d: %s%s%s, cutoff %lu s\n", ch.outlet, reply.stage, reply.status,
                   matched ? " " : "", matched ? reply.name : "", (unsigned long)limit);
   }
+  bool quiet = false;  // safety quiet window (see SAFETY_QUIET_BEFORE_MS)
   for (auto& ch : outlets) {
     auto& d = ch.data;
     auto& safety = d.safety;
@@ -1756,6 +1770,9 @@ void loop() {
     if (safety.tick(now, currentLimitS(safety))) {
       if (safety.state == SocketState::Warning) beginAlert(ch, "SAFETY_CEILING_EXCEEDED", now); else lock(ch);
     }
+    bool running = safety.state == SocketState::Sampling || safety.state == SocketState::Active;
+    if (safety.state == SocketState::Warning ||
+        (running && safety.deadline > now && safety.deadline - now <= SAFETY_QUIET_BEFORE_MS)) quiet = true;
     bool raw = digitalRead(ch.button);
     if (raw != ch.rawButton) { ch.rawButton = raw; ch.buttonChanged = now; }
     if (raw != ch.stableButton && now - ch.buttonChanged >= 50) {
@@ -1811,6 +1828,7 @@ void loop() {
       xQueueOverwrite(ch.snapshots, &d);
     }
   }
+  safetyQuiet = quiet;  // the Supabase task waits while an outlet nears or is in its warning
   healthCheck(now);  // A/B/D: memory, heartbeats, safe self-restart
   delay(10);
 }
