@@ -7,6 +7,7 @@ import '../services/auth_error.dart';
 import '../services/device_binding.dart';
 import '../services/esp32_service.dart';
 import '../services/session_service.dart';
+import '../services/supabase_backend.dart';
 
 /// Shows the signed-in account and the 1:1 bound gadget, and lets the user
 /// permanently delete their account after re-entering their password.
@@ -36,6 +37,12 @@ class UserProfileScreen extends StatelessWidget {
       builder: (_) => DeleteAccountDialog(
         auth: _auth,
         removeUserData: (uid) async {
+          // Supabase first, while this account can still sign the request.
+          if (SupabaseBackend.configured) {
+            try {
+              await SupabaseBackend().releaseDevice();
+            } catch (_) {}
+          }
           await service.releaseDevice();
           await service.database.ref('users/$uid').remove();
         },

@@ -19,6 +19,7 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
+#include <WiFiUdp.h>
 #include <esp_wifi.h>
 #include <algorithm>
 #include <atomic>
@@ -77,6 +78,11 @@ constexpr uint64_t UNPLUG_MS = 3000;
 // Supabase sends recognition_config.rest_gap_s / rest_gap_min_w with every
 // recognition answer; these are the values until then, or without Supabase.
 std::atomic<uint32_t> restGapS{180}, restGapMinW{500};
+// SAFETY: how many times "Keep it on" (override) may extend one run.
+// recognition_config.max_overrides, sent with every recognition answer; 3
+// until then, or without Supabase. At the limit the safe-time warning still
+// shows, with only "Turn off now"; unanswered, the outlet turns off and locks.
+std::atomic<uint32_t> maxOverrides{3};
 // SAFETY: the conservative cutoff for every run that is not MATCHED_CONFIRMED:
 // before recognition, for UNKNOWN / AMBIGUOUS / SAME_TYPE_IN_USE /
 // MATCHED_PROVISIONAL loads, and whenever Supabase cannot be reached. It is
@@ -294,6 +300,7 @@ void saveRun(SocketChannel& ch) {
   ch.prefs.putString("runRec", d.recognition);
   ch.prefs.putBool("runConf", d.confirmed);
   ch.prefs.putBool("runOver", d.safety.overridden);
+  ch.prefs.putUChar("runOvrN", uint8_t(min(d.safety.overrideCount, uint32_t(255))));
   ch.prefs.putFloat("runSteady", d.steadyW);
   ch.prefs.putFloat("runPeak", d.peak);
   ch.lastCheckpoint = monotonicMs();
@@ -594,7 +601,10 @@ void handleCommand(SocketChannel& ch, const Command& cmd, uint64_t now) {
     result = "REJECTED_INVALID";
     if (strcmp(cmd.type, "SMART_OVERRIDE") == 0) {
       // The plug, not the app, sizes the extension from the appliance's history.
-      if (strcmp(cmd.alertID, d.alert.id) == 0 && d.safety.overrideRuntime(now, overrideSeconds(d.safety, now))) {
+      if (d.safety.overrideCount >= maxOverrides.load()) {
+        result = "REJECTED_OVERRIDE_LIMIT";  // used up: only "Turn off now" (or the cutoff)
+      } else if (strcmp(cmd.alertID, d.alert.id) == 0 &&
+                 d.safety.overrideRuntime(now, overrideSeconds(d.safety, now), maxOverrides.load())) {
         strlcpy(d.alert.resolution, "OVERRIDDEN", sizeof(d.alert.resolution)); result = "ACCEPTED";
       }
     } else if (strcmp(cmd.type, "TURN_OFF") == 0 && d.safety.state == SocketState::Warning) {
@@ -959,6 +969,10 @@ void addOutlet(JsonDocument& root, int i, const Snapshot& s) {
   root[b + "lockedOut"] = st == SocketState::LockedOut;
   root[b + "revision"] = s.safety.revision; root[b + "runtime_warning"] = s.safety.runtimeWarning;
   root[b + "overridden"] = running && s.safety.overridden;
+  // "Keep it on" used in this run, and how many are allowed (the app hides
+  // the button once they are used up).
+  root[b + "overridesUsed"] = running ? s.safety.overrideCount : 0;
+  root[b + "overridesMax"] = maxOverrides.load();
   // Off after a safety reset, waiting for the user to turn it on again.
   root[b + "safetyResetHold"] = st == SocketState::Disabled && s.safety.resetHold;
   root[b + "relay_on"] = relayOnNow(s); root[b + "storage_ok"] = ch.storageOK;
@@ -1103,6 +1117,8 @@ bool sendRecognition(const RecognitionReport& r) {
   // recognition_config's thermostat rest (kept as they are if missing).
   if (reply["restGapS"].is<uint32_t>()) restGapS = min(reply["restGapS"].as<uint32_t>(), uint32_t(900));
   if (reply["restGapMinW"].is<float>()) restGapMinW = uint32_t(max(50.0f, reply["restGapMinW"].as<float>()));
+  // recognition_config's override limit (kept as it is if missing).
+  if (reply["maxOverrides"].is<uint32_t>()) maxOverrides = min(reply["maxOverrides"].as<uint32_t>(), uint32_t(20));
   if (!reply["cutoffS"].is<uint32_t>()) return true;
   RecognitionReply c;
   c.outlet = r.outlet; c.stage = r.stage; c.startMono = r.startMono; c.cutoffS = reply["cutoffS"];
@@ -1463,6 +1479,56 @@ void checkWifiConfig() {
 }
 
 // ==========================================
+// PAIRING: binding only when near the plug
+// ==========================================
+// A plug with no owner is claimed with a one-time pairing code, and the plug
+// gives that code only to a phone on its local network: joined to "wisewp"
+// or to the same home Wi-Fi. The app sends "WISEPLUG-PAIR" (UDP, broadcast)
+// to PAIR_PORT; the plug answers with the code, valid PAIR_CODE_MS, and
+// stores it in Firebase (devices/gadget-1/pairing, readable by nobody). The
+// database rules let an account claim the plug only with that code, so an
+// account far away cannot bind it. An owner already bound is not affected.
+constexpr uint16_t PAIR_PORT = 47269;
+constexpr uint64_t PAIR_CODE_MS = 10 * 60 * 1000ULL;  // time to get back online
+WiFiUDP pairUdp;
+bool pairUdpStarted = false, pairPublished = true;
+char pairCode[17] = {};
+uint64_t pairUntil = 0;
+
+void handlePairing(uint64_t now, bool connected) {
+  if (!pairUdpStarted) pairUdpStarted = pairUdp.begin(PAIR_PORT) == 1;
+  if (pairUdpStarted && pairUdp.parsePacket() > 0) {
+    char msg[48] = {};
+    pairUdp.read(msg, sizeof(msg) - 1);
+    if (strncmp(msg, "WISEPLUG-PAIR", 13) == 0) {
+      if (!pairCode[0] || now >= pairUntil) {  // a fresh code, kept for its whole time
+        snprintf(pairCode, sizeof(pairCode), "%08lx%08lx", (unsigned long)esp_random(), (unsigned long)esp_random());
+        pairUntil = now + PAIR_CODE_MS; pairPublished = false;
+        Serial.println("Pairing: a phone nearby asked to link (code valid 10 min)");
+      }
+      JsonDocument reply;
+      reply["device"] = DEVICE_ID; reply["code"] = pairCode;
+      reply["expiresInS"] = uint32_t((pairUntil - now) / 1000);
+      char out[128];
+      size_t len = serializeJson(reply, out, sizeof(out));
+      pairUdp.beginPacket(pairUdp.remoteIP(), pairUdp.remotePort());
+      pairUdp.write(reinterpret_cast<const uint8_t*>(out), len);
+      pairUdp.endPacket();
+    }
+  }
+  // Stored in Firebase once the plug is online (from "wisewp" it is not yet).
+  if (connected && pairCode[0] && !pairPublished && now < pairUntil && epochMs()) {
+    JsonDocument p;
+    p["code"] = pairCode; p["expiresAt"] = epochMs() + int64_t(pairUntil - now);
+    String body; serializeJson(p, body);
+    if (firebaseRequest("PUT", String("devices/") + DEVICE_ID + "/pairing", body) == HTTP_CODE_OK) {
+      pairPublished = true;
+      Serial.println("Pairing: code stored, the phone can link now");
+    }
+  }
+}
+
+// ==========================================
 // NETWORK TASK (core 0): never blocks the safety loop
 // ==========================================
 // E: firmware updates over Wi-Fi from the Arduino IDE (Arduino OTA), only when
@@ -1518,6 +1584,7 @@ void networkTask(void*) {
     netBeat = now;  // D: the safety loop checks this heartbeat
     updateWifi(now);
     bool connected = netMode == NetMode::Online && WiFi.status() == WL_CONNECTED;
+    handlePairing(now, connected);  // binding only when near (see PAIRING)
     for (int i = 0; i < 2; ++i) {
       if (xQueueReceive(outlets[i].snapshots, &latest[i], 0) == pdTRUE) available[i] = true;
     }
@@ -1584,6 +1651,7 @@ uint64_t restoreRun(SocketChannel& ch) {
   safety.started = now - min(used, now - 1);
   safety.deadline = safety.started + uint64_t(limit) * 1000;
   safety.overridden = ch.prefs.getBool("runOver", false);
+  safety.overrideCount = ch.prefs.getUChar("runOvrN", 0);  // a restart gives no new ones
   safety.runtimeWarning = false;
   ch.prefs.getString("runEvent", ch.runEvent, sizeof(ch.runEvent));
   ch.prefs.getString("runName", d.activeName, sizeof(d.activeName));

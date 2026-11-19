@@ -1,11 +1,13 @@
 import 'esp32_live_view.dart';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
 import '../services/device_binding.dart';
 
 import '../models/esp32_data.dart';
 import '../services/esp32_service.dart';
+import '../services/local_provisioning.dart';
 import '../services/recognition_service.dart';
 import '../services/session_service.dart';
 import '../services/supabase_backend.dart';
@@ -64,6 +66,13 @@ class _Esp32DashboardState extends State<Esp32Dashboard> {
       return _ClaimProblem(
         ownedByOther: snapshot.data == false,
         onRetry: () => setState(() => _claim = _service.claimDevice()),
+        // Binding only when near: pair, then open the WisePlug.
+        pairing: snapshot.data == false
+            ? _NearPairing(
+                service: _service,
+                onPaired: () => setState(() => _claim = _service.claimDevice()),
+              )
+            : null,
       );
     },
   );
@@ -72,7 +81,12 @@ class _Esp32DashboardState extends State<Esp32Dashboard> {
 class _ClaimProblem extends StatelessWidget {
   final bool ownedByOther;
   final VoidCallback onRetry;
-  const _ClaimProblem({required this.ownedByOther, required this.onRetry});
+  final Widget? pairing;
+  const _ClaimProblem({
+    required this.ownedByOther,
+    required this.onRetry,
+    this.pairing,
+  });
 
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -90,6 +104,7 @@ class _ClaimProblem extends StatelessWidget {
                 color: Colors.grey,
               ),
               const SizedBox(height: 16),
+              if (pairing != null) ...[pairing!, const SizedBox(height: 20)],
               Text(
                 ownedByOther
                     ? 'This WisePlug (${DeviceBinding.unitCode}) is already linked to another account. Sign in with that account, or delete it from its User Profile to release the device.'
@@ -111,6 +126,103 @@ class _ClaimProblem extends StatelessWidget {
         ),
       ),
     ),
+  );
+}
+
+/// Binding only when near: the plug gives its one-time code only to a phone
+/// on its local network ("wisewp" or the same home Wi-Fi); with it, this
+/// account may claim a plug that has no owner.
+class _NearPairing extends StatefulWidget {
+  final Esp32Service service;
+  final VoidCallback onPaired;
+  const _NearPairing({required this.service, required this.onPaired});
+  @override
+  State<_NearPairing> createState() => _NearPairingState();
+}
+
+class _NearPairingState extends State<_NearPairing> {
+  bool _busy = false;
+  String? _note;
+
+  Future<void> _pair() async {
+    if (kIsWeb) {
+      setState(() => _note = 'Pair from the WisePlug app on your phone.');
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _note = 'Looking for your WisePlug nearby…';
+    });
+    final code = await NearbyPairing.requestCode();
+    if (!mounted) return;
+    if (code == null) {
+      setState(() {
+        _busy = false;
+        _note =
+            'No WisePlug answered. Stand near it and connect this phone to the '
+            'same Wi-Fi as the WisePlug (or to "wisewp"), then tap Pair again.';
+      });
+      return;
+    }
+    setState(
+      () => _note =
+          'WisePlug found. Linking… If this phone is on "wisewp", switch it '
+          'back to your home Wi-Fi now.',
+    );
+    // The plug stores the code once it is online; keep trying for its 10 min.
+    final until = DateTime.now().add(const Duration(minutes: 10));
+    while (mounted && DateTime.now().isBefore(until)) {
+      try {
+        final ok = await widget.service
+            .claimDevice(pairCode: code)
+            .timeout(const Duration(seconds: 10));
+        if (ok) {
+          if (SupabaseBackend.configured) {
+            try {
+              await SupabaseBackend().linkAccount();
+            } catch (_) {}
+          }
+          if (mounted) widget.onPaired();
+          return;
+        }
+      } catch (_) {
+        // Offline for a moment (switching Wi-Fi): try again.
+      }
+      await Future<void>.delayed(const Duration(seconds: 5));
+    }
+    if (mounted) {
+      setState(() {
+        _busy = false;
+        _note = 'Linking took too long. Tap Pair again.';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Column(
+    children: [
+      const Text(
+        'To link a WisePlug, you must be near it.',
+        textAlign: TextAlign.center,
+        style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+      ),
+      const SizedBox(height: 8),
+      const Text(
+        'Connect this phone to the same Wi-Fi as the WisePlug (or to '
+        '"wisewp"), stand near it, then tap Pair.',
+        textAlign: TextAlign.center,
+      ),
+      const SizedBox(height: 12),
+      FilledButton.icon(
+        onPressed: _busy ? null : _pair,
+        icon: const Icon(Icons.link),
+        label: const Text('Pair'),
+      ),
+      if (_note != null) ...[
+        const SizedBox(height: 10),
+        Text(_note!, textAlign: TextAlign.center),
+      ],
+    ],
   );
 }
 

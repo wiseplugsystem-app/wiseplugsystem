@@ -40,6 +40,19 @@ class OutletReading {
   /// Running on extra time granted by "Yes, Override", past its limit.
   final bool overridden;
 
+  /// "Keep it on" used in this run, and how many the plug allows (null from
+  /// firmware without the limit: then the button is always offered).
+  final int overridesUsed;
+  final int? overridesMax;
+
+  /// Another "Keep it on" is still allowed in this run.
+  bool get canOverride => overridesMax == null || overridesUsed < overridesMax!;
+
+  /// "Keep it on" left in this run, or null when the plug has no limit.
+  int? get overridesLeft => overridesMax == null
+      ? null
+      : (overridesMax! - overridesUsed).clamp(0, overridesMax!);
+
   /// Off after a safety reset: it stays off until the user turns it on again.
   final bool safetyResetHold;
 
@@ -68,6 +81,8 @@ class OutletReading {
       runtimeWarning = map['runtime_warning'] == true,
       lockedOut = map['lockedOut'] is bool ? map['lockedOut'] as bool : null,
       overridden = map['overridden'] == true,
+      overridesUsed = (map['overridesUsed'] as num?)?.toInt() ?? 0,
+      overridesMax = (map['overridesMax'] as num?)?.toInt(),
       safetyResetHold =
           map['safetyResetHold'] == true && map['currentState'] == 'DISABLED',
       alertType = map['alertType']?.toString() ?? '',

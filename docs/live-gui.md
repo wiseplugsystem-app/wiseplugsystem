@@ -812,3 +812,29 @@ else keep ±10 %.
 - Checked on the real runs: the laptop charger registered on Outlet B is now
   recognised on Outlet A from about 48 W to 115 W; the fan is still
   recognised on both outlets and never taken for the charger.
+
+## Limit on "Keep it on" (in plain words)
+
+- When the safe time is up, "Keep it on" gives extra time. It can now be
+  used **3 times for each use** of an appliance (the number is
+  `recognition_config.max_overrides`; the plug uses 3 until Supabase tells it).
+- The pop-up says how many are left: "You can tap Keep it on 2 more times",
+  then "Last time…".
+- When they are used up, the 60-second warning still comes, but with only
+  "Turn off now". If nobody answers, WisePlug turns the appliance off and
+  locks the outlet, as before; Reset Safety turns it on again.
+- The count starts again with each new use, and a restart of the plug does
+  not give new ones (it is saved with the run).
+- Electrical dangers (too much current) are never overridable, as before.
+
+## Linking a WisePlug only when you are near it (in plain words)
+
+- A WisePlug that has no owner can only be linked by a phone that is near
+  it: on the plug's own Wi-Fi "wisewp", or on the same home Wi-Fi.
+- In the app, tap **Pair**. The app asks the plug (over the local Wi-Fi) for
+  a one-time code; the plug answers only phones on its own network. The code
+  works for 10 minutes. With it, your account becomes the owner.
+- Someone far away never gets the code, so they cannot take the plug.
+- If you are already the owner, nothing changes for you.
+- Deleting your account now lets the plug go in Firebase **and** Supabase,
+  so the next owner can pair with it and register appliances.

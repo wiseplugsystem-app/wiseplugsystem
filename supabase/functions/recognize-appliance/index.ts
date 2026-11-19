@@ -28,7 +28,8 @@
 // Auth: x-device-key. Idempotent per (eventId, stage).
 // Reply: { status, applianceId, applianceName, candidates, suggested, registerAs,
 //          promptText, cutoffS, stage, reason, restGapS, restGapMinW, ... }
-//          (see sessionReply; restGap*: recognition_config's thermostat rest)
+//          (see sessionReply; restGap*: recognition_config's thermostat rest;
+//          maxOverrides: recognition_config.max_overrides, "Keep it on" per run)
 import { deviceIdOf, requireDevice } from "../_shared/auth.ts";
 import { db } from "../_shared/db.ts";
 import { HttpError, json, outletOf, readJson, serve } from "../_shared/http.ts";
@@ -74,7 +75,8 @@ serve(async (req) => {
   // In the reference meter's units, so Outlet A and Outlet B samples compare.
   const features = calibrate(rawFeatures, calibration);
   // Every answer also carries the thermostat-rest settings for the plug.
-  const reply = (s: Row) => ({ ...sessionReply(s), restGapS: config.restGapS, restGapMinW: config.restGapMinW });
+  const reply = (s: Row) => ({ ...sessionReply(s), restGapS: config.restGapS, restGapMinW: config.restGapMinW,
+    maxOverrides: config.maxOverrides });
   const { data: existing, error: existingError } = await db.from("outlet_sessions")
     .select("*").eq("event_id", eventId).maybeSingle();
   if (existingError) throw existingError;

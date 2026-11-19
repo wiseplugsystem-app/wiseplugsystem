@@ -110,6 +110,8 @@ class DeviceRejection implements Exception {
     'REJECTED_NO_APPLIANCE' => 'No appliance is plugged into this outlet, so there is nothing to switch.',
     'REJECTED_RUNNING' => 'An appliance is running. Turn it off (or unplug it), then restart the WisePlug.',
     'REJECTED_LOCKED' => 'An outlet is turned off for safety. Press Reset Safety first, then restart the WisePlug.',
+    'REJECTED_OVERRIDE_LIMIT' =>
+      'You have used all the extra time for this use. Turn it off now.',
     _ => 'The WisePlug refused the command ($code).',
   };
 }
@@ -173,10 +175,15 @@ class Esp32Service {
 
   /// Links this gadget to the signed-in account if it has no owner yet
   /// (1 device = 1 owner). Returns false when another account owns it.
-  Future<bool> claimDevice() async {
+  /// [pairCode]: the one-time code the plug gave this phone nearby
+  /// (NearbyPairing); needed only to claim a plug that has no owner yet.
+  Future<bool> claimDevice({String? pairCode}) async {
     final uid = FirebaseAuth.instance.currentUser?.uid;
     if (uid == null) throw StateError('Sign in to link the WisePlug.');
     try {
+      if (pairCode != null) {
+        await database.ref('pair_requests/$uid').set(pairCode);
+      }
       await database.ref().update({
         for (final outlet in _ownedOutlets) 'device_owners/$outlet': uid,
       });

@@ -1,7 +1,63 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:http/http.dart' as http;
+
+import 'device_binding.dart';
+
+/// Binding only when near: asks the WisePlug for its one-time pairing code
+/// over the local network (its "wisewp" setup Wi-Fi, or the same home Wi-Fi).
+/// The plug answers a UDP message on [port]; a phone far away never hears it.
+class NearbyPairing {
+  static const port = 47269;
+  static const request = 'WISEPLUG-PAIR';
+
+  /// The plug's pairing code, or null when no WisePlug answered.
+  static Future<String?> requestCode({
+    Duration wait = const Duration(seconds: 3),
+    int tries = 3,
+  }) async {
+    for (var i = 0; i < tries; i++) {
+      RawDatagramSocket? socket;
+      try {
+        socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+        socket.broadcastEnabled = true;
+        final reply = Completer<String?>();
+        final s = socket;
+        s.listen((event) {
+          if (event != RawSocketEvent.read) return;
+          final d = s.receive();
+          if (d == null || reply.isCompleted) return;
+          try {
+            final body = jsonDecode(utf8.decode(d.data));
+            if (body is Map &&
+                body['device'] == DeviceBinding.gadgetId &&
+                body['code'] is String) {
+              reply.complete(body['code'] as String);
+            }
+          } catch (_) {}
+        });
+        final message = utf8.encode('$request ${DeviceBinding.gadgetId}');
+        for (final to in [
+          InternetAddress('255.255.255.255'),
+          InternetAddress('192.168.4.1'),
+        ]) {
+          try {
+            s.send(message, to, port);
+          } catch (_) {}
+        }
+        final code = await reply.future.timeout(wait, onTimeout: () => null);
+        if (code != null) return code;
+      } catch (_) {
+        // No network: try again, then give up.
+      } finally {
+        socket?.close();
+      }
+    }
+    return null;
+  }
+}
 
 /// The WisePlug's own open setup Wi-Fi, up while it cannot reach a router.
 class SetupNetwork {

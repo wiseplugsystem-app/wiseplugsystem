@@ -380,6 +380,21 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
                         backgroundColor: Colors.grey.withValues(alpha: .2),
                       ),
                     ),
+                    // Override limit: how many "Keep it on" are left.
+                    const SizedBox(height: 10),
+                    Text(
+                      _overrideNote(triggered.single),
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: triggered.single.canOverride
+                            ? FontWeight.w500
+                            : FontWeight.w700,
+                        color: triggered.single.canOverride
+                            ? context.muted
+                            : context.readable(Colors.red),
+                      ),
+                    ),
                   ] else
                     const Text(
                       'No answer: WisePlug is turning it off now…',
@@ -454,15 +469,18 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
                               'Turn off now',
                               () => _send('TURN_OFF', (r) => r.isWarning),
                             ),
-                            const SizedBox(width: 14),
-                            _choice(
-                              'Keep it on',
-                              () => _send(
-                                'SMART_OVERRIDE',
-                                (r) => r.isWarning,
-                                fields: _override,
+                            // At the override limit: only "Turn off now".
+                            if (triggered.single.canOverride) ...[
+                              const SizedBox(width: 14),
+                              _choice(
+                                'Keep it on',
+                                () => _send(
+                                  'SMART_OVERRIDE',
+                                  (r) => r.isWarning,
+                                  fields: _override,
+                                ),
                               ),
-                            ),
+                            ],
                           ]
                         : [
                             _choice('Close', widget.onDismiss),
@@ -487,6 +505,18 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
       );
     },
   );
+
+  /// Under the countdown: the "Keep it on" left, or that they are used up.
+  static String _overrideNote(OutletReading r) {
+    final left = r.overridesLeft;
+    if (left == null) return 'Tap "Keep it on" for extra time.';
+    if (left <= 0) {
+      return 'No more extra time for this use. It turns off at 0.';
+    }
+    return left == 1
+        ? 'Last time you can tap "Keep it on" for this use.'
+        : 'You can tap "Keep it on" $left more times for this use.';
+  }
 
   /// "The efan on Outlet B reached its safe time, so WisePlug turned it off."
   static String _offSentence(OutletReading r) =>
@@ -541,6 +571,19 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
                   : null,
             ),
           ),
+          if (r.isWarning && left > 0) ...[
+            const SizedBox(height: 4),
+            Text(
+              _overrideNote(r),
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontWeight: r.canOverride ? FontWeight.w500 : FontWeight.w700,
+                color: r.canOverride
+                    ? context.muted
+                    : context.readable(Colors.red),
+              ),
+            ),
+          ],
           const SizedBox(height: 8),
           Row(
             children: r.isWarning
@@ -549,15 +592,18 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
                       'Turn off',
                       () => _send('TURN_OFF', (x) => here(x) && x.isWarning),
                     ),
-                    const SizedBox(width: 10),
-                    _choice(
-                      'Keep it on',
-                      () => _send(
-                        'SMART_OVERRIDE',
-                        (x) => here(x) && x.isWarning,
-                        fields: _override,
+                    // At the override limit: only "Turn off".
+                    if (r.canOverride) ...[
+                      const SizedBox(width: 10),
+                      _choice(
+                        'Keep it on',
+                        () => _send(
+                          'SMART_OVERRIDE',
+                          (x) => here(x) && x.isWarning,
+                          fields: _override,
+                        ),
                       ),
-                    ),
+                    ],
                   ]
                 : [
                     _choice(

@@ -9,6 +9,8 @@ struct SafetyState {
   uint64_t started = 0, deadline = 0, warningStarted = 0;
   bool runtimeWarning = false;
   bool overridden = false;  // running on time the user granted past the limit
+  // How many times "Keep it on" extended this run (the limit is max_overrides).
+  uint32_t overrideCount = 0;
   // Off after a safety reset: the outlet stays off until the user turns it on
   // again on purpose (the app asks first), so a reset never restarts the
   // appliance that just hit its limit.
@@ -16,7 +18,7 @@ struct SafetyState {
   void begin(uint64_t now, uint32_t ceilingSeconds) {
     state = SocketState::Sampling; started = now;
     deadline = now + uint64_t(ceilingSeconds) * 1000;
-    runtimeWarning = overridden = false; ++revision;
+    runtimeWarning = overridden = false; overrideCount = 0; ++revision;
   }
   bool tick(uint64_t now, uint32_t maxRunTime) {
     if (state == SocketState::Sampling || state == SocketState::Active) {
@@ -31,11 +33,12 @@ struct SafetyState {
     }
     return false;
   }
-  bool overrideRuntime(uint64_t now, uint32_t seconds) {
+  // maxOverrides: how many extensions one run may have (no limit if left out).
+  bool overrideRuntime(uint64_t now, uint32_t seconds, uint32_t maxOverrides = UINT32_MAX) {
     if (state != SocketState::Warning || now - warningStarted >= 60000 ||
-        seconds == 0 || seconds > 86400) return false;
+        seconds == 0 || seconds > 86400 || overrideCount >= maxOverrides) return false;
     deadline = now + uint64_t(seconds) * 1000;
-    state = SocketState::Active; overridden = true; ++revision; return true;
+    state = SocketState::Active; overridden = true; ++overrideCount; ++revision; return true;
   }
   bool remotePower(bool on) {
     if (state == SocketState::LockedOut || state == SocketState::Warning) return false;

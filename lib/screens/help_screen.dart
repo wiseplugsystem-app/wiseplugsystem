@@ -101,6 +101,8 @@ class HelpScreen extends StatelessWidget {
                 'Your phone shows "Safe time is up" and counts down from 60 '
                     'seconds.',
                 'Still using it? Tap "Keep it on". You get extra time.',
+                'You can do this only a few times each use. The pop-up shows '
+                    'how many are left; then only "Turn off now" remains.',
                 'Not using it? Tap "Turn off now".',
                 'No answer in 60 seconds? WisePlug turns it off by itself.',
                 'To use it again: check the appliance first, tap Reset Safety, '

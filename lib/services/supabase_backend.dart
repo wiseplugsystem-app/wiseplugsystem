@@ -169,6 +169,12 @@ class SupabaseBackend {
     }
   }
 
+  /// Account deletion: lets the plug go in Supabase too, so the next owner
+  /// can pair with it (only the owner can).
+  Future<void> releaseDevice() async {
+    await _invoke('link-account', {'deviceId': deviceId, 'release': true});
+  }
+
   /// Which saved appliance these live readings belong to, if any.
   /// The full PZEM reading of either outlet, as match-signature expects it.
   Map<String, Object?> _readingBody(TelemetryReading reading) {

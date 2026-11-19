@@ -132,6 +132,8 @@ export interface Config {
   /** recognition_config.charger_near_pf: how far a reading's PF may be from a
    * registered charger's and still be "that charger" instead of a new one. */
   chargerNearPf?: number;
+  /** recognition_config.max_overrides: "Keep it on" extensions allowed per run (the plug enforces it). */
+  maxOverrides: number;
   /** recognition_config.rest_gap_s: a heating load may rest at 0 W this long and stay on. */
   restGapS: number;
   /** recognition_config.rest_gap_min_w: a run peaking at or above this is a heating load. */
@@ -191,6 +193,7 @@ export function configFromRow(r: Row): Config {
     chargerNoRegister: r.charger_no_register !== false,
     chargerNearPf: r.charger_near_pf != null && Number.isFinite(Number(r.charger_near_pf))
       ? Number(r.charger_near_pf) : 0.25,
+    maxOverrides: Number.isFinite(Number(r.max_overrides)) ? Number(r.max_overrides) : 3,
     restGapMinW: Number.isFinite(Number(r.rest_gap_min_w)) ? Number(r.rest_gap_min_w) : 500,
   };
 }
