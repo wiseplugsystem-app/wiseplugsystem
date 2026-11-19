@@ -54,6 +54,10 @@ class RegistrationTracker {
   /// a run WisePlug recognizes as one of its saved settings is a repeat.
   String? applianceId;
 
+  /// Taking an extra sample of a saved setting: a run WisePlug recognizes as
+  /// this appliance is exactly what is wanted, so it is not "already saved".
+  bool allowRepeat = false;
+
   RegistrationTracker({
     required this.startedAt,
     this.initialEventId,
@@ -86,7 +90,7 @@ class RegistrationTracker {
       return s.isOpen ? RegistrationStep.restart : RegistrationStep.plugIn;
     }
     // The same setting again (e.g. a fan speed already done): never saved.
-    if (isRepeat(s)) {
+    if (!allowRepeat && isRepeat(s)) {
       if (!s.isOpen) {
         _used.add(s.eventId);
         return RegistrationStep.plugIn;
@@ -211,11 +215,26 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
   /// A fan's number of speeds (1 to 4).
   int _speeds = 3;
 
+  /// A heating appliance's number of heat settings, as the user chose
+  /// (null: its usual number).
+  int? _heatCount;
+
+  /// Heating appliance: its settings heat at the same power, so a setting
+  /// matching one already saved is still saved (not "already saved").
+  bool get _heatAppliance =>
+      isHeatKind(_newAppliance ? _kind : _appliance!.kind);
+
   /// An "Other" appliance's own settings, after its first one.
   final _extraLevels = <String>[];
 
   /// The setting the next sample is for (null: the old 3-sample way).
   String? _level;
+
+  /// "Take another sample" (after registration is done): the setting it is
+  /// for, while it is being taken; null otherwise. [_extras]: how many extra
+  /// samples were saved in this pop-up.
+  String? _extraLevel;
+  int _extras = 0;
 
   bool get _newAppliance => _appliance == null;
   int get _legacy => widget.settings.registrationSamples;
@@ -226,7 +245,12 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
   /// The settings to sample, in order: the type's ("Speed 1", "Speed 2"…),
   /// or, for one being finished, the ones it was registered with.
   List<String> get _levels => _newAppliance
-      ? [...levelsFor(_kind, speeds: _speeds), ..._extraLevels]
+      ? [
+          ...(isHeatKind(_kind)
+              ? heatLevelsFor(_kind, _heatCount ?? levelsFor(_kind).length)
+              : levelsFor(_kind, speeds: _speeds)),
+          ..._extraLevels,
+        ]
       : [for (final m in _appliance!.levels) m.name];
 
   /// Samples in all: one for each setting (samples_per_level); a charger
@@ -281,7 +305,7 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
         startedAt: DateTime.now().toUtc(),
         initialEventId: widget.fromSession?.eventId,
         applianceId: _appliance?.id,
-      );
+      )..allowRepeat = _heatAppliance;
     });
     _poll();
     _timer = Timer.periodic(widget.pollEvery, (_) => _poll());
@@ -289,7 +313,9 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
 
   Future<void> _poll() async {
     final tracker = _tracker;
-    if (tracker == null || _busy || _complete) return;
+    if (tracker == null || _busy || (_complete && _extraLevel == null)) {
+      return;
+    }
     _busy = true;
     try {
       // Both outlets: the newest run that started after Register (runs
@@ -335,11 +361,24 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
         // Its type's icon (lib/models/appliance_icons.dart).
         iconKey: first ? kindForType(_type.text.trim()).key : null,
         levels: first ? _levels : null,
-        level: _level,
+        level: _extraLevel ?? _level,
+        extra: _extraLevel != null,
       );
       tracker.recorded(run.eventId);
       tracker.applianceId = progress.applianceId;
       if (!mounted) return;
+      if (_extraLevel != null) {
+        // One more sample saved: back to the "All done" screen.
+        tracker.allowRepeat = _heatAppliance;
+        _timer?.cancel();
+        setState(() {
+          _extraLevel = null;
+          _extras++;
+          _step = RegistrationStep.switchOff;
+          _error = null;
+        });
+        return;
+      }
       setState(() {
         _applianceId = progress.applianceId;
         _applianceName = progress.applianceName;
@@ -708,7 +747,10 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
   /// A fan's speeds are saved as "Level 1", "Level 2"…, but users may not
   /// know which button is which: they do them in any order, a different
   /// speed each time (the samples all belong to the same fan).
-  static bool _isSpeed(String? level) => level?.startsWith('Level ') ?? false;
+  /// A heating appliance's "Level 2" is a heat setting, done in order ("Set
+  /// it to Level 2"), not a fan speed.
+  bool _isSpeed(String? level) =>
+      !_heatAppliance && (level?.startsWith('Level ') ?? false);
 
   /// What to do for sample [sample] at [level]. A charger draws more on a
   /// low battery and less when nearly full, so each of its samples asks for
@@ -766,6 +808,34 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
             style: TextStyle(color: context.muted, fontSize: 16),
           ),
         ),
+      // A heating appliance: the user chooses how many heat settings.
+      if (isHeatKind(kind)) ...[
+        Text(
+          'How many heat settings does it have?',
+          style: TextStyle(fontSize: 16, color: context.muted),
+        ),
+        const SizedBox(height: 6),
+        Wrap(
+          spacing: 8,
+          children: [
+            for (var n = 1; n <= maxHeatLevels; n++)
+              ChoiceChip(
+                label: Text('$n'),
+                selected: (_heatCount ?? levelsFor(kind).length) == n,
+                onSelected: (_) => setState(() => _heatCount = n),
+              ),
+          ],
+        ),
+        Padding(
+          padding: const EdgeInsets.only(top: 6, bottom: 8),
+          child: Text(
+            'Count the settings on its dial or buttons. You will turn it on '
+            'once at each setting. WisePlug will know the appliance; it may '
+            'not tell its settings apart, since they heat at the same power.',
+            style: TextStyle(color: context.muted, fontSize: 16),
+          ),
+        ),
+      ],
       // A fan's speeds are just counted above (no "Level 1/2/3" to match).
       if (!fan)
         Wrap(
@@ -825,6 +895,67 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
     _ => 'Then turn it on again and set it to $next. ',
   };
 
+  /// "Take another sample" of [level]: watch for the next run again.
+  void _takeExtra(String level) {
+    final tracker = _tracker;
+    if (tracker == null) return;
+    tracker.allowRepeat = true;
+    setState(() {
+      _extraLevel = level;
+      _step = RegistrationStep.plugIn;
+      _error = null;
+    });
+    _timer?.cancel();
+    _poll();
+    _timer = Timer.periodic(widget.pollEvery, (_) => _poll());
+  }
+
+  void _stopExtra() {
+    _tracker?.allowRepeat = _heatAppliance;
+    _timer?.cancel();
+    setState(() {
+      _extraLevel = null;
+      _error = null;
+    });
+  }
+
+  /// The settings an extra sample can be for: the appliance's settings.
+  List<String> get _sampleLevels {
+    final l = _levels;
+    return l.isEmpty ? const ['Normal'] : l;
+  }
+
+  /// "Take another sample" while it is being taken: what to do now.
+  (IconData, String) _extraStep(String name) {
+    final level = _extraLevel!;
+    return switch (_step) {
+      RegistrationStep.restart => (
+        Icons.restart_alt,
+        '${_cap(name)} is already on. Turn it off, count to 5, then turn it '
+            'on again at $level.',
+      ),
+      RegistrationStep.measuring => (
+        Icons.hourglass_top,
+        'Please wait about 1 minute. Leave it on at $level and don\'t touch '
+            'its buttons. WisePlug is taking one more sample.',
+      ),
+      RegistrationStep.record => (
+        Icons.save_outlined,
+        'Saving… please wait a few seconds.',
+      ),
+      RegistrationStep.tooShort => (
+        Icons.timer_off_outlined,
+        'That was too short. Turn it on again at $level and leave it on for '
+            'about 1 minute.',
+      ),
+      _ => (
+        Icons.power,
+        'One more sample of $level: turn $name off, wait 5 seconds, then '
+            'turn it on at $level and leave it on for about 1 minute.',
+      ),
+    };
+  }
+
   /// " (about 33 W)": the power of the saved setting this run repeated, when
   /// the app has it (an appliance being continued); else nothing.
   String _repeatWatts() {
@@ -845,8 +976,14 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
   List<Widget> _progress() {
     final name = _applianceName.isEmpty ? 'the appliance' : _applianceName;
     final sample = (_collected + 1).clamp(1, _required);
-    final (icon, text) = _complete
-        ? (Icons.check_circle, 'All done! WisePlug knows $name now.')
+    final (icon, text) = _complete && _extraLevel != null
+        ? _extraStep(name)
+        : _complete
+        ? (
+            Icons.check_circle,
+            'All done! WisePlug knows $name now.'
+                '${_extras > 0 ? ' Extra samples saved: $_extras.' : ''}',
+          )
         : switch (_step) {
             RegistrationStep.plugIn => (
               Icons.power,
@@ -919,7 +1056,8 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
         textAlign: TextAlign.center,
         style: const TextStyle(fontSize: 16),
       ),
-      if (!_complete && _step == RegistrationStep.measuring) ...[
+      if ((!_complete || _extraLevel != null) &&
+          _step == RegistrationStep.measuring) ...[
         const SizedBox(height: 16),
         const LinearProgressIndicator(),
         if (_measuringSince case final since?) ...[
@@ -953,12 +1091,39 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
         ),
       ],
       const SizedBox(height: 20),
-      if (_complete)
+      if (_complete && _extraLevel != null)
+        TextButton(
+          onPressed: _stopExtra,
+          child: const Text('Cancel this extra sample'),
+        )
+      else if (_complete) ...[
         FilledButton(
           onPressed: () => Navigator.pop(context, true),
           child: const Text('Done'),
-        )
-      else
+        ),
+        // More samples make recognition more accurate: as many as the user
+        // wants, of any setting.
+        const SizedBox(height: 16),
+        Text(
+          'More samples help WisePlug recognize it better.',
+          textAlign: TextAlign.center,
+          style: TextStyle(fontSize: 16, color: context.muted),
+        ),
+        const SizedBox(height: 8),
+        for (final l in _sampleLevels)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: OutlinedButton.icon(
+              onPressed: () => _takeExtra(l),
+              icon: const Icon(Icons.add),
+              label: Text(
+                _sampleLevels.length == 1
+                    ? 'Take another sample'
+                    : 'Take another sample: $l',
+              ),
+            ),
+          ),
+      ] else
         TextButton(
           onPressed: () => Navigator.pop(context, _collected > 0),
           child: Text(_collected > 0 ? 'Finish later' : 'Cancel'),

@@ -18,6 +18,11 @@
 // MATCHED_CONFIRMED with the appliance's own cutoff.
 //
 // Auth: Authorization: Bearer <Firebase ID token> of the plug's owner.
+// Extra samples: { deviceId, eventId, applianceId, level?, extra: true }
+// adds one more sample to a setting that already has its samples (the user
+// tapped "Take another sample"); its range is recomputed from all of them
+// (the latest max_samples_per_profile), so recognition gets more accurate.
+//
 // Reply: { appliance: { id, name, type }, profile: { id, modeName },
 //          samplesCollected, samplesRequired, complete, cutoffS }
 import { deviceIdOf, firebaseUser, requireOwner } from "../_shared/auth.ts";
@@ -111,10 +116,17 @@ serve(async (req) => {
   // collecting. An appliance registered before settings starts with "Normal".
   const need = (p: Profile) => requiredSamples(p, config);
   const level = text(body.level, 40);
+  // "Take another sample": a setting that already has its samples gets one more.
+  const extra = body.extra === true;
   let profile: Profile | undefined = level
     ? appliance.profiles.find((p) => p.modeName.toLowerCase() === level.toLowerCase())
+    : extra
+    ? [...appliance.profiles].sort(byLevel)[0]
     : [...appliance.profiles].sort(byLevel).find((p) => p.sampleCount < need(p));
-  if (profile && profile.sampleCount >= need(profile)) {
+  if (extra && !profile) {
+    throw new HttpError(409, `${appliance.name} has no setting "${level ?? ""}" yet.`);
+  }
+  if (profile && !extra && profile.sampleCount >= need(profile)) {
     throw new HttpError(409, `${appliance.name} already has its ${profile.modeName} sample.`);
   }
   let profileId = profile?.id;

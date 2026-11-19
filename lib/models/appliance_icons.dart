@@ -126,6 +126,31 @@ List<String> levelsFor(ApplianceKind kind, {int speeds = 3}) =>
       _ => const ['Normal'],
     };
 
+/// Heating appliances: the user chooses how many heat settings they have
+/// (1 to [maxHeatLevels]). Their settings heat at the same power (the dial
+/// only changes when the thermostat clicks off), so a setting matching one
+/// already saved is still saved during registration; WisePlug recognizes
+/// the appliance, the setting name may not be exact.
+const heatKinds = {
+  'flat_iron',
+  'rice_cooker',
+  'air_fryer',
+  'microwave',
+  'water_dispenser',
+};
+const maxHeatLevels = 5;
+bool isHeatKind(ApplianceKind kind) => heatKinds.contains(kind.key);
+
+/// A heating appliance's settings when the user chose [count]: its usual
+/// ones for its usual count (a rice cooker's Cook and Keep warm), else
+/// "Level 1" … "Level n".
+List<String> heatLevelsFor(ApplianceKind kind, int count) {
+  final usual = levelsFor(kind);
+  if (count == usual.length) return usual;
+  if (count == 1) return [usual.first];
+  return [for (var i = 1; i <= count; i++) 'Level $i'];
+}
+
 /// "30–100 W", "1,200–3,000 W".
 String wattsText(int w) =>
     w < 1000 ? '$w' : '${w ~/ 1000},${(w % 1000).toString().padLeft(3, '0')}';

@@ -838,3 +838,22 @@ else keep ±10 %.
 - If you are already the owner, nothing changes for you.
 - Deleting your account now lets the plug go in Firebase **and** Supabase,
   so the next owner can pair with it and register appliances.
+
+## More than one sample when registering (in plain words)
+
+- When registration says "All done!", there is now a **Take another
+  sample** button (one per setting, e.g. "Take another sample: Level 2").
+- Tap it, turn the appliance off, then on at that setting, and leave it on
+  for about 1 minute. WisePlug saves one more sample. Repeat as often as you
+  like.
+- Every sample is kept. WisePlug works out each setting's range from its
+  samples (the latest 20), so more samples make recognition more accurate,
+  especially for appliances whose power changes a little each time.
+- During normal registration, a setting already saved is still refused
+  ("already saved"), so a fan speed is never sampled twice by mistake.
+- Heating appliances (flat iron, rice cooker, air fryer, microwave, water
+  dispenser): registration asks **"How many heat settings does it have?"**
+  (1 to 5), e.g. a flat iron with 4 levels gets Level 1 to Level 4, one
+  sample each. Their settings heat at the same power, so a setting is saved
+  even when it matches one already saved; WisePlug recognizes the appliance,
+  but may not tell which setting it is on.

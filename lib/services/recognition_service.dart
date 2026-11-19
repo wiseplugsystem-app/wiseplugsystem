@@ -118,6 +118,8 @@ class RecognitionService {
     String? iconKey,
     List<String>? levels,
     String? level,
+    // "Take another sample": one more sample of a setting already saved.
+    bool extra = false,
   }) async => RegistrationProgress.fromJson(
     await _invoke('register-sample', {
       'eventId': eventId,
@@ -128,6 +130,7 @@ class RecognitionService {
       // A new appliance's settings, and the one this sample is for.
       'levels': ?levels,
       'level': ?level,
+      if (extra) 'extra': true,
     }),
   );
 
