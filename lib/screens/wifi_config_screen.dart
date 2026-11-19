@@ -320,6 +320,7 @@ class _NearbySetupPanelState extends State<NearbySetupPanel> {
   @override
   void dispose() {
     _poll?.cancel();
+    WifiBinding.unbind(); // leaving setup: back to the internet
     _password.dispose();
     _manualName.dispose();
     super.dispose();

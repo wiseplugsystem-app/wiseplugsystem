@@ -128,6 +128,7 @@ Future<bool?> showRegistrationDialog(
   String? name,
   List<RegisteredAppliance> unfinished = const [],
   RecognitionSettings settings = const RecognitionSettings(),
+  double? Function(String outlet)? livePowerW,
 }) => showDialog<bool>(
   context: context,
   barrierDismissible: false,
@@ -139,6 +140,7 @@ Future<bool?> showRegistrationDialog(
     name: name,
     unfinished: unfinished,
     settings: settings,
+    livePowerW: livePowerW,
   ),
 );
 
@@ -163,6 +165,9 @@ class RegistrationDialog extends StatefulWidget {
   final RecognitionSettings settings;
   final Duration pollEvery;
 
+  /// The outlet's live watts ('A' / 'B'), shown while a sample is measured.
+  final double? Function(String outlet)? livePowerW;
+
   const RegistrationDialog({
     super.key,
     required this.service,
@@ -173,6 +178,7 @@ class RegistrationDialog extends StatefulWidget {
     this.unfinished = const [],
     this.settings = const RecognitionSettings(),
     this.pollEvery = const Duration(seconds: 2),
+    this.livePowerW,
   });
 
   @override
@@ -214,6 +220,13 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
 
   /// A fan's number of speeds (1 to 4).
   int _speeds = 3;
+
+  /// The run being watched (its outlet, and its measured power).
+  OutletSession? _run;
+
+  /// The power of each setting sampled so far ("Level 1" -> 45 W): this
+  /// pop-up's samples, and an appliance being continued's saved settings.
+  final _savedWatts = <String, double>{};
 
   /// A heating appliance's number of heat settings, as the user chose
   /// (null: its usual number).
@@ -301,6 +314,9 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
       _applianceName = _appliance?.name ?? _name.text.trim();
       _collected = _appliance == null ? 0 : _appliance!.samplesDone(_legacy);
       _level = _newAppliance ? _levels.first : _appliance!.nextLevel;
+      for (final m in _appliance?.modes ?? const <ApplianceMode>[]) {
+        if (m.meanPowerW case final w?) _savedWatts[m.name] = w;
+      }
       _tracker = RegistrationTracker(
         startedAt: DateTime.now().toUtc(),
         initialEventId: widget.fromSession?.eventId,
@@ -329,11 +345,29 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
           if (r != null && tracker.isFresh(r)) r,
       ]..sort((a, b) => b.startedAt.compareTo(a.startedAt));
       final latest = fresh.isEmpty ? null : fresh.first;
-      final step = tracker.next(latest);
+      var step = tracker.next(latest);
+      // About the same power as a setting already sampled: not saved (fans
+      // and others): "use a different level". A heating appliance's levels
+      // draw the same power, so it is only told, and still saved.
+      final same = _sameAs(latest?.measuredPowerW);
+      if (step == RegistrationStep.record && same != null && !_heatAppliance) {
+        if (!latest!.isOpen) tracker.skip(latest.eventId);
+        step = RegistrationStep.alreadyDone;
+        if (mounted) {
+          setState(() {
+            _run = latest;
+            _step = step;
+            _repeatMode = same.$1;
+            _measuringSince = null;
+          });
+        }
+        return;
+      }
       if (step == RegistrationStep.record && latest != null) {
         await _record(tracker, latest);
       } else if (mounted) {
         setState(() {
+          _run = latest;
           _step = step;
           _repeatMode = step == RegistrationStep.alreadyDone
               ? latest?.modeName
@@ -366,6 +400,12 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
       );
       tracker.recorded(run.eventId);
       tracker.applianceId = progress.applianceId;
+      if ((_extraLevel ?? _level, run.measuredPowerW) case (
+        final l?,
+        final w?,
+      )) {
+        _savedWatts.putIfAbsent(l, () => w);
+      }
       if (!mounted) return;
       if (_extraLevel != null) {
         // One more sample saved: back to the "All done" screen.
@@ -956,6 +996,26 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
     };
   }
 
+  /// A setting already sampled whose power this run's is about the same as
+  /// (within recognition_config.floor_power_pct): ("Level 1", 45.0). Not
+  /// while taking an extra sample (the same setting again is wanted).
+  (String, double)? _sameAs(double? watts) {
+    if (watts == null || _extraLevel != null) return null;
+    for (final e in _savedWatts.entries) {
+      if (e.key == _level) continue;
+      if ((watts - e.value).abs() <= e.value * widget.settings.floorPowerPct) {
+        return (e.key, e.value);
+      }
+    }
+    return null;
+  }
+
+  /// The live watts of the outlet being measured, if the plug sends them.
+  double? _liveWatts() {
+    final run = _run, live = widget.livePowerW;
+    return run == null || live == null ? null : live(run.outletName);
+  }
+
   /// " (about 33 W)": the power of the saved setting this run repeated, when
   /// the app has it (an appliance being continued); else nothing.
   String _repeatWatts() {
@@ -963,9 +1023,10 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
     final w = mode == null
         ? null
         : _appliance?.modes
-              .where((m) => m.name == mode)
-              .firstOrNull
-              ?.meanPowerW;
+                  .where((m) => m.name == mode)
+                  .firstOrNull
+                  ?.meanPowerW ??
+              _savedWatts[mode];
     return w == null ? '' : ' (about ${w.round()} W)';
   }
 
@@ -1058,6 +1119,39 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
       ),
       if ((!_complete || _extraLevel != null) &&
           _step == RegistrationStep.measuring) ...[
+        // What the plug measures right now, so the user sees it working.
+        if (_liveWatts() case final w?) ...[
+          const SizedBox(height: 14),
+          Text(
+            'Measuring: ${w.toStringAsFixed(1)} W',
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
+          ),
+          Text(
+            'Please wait. Leave it on and don\'t touch it.',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 16, color: context.muted),
+          ),
+        ],
+        if (_sameAs(_run?.measuredPowerW) case (final level, final w)) ...[
+          const SizedBox(height: 10),
+          Text(
+            _heatAppliance
+                ? 'This looks the same as $level (about ${w.round()} W). '
+                      'Heating appliances use the same power at every level, '
+                      'so that is normal: keep it on.'
+                : 'This looks the same as $level (about ${w.round()} W). '
+                      'Turn it off and set a DIFFERENT level.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.w700,
+              color: _heatAppliance
+                  ? context.muted
+                  : context.readable(Colors.orange),
+            ),
+          ),
+        ],
         const SizedBox(height: 16),
         const LinearProgressIndicator(),
         if (_measuringSince case final since?) ...[

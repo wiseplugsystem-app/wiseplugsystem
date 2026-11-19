@@ -75,6 +75,10 @@ class OutletSession {
   final DateTime startedAt;
   final DateTime? endedAt;
 
+  /// The run's average power as WisePlug measured it (its Stage 1, then
+  /// Stage 2 summary), or null before then (about 10 s in).
+  final double? measuredPowerW;
+
   OutletSession.fromRow(Map<String, dynamic> r)
     : eventId = r['event_id'].toString(),
       deviceId = r['device_id'].toString(),
@@ -107,7 +111,8 @@ class OutletSession {
       startedAt = DateTime.parse(r['started_at'].toString()).toUtc(),
       endedAt = r['ended_at'] == null
           ? null
-          : DateTime.parse(r['ended_at'].toString()).toUtc();
+          : DateTime.parse(r['ended_at'].toString()).toUtc(),
+      measuredPowerW = sensorNumber(_map(r['features'])['avg_power_w']);
 
   String get outletName => outletLetter(outlet);
   bool get isOpen => endedAt == null;
@@ -241,6 +246,10 @@ class RecognitionSettings {
   /// [minLearnedCutoffMinutes].
   final double learnedMargin;
   final int minLearnedCutoffMinutes;
+
+  /// recognition_config.floor_power_pct: how close two powers count as "the
+  /// same" (registration's "same as Level 1" warning uses it too).
+  final double floorPowerPct;
   const RecognitionSettings({
     this.registrationSamples = 3,
     this.defaultCutoffMinutes = 30,
@@ -249,9 +258,11 @@ class RecognitionSettings {
     this.samplesPerCharger = 3,
     this.learnedMargin = 1.2,
     this.minLearnedCutoffMinutes = 5,
+    this.floorPowerPct = 0.10,
   });
   RecognitionSettings.fromRow(Map<String, dynamic> r)
     : learnedMargin = sensorNumber(r['learned_margin']) ?? 1.2,
+      floorPowerPct = sensorNumber(r['floor_power_pct']) ?? 0.10,
       minLearnedCutoffMinutes =
           (r['min_learned_cutoff_minutes'] as num?)?.toInt() ?? 5,
       registrationSamples = (r['registration_samples'] as num?)?.toInt() ?? 3,

@@ -2,9 +2,38 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 
 import 'device_binding.dart';
+
+/// "wisewp" has no internet, so Android keeps sending the app's traffic over
+/// mobile data and http://192.168.4.1 never reaches the plug. While the app
+/// talks to the plug (Wi-Fi setup, Pair), it asks Android to use the Wi-Fi
+/// connection (MainActivity, "wiseplug/wifi"); afterwards back to normal so
+/// Firebase and Supabase use the internet again. Elsewhere: does nothing.
+class WifiBinding {
+  static const _channel = MethodChannel('wiseplug/wifi');
+
+  /// Use the Wi-Fi for this app's connections. True when bound.
+  static Future<bool> bind() async {
+    if (kIsWeb || !Platform.isAndroid) return false;
+    try {
+      return await _channel.invokeMethod<bool>('bindWifi') ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Back to Android's normal choice (the internet).
+  static Future<void> unbind() async {
+    if (kIsWeb || !Platform.isAndroid) return;
+    try {
+      await _channel.invokeMethod<void>('unbindWifi');
+    } catch (_) {}
+  }
+}
 
 /// Binding only when near: asks the WisePlug for its one-time pairing code
 /// over the local network (its "wisewp" setup Wi-Fi, or the same home Wi-Fi).
@@ -17,6 +46,19 @@ class NearbyPairing {
   static Future<String?> requestCode({
     Duration wait = const Duration(seconds: 3),
     int tries = 3,
+  }) async {
+    // Over the Wi-Fi (not mobile data), then back to normal.
+    await WifiBinding.bind();
+    try {
+      return await _requestCode(wait: wait, tries: tries);
+    } finally {
+      await WifiBinding.unbind();
+    }
+  }
+
+  static Future<String?> _requestCode({
+    required Duration wait,
+    required int tries,
   }) async {
     for (var i = 0; i < tries; i++) {
       RawDatagramSocket? socket;
@@ -94,6 +136,8 @@ class SetupNetworkClient {
   const SetupNetworkClient({this.client});
 
   Future<T> _use<T>(Future<T> Function(http.Client client) body) async {
+    // The plug is on "wisewp" (no internet): use the Wi-Fi, not mobile data.
+    if (client == null) await WifiBinding.bind();
     final http_ = client ?? http.Client();
     try {
       return await body(http_);
@@ -158,11 +202,14 @@ class SetupNetworkClient {
         return Map<String, dynamic>.from(jsonDecode(response.body) as Map);
       });
     } catch (_) {
+      if (client == null) await WifiBinding.unbind();
       throw const LocalProvisioningException(
         'Lost the connection to the WisePlug. Make sure this device is still '
         'joined to "${SetupNetwork.ssid}" and try again.',
       );
     }
+    // Sent: back to the internet, so the app sees the plug come online.
+    if (client == null) await WifiBinding.unbind();
     if (reply['ok'] != true) {
       throw LocalProvisioningException(
         reply['error']?.toString() ?? 'The WisePlug rejected the details.',

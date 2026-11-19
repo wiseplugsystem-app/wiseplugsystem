@@ -857,3 +857,26 @@ else keep ±10 %.
   sample each. Their settings heat at the same power, so a setting is saved
   even when it matches one already saved; WisePlug recognizes the appliance,
   but may not tell which setting it is on.
+
+## Wi-Fi setup works with mobile data on (in plain words)
+
+- "wisewp" has no internet, so Android kept sending the app's traffic over
+  mobile data, and the app could not find the plug's setup page.
+- Now, while the app talks to the plug (Wi-Fi setup and Pair), it tells
+  Android to use the Wi-Fi. When the details are sent, or the screen is
+  closed, it goes back to normal so the app uses the internet again.
+- If Android asks "This network has no internet. Stay connected?", tap
+  **Stay connected**.
+
+## Live watts and "same as Level X" while registering (in plain words)
+
+- While a sample is being measured, the pop-up shows the outlet's live
+  power ("Measuring: 45.3 W") and "Please wait. Leave it on and don't touch
+  it.", next to the "On for 25 s of about 60 s" timer.
+- About 10 s in, WisePlug compares the power with the levels already
+  sampled. If it is about the same (within `recognition_config.floor_power_pct`,
+  10 %), it says "This looks the same as Level 1 (about 45 W). Turn it off
+  and set a DIFFERENT level." and that run is not saved.
+- Heating appliances (iron, rice cooker…) draw the same power at every
+  level, so they only see a note ("that is normal: keep it on") and the
+  sample is still saved.

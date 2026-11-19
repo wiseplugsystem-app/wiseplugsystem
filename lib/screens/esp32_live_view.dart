@@ -159,6 +159,16 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
   final _updates = ValueNotifier<int>(0);
   final _subscriptions = <StreamSubscription<dynamic>>[];
   Map<String, OutletReading> _readings = {};
+
+  /// The outlet's live watts ('A' / 'B') for the registration pop-up, or
+  /// null when its reading is not fresh.
+  double? _livePowerW(String outlet) {
+    final r = _readings[outlet];
+    return r != null && r.isFresh(DateTime.now()) && r.sensorValid != false
+        ? r.activePower
+        : null;
+  }
+
   final Map<String, int> _loadSamples = {};
   bool _readError = false, _loading = true;
   String _version = 'Loading…';
@@ -226,6 +236,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
           name: name,
           unfinished: unfinished,
           settings: _recognitionSettings,
+          livePowerW: _livePowerW,
         );
         _loadAppliances();
       }
@@ -270,6 +281,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
             fromSession: session,
             appliance: appliance,
             settings: _recognitionSettings,
+            livePowerW: _livePowerW,
           );
           _loadAppliances();
         case null:
@@ -1239,6 +1251,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
         service: recognition,
         appliance: a,
         settings: _recognitionSettings,
+        livePowerW: _livePowerW,
       );
     } finally {
       _promptOpen = false;

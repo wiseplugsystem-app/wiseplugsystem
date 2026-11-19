@@ -1,4 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Wi-Fi setup / Pair: find the Wi-Fi connection to talk to the plug on "wisewp". -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <application
         android:label="WisePlug"
         android:networkSecurityConfig="@xml/network_security_config"
