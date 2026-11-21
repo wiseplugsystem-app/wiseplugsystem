@@ -970,3 +970,21 @@ else keep ±10 %.
   …?", "Which appliance?") are now a pop-up in the middle of the screen,
   like the registration pop-up (before: a sheet from the bottom). Tapping
   outside it still means "Not now".
+
+## Plain labels on the appliance page (in plain words)
+
+Text only (same information and functions):
+
+| Before | Now |
+|---|---|
+| Appliance (page title) | Appliance details |
+| Right now: On, in Outlet A / Off (last used in Outlet A) | Status: In use · Outlet A / Not in use · last on Outlet A |
+| Safe time | Auto turn-off after |
+| Usually on for | Usual use |
+| Used: 3 of 7 times | Times used: 3 of 7 |
+| Uses about: 45 W | Power: about 45 W (a charger: "changes while charging") |
+| Registering … / Continue registering | Setting up … / Finish setup |
+| Add a setting · Take another sample | Add a level · Measure again |
+| "WisePlug picks this time for you. It gets smarter after you use it 7 times." | "WisePlug sets the turn-off time and adjusts it as you use it." |
+
+The Active / Idle badge is unchanged.

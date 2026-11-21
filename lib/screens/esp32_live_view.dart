@@ -1218,8 +1218,8 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
         : next.startsWith('Level ')
         ? 'Turn it on at a different speed'
         : 'Turn it on at $next';
-    return 'Registering · ${a.samplesDone(legacy)} of '
-        '${a.samplesNeeded(legacy)} done. $how, or tap Continue registering.';
+    return 'Setting up · ${a.samplesDone(legacy)} of '
+        '${a.samplesNeeded(legacy)} done. $how, or tap Finish setup.';
   }
 
   /// Opens the registration steps for [a] (from its page or its outlet
@@ -1294,7 +1294,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
   /// 45 min" (a use counts once you confirmed what it is).
   String _learningText(RegisteredAppliance a) {
     final total = _recognitionSettings.learningUses;
-    if (!a.isLearned) return '${a.useCount.clamp(0, total)} of $total times';
+    if (!a.isLearned) return '${a.useCount.clamp(0, total)} of $total';
     final usual = a.baselineRuntimeSeconds;
     return usual == null
         ? '${a.useCount}'
@@ -1461,7 +1461,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                   icon: const Icon(Icons.chevron_left, color: _blue),
                 ),
                 title: const Text(
-                  'Appliance',
+                  'Appliance details',
                   style: TextStyle(fontWeight: FontWeight.w800),
                 ),
                 centerTitle: true,
@@ -1545,34 +1545,31 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                 child: Column(
                   children: [
                     _Pair(
-                      'Right now',
+                      'Status',
                       outlet != null
-                          ? 'On, in Outlet $outlet'
+                          ? 'In use · Outlet $outlet'
                           : a.lastOutlet == null
-                          ? 'Off'
-                          : 'Off (last used in Outlet ${outletLetter(a.lastOutlet!)})',
+                          ? 'Not in use'
+                          : 'Not in use · last on Outlet ${outletLetter(a.lastOutlet!)}',
                     ),
                     // Set by WisePlug: the type's default, then the learned
                     // typical use x 1.2 (recognition_config.learned_margin).
                     _Pair(
-                      'Safe time',
+                      'Auto turn-off after',
                       _duration(a.safeTimeSeconds(_recognitionSettings)),
                       color: _green,
                     ),
                     // The 7-use learning.
                     if (a.isLearned && a.baselineRuntimeSeconds != null)
-                      _Pair(
-                        'Usually on for',
-                        _duration(a.baselineRuntimeSeconds),
-                      )
+                      _Pair('Usual use', _duration(a.baselineRuntimeSeconds))
                     else
-                      _Pair('Used', _learningText(a)),
+                      _Pair('Times used', _learningText(a)),
                     // The power signature WisePlug recognises. Only the main
                     // one: extra modes WisePlug adds by itself ("Mode 2", e.g.
                     // another fan speed) still count for recognition, unshown.
                     if (_mainMode(a) case final m?)
                       _Pair(
-                        'Uses about',
+                        'Power',
                         m.sampleCount < _recognitionSettings.registrationSamples
                             ? 'Not measured yet'
                             : m.meanPowerW == null
@@ -1582,9 +1579,9 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                             // what it is recognised by, not what it uses now
                             // (the outlet card shows the live power).
                             : _isCharger(a)
-                            ? '${m.meanPowerW!.round()} W when registered; '
-                                  'changes with the battery'
-                            : '${m.meanPowerW!.round()} W',
+                            ? 'about ${m.meanPowerW!.round()} W, changes '
+                                  'while charging'
+                            : 'about ${m.meanPowerW!.round()} W',
                       ),
                   ],
                 ),
@@ -1604,7 +1601,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                 child: FilledButton.icon(
                   onPressed: () => _continueRegistration(a),
                   icon: const Icon(Icons.playlist_add_check),
-                  label: const Text('Continue registering'),
+                  label: const Text('Finish setup'),
                 ),
               ),
             ],
@@ -1617,7 +1614,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                     child: OutlinedButton.icon(
                       onPressed: () => _addSetting(context, a),
                       icon: const Icon(Icons.add),
-                      label: const Text('Add a setting'),
+                      label: const Text('Add a level'),
                     ),
                   ),
                   const SizedBox(width: 10),
@@ -1625,7 +1622,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                     child: OutlinedButton.icon(
                       onPressed: () => _anotherSample(context, a),
                       icon: const Icon(Icons.replay),
-                      label: const Text('Take another sample'),
+                      label: const Text('Measure again'),
                     ),
                   ),
                 ],
@@ -1634,8 +1631,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
             Padding(
               padding: const EdgeInsets.only(top: 10),
               child: Text(
-                'WisePlug picks this time for you. It gets smarter after you '
-                'use it ${_recognitionSettings.learningUses} times.',
+                'WisePlug sets the turn-off time and adjusts it as you use it.',
                 style: TextStyle(fontSize: 16, color: context.muted),
               ),
             ),
