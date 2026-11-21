@@ -27,9 +27,11 @@ class RecognitionService {
 
   SupabaseClient get _db => _clientOverride ?? Supabase.instance.client;
 
-  /// The open run on each outlet ('A' / 'B'), refreshed every [pollEvery].
+  /// The open run on each outlet ('A' / 'B'), refreshed every [pollEvery],
+  /// and at once when Supabase reports a change (Realtime, see
+  /// [_sessionChanges]): pop-ups appear as soon as Supabase has the answer.
   Stream<Map<String, OutletSession>> openSessions() =>
-      _poll(pollEvery, () async {
+      _poll(pollEvery, wake: _sessionChanges(), () async {
         final rows = await _db
             .from('outlet_sessions')
             .select()
@@ -40,6 +42,49 @@ class RecognitionService {
             outletLetter(r['outlet'].toString()): OutletSession.fromRow(r),
         };
       });
+
+  /// Supabase Realtime: a signal for every change to this plug's runs
+  /// (outlet_sessions must be in the supabase_realtime publication). If the
+  /// live link is off or drops (weak signal), nothing is lost: the
+  /// [pollEvery] check still runs.
+  Stream<void> _sessionChanges() {
+    late final StreamController<void> changes;
+    RealtimeChannel? channel;
+    changes = StreamController<void>(
+      onListen: () {
+        try {
+          channel = _db
+              .channel('outlet_sessions_$deviceId')
+              .onPostgresChanges(
+                event: PostgresChangeEvent.all,
+                schema: 'public',
+                table: 'outlet_sessions',
+                filter: PostgresChangeFilter(
+                  type: PostgresChangeFilterType.eq,
+                  column: 'device_id',
+                  value: deviceId,
+                ),
+                callback: (_) {
+                  if (!changes.isClosed) changes.add(null);
+                },
+              )
+              .subscribe();
+        } catch (_) {
+          // No live link: the regular check keeps everything up to date.
+        }
+      },
+      onCancel: () async {
+        final c = channel;
+        channel = null;
+        if (c != null) {
+          try {
+            await _db.removeChannel(c);
+          } catch (_) {}
+        }
+      },
+    );
+    return changes.stream;
+  }
 
   /// The latest run on [outlet] ('A' / 'B'), open or ended.
   Future<OutletSession?> latestSession(String outlet) async {
@@ -188,12 +233,21 @@ class RecognitionService {
 
 /// A stream that runs [load] now and then every [every] while it is listened
 /// to; a failed load is reported as an error and the next one is tried.
-Stream<T> _poll<T>(Duration every, Future<T> Function() load) {
+/// [wake]: also run it at once on each of its events (e.g. a Realtime change).
+Stream<T> _poll<T>(
+  Duration every,
+  Future<T> Function() load, {
+  Stream<void>? wake,
+}) {
   late final StreamController<T> controller;
   Timer? timer;
-  var busy = false;
+  StreamSubscription<void>? woken;
+  var busy = false, again = false;
   Future<void> tick() async {
-    if (busy) return;
+    if (busy) {
+      again = true; // a change came in meanwhile: load once more after
+      return;
+    }
     busy = true;
     try {
       final value = await load();
@@ -203,14 +257,22 @@ Stream<T> _poll<T>(Duration every, Future<T> Function() load) {
     } finally {
       busy = false;
     }
+    if (again && controller.hasListener) {
+      again = false;
+      await tick();
+    }
   }
 
   controller = StreamController<T>(
     onListen: () {
       tick();
       timer = Timer.periodic(every, (_) => tick());
+      woken = wake?.listen((_) => tick(), onError: (_) {});
     },
-    onCancel: () => timer?.cancel(),
+    onCancel: () {
+      timer?.cancel();
+      woken?.cancel();
+    },
   );
   return controller.stream;
 }

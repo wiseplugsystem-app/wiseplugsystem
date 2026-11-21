@@ -332,7 +332,46 @@ class Esp32Service {
   }
 
   /// Queue intent, then wait for the ESP32 receipt. Never update telemetry here.
+  ///
+  /// Turn on / Turn off: the plug moves its state number on by itself (e.g.
+  /// when Supabase answers about the appliance), so a press can arrive with
+  /// the number from a moment ago and be refused as REJECTED_STALE; the
+  /// switch then jumped back. The plug's current state is read and the same
+  /// command sent once more. Other commands (Keep it on, Reset Safety…) are
+  /// never repeated: for them a changed state matters.
   Future<void> command(
+    OutletReading reading,
+    String type, {
+    Map<String, Object?> fields = const {},
+  }) async {
+    try {
+      await _commandOnce(reading, type, fields: fields);
+    } on DeviceRejection catch (e) {
+      if (e.code != 'REJECTED_STALE' ||
+          (type != 'TURN_ON' && type != 'TURN_OFF')) {
+        rethrow;
+      }
+      final fresh = await _currentReading(reading.outlet);
+      if (fresh == null || fresh.revision == reading.revision) rethrow;
+      await _commandOnce(fresh, type, fields: fields);
+    }
+  }
+
+  /// The outlet's state as the plug last published it ('A' / 'B').
+  Future<OutletReading?> _currentReading(String outlet) async {
+    try {
+      final snapshot = await database
+          .ref('telemetry_logs/outlet_$outlet')
+          .get()
+          .timeout(const Duration(seconds: 5));
+      final map = databaseMap(snapshot.value);
+      return map.isEmpty ? null : OutletReading.fromMap(outlet, map);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _commandOnce(
     OutletReading reading,
     String type, {
     Map<String, Object?> fields = const {},

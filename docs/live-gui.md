@@ -988,3 +988,51 @@ Text only (same information and functions):
 | "WisePlug picks this time for you. It gets smarter after you use it 7 times." | "WisePlug sets the turn-off time and adjusts it as you use it." |
 
 The Active / Idle badge is unchanged.
+
+## Instant updates in the app (in plain words)
+
+- Measured on 2026-11-21: each request from the app to Supabase or Firebase
+  takes under a second, so the internet was not what made the app feel slow.
+  The waiting was the plug's measuring (~10–15 s, needed for accurate
+  recognition), its upload (~8–10 s), and the app asking Supabase only every
+  3 seconds.
+- Now Supabase tells the app the moment a run changes (Supabase Realtime,
+  already switched on for `outlet_sessions`), so pop-ups and states appear
+  as soon as Supabase has the answer. The 3-second check stays as a backup
+  in case the live link drops on a weak signal.
+
+## The power switch no longer jumps back (in plain words)
+
+- Pressing Turn off (or on) sends the command with the plug's state number.
+  The plug moves that number on by itself (e.g. when Supabase answers about
+  the appliance), so a press sometimes arrived "too old", the plug refused
+  it (REJECTED_STALE) and the switch jumped back after ~2 s.
+- Now the app reads the plug's current state and sends the same Turn on /
+  Turn off once more by itself. "Keep it on" and Reset Safety are never
+  repeated: for them a changed state matters. The plug's check stays.
+
+## No more freezes during uploads; the countdown starts at 60 (in plain words)
+
+- Cause of the freezes, found with the freeze recorder: while the plug waits
+  for Supabase's reply, the ESP32 library's `Stream::timedRead` loops without
+  pausing. On a slow connection that kept the network core busy over 5 s, so
+  the watchdog restarted the plug ("Supabase secure upload" every time). A
+  restart during a run counts up to 30 s on top (safety padding), which is
+  why a card once said "Safe time is up" at 4 min 27 s of a 5-min limit.
+- Fix: the watchdog no longer checks that the network core rests
+  (the watchdog is set with `idle_core_mask = 0`; `disableCore0WDT` was tried
+  first but flooded the Serial Monitor with "task not found"). The safety
+  loop keeps its own watchdog, and a stuck
+  network task is still restarted by the heartbeat check.
+- The safe-time warning now lasts 63 s on the plug (60 s for the user + 3 s
+  for the message to reach the phone). The app shows at most 60, so the
+  countdown always starts at 60 and reaches 0 exactly at the cut-off.
+
+## An offline plug no longer looks "In use" (in plain words)
+
+- When WisePlug went offline while an appliance was running, that outlet's
+  card stayed "In use" with the old watts, and its time kept counting on the
+  phone. One rule ("the last two updates showed power") did not check that
+  the updates were still fresh.
+- Now that rule needs fresh updates (under 30 s old), so the card shows
+  "No connection · Last seen …" like the other outlet.

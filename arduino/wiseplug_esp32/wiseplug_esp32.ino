@@ -31,6 +31,7 @@
 #define ARDUINOJSON_USE_LONG_LONG 1
 #include <ArduinoJson.h>
 #include <esp_timer.h>
+#include <esp_task_wdt.h>
 #include <esp_heap_caps.h>
 #include <time.h>
 #include "secrets.h"        // FIREBASE_HOST and the plug's login. Never commit or share.
@@ -480,7 +481,7 @@ void beginAlert(SocketChannel& ch, const char* type, uint64_t now) {
   auto& a = ch.data.alert;
   snprintf(a.id, sizeof(a.id), "%s_%s_%lu", sessionID, ch.outlet, (unsigned long)ch.data.safety.revision);
   strlcpy(a.type, type, sizeof(a.type)); strlcpy(a.resolution, "PENDING", sizeof(a.resolution));
-  a.trigger = epochMs(); a.expiry = a.trigger ? a.trigger + 60000 : 0;
+  a.trigger = epochMs(); a.expiry = a.trigger ? a.trigger + int64_t(WARNING_MS) : 0;
   if (strcmp(type, "SENSOR_UNAVAILABLE") == 0) {
     ch.sensorNotifyAt = now + SENSOR_NOTIFY_MS;  // reported later, if still silent
   } else {
@@ -1067,7 +1068,7 @@ void addOutlet(JsonDocument& root, int i, const Snapshot& s) {
   // during a run), shown on the card.
   root[b + "alertType"] = s.alert.type;
   root[b + "countdownRemaining"] = st == SocketState::Warning
-      ? int((60000 - min(uint64_t(60000), s.capturedMono - s.safety.warningStarted) + 999) / 1000) : 0;
+      ? int((WARNING_MS - min(WARNING_MS, s.capturedMono - s.safety.warningStarted) + 999) / 1000) : 0;
   if (s.commandID[0]) {
     String a = String("command_results/") + ch.outlet + "/" + s.commandID + "/";
     root[a + "result"] = s.commandResult; root[a + "revision"] = s.safety.revision;
@@ -1887,6 +1888,23 @@ void setup() {
     if (!lastRestart[0] && esp_reset_reason() == ESP_RST_BROWNOUT) strlcpy(lastRestart, "brownout", sizeof(lastRestart));
     if (!lastRestart[0] && esp_reset_reason() == ESP_RST_PANIC) strlcpy(lastRestart, "crash", sizeof(lastRestart));
   }
+  // The watchdog no longer checks that the network core (core 0) rests: the
+  // ESP32 library's Stream::timedRead loops without pausing while it waits
+  // for a slow server's reply, and on a slow connection that kept core 0 busy
+  // over 5 s during Supabase uploads, so the watchdog restarted the plug
+  // (freeze recorder, 2026-11-21: "Supabase secure upload" every time). Set
+  // through the watchdog's own setting (no idle task watched, same 5 s,
+  // panic on timeout): disableCore0WDT() left the idle task calling the
+  // watchdog and flooded the Serial Monitor with "task not found". The
+  // safety loop (core 1) keeps its own watchdog below, and a stuck network
+  // task is still restarted by the heartbeat check (TASK_STUCK_MS).
+  {
+    esp_task_wdt_config_t wdt = {};
+    wdt.timeout_ms = CONFIG_ESP_TASK_WDT_TIMEOUT_S * 1000;
+    wdt.idle_core_mask = 0;
+    wdt.trigger_panic = true;
+    if (esp_task_wdt_reconfigure(&wdt) != ESP_OK) Serial.println("Watchdog setting not applied");
+  }
   // D: the hardware watchdog restarts the plug if the safety loop freezes.
   enableLoopWDT();
   // 1 = power-on, 3 = software reset, 4/5 = crash, 6/7 = watchdog, 9 = brownout.
@@ -1994,7 +2012,7 @@ void loop() {
       ch.lastSnapshot = now; d.capturedMono = now; d.capturedEpoch = epochMs();
       if (d.alert.id[0] && !d.alert.trigger && d.capturedEpoch && safety.state == SocketState::Warning) {
         d.alert.trigger = d.capturedEpoch - int64_t(now - safety.warningStarted);
-        d.alert.expiry = d.alert.trigger + 60000; persistSafety(ch);
+        d.alert.expiry = d.alert.trigger + int64_t(WARNING_MS); persistSafety(ch);
       }
       crumb(CrumbLoop, 5);
       xQueueOverwrite(ch.snapshots, &d);

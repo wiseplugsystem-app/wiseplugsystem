@@ -354,7 +354,10 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
 
   bool _hasConnectedLoad(OutletReading reading, DateTime now) =>
       reading.hasConnectedAppliance(now) ||
-      ((_loadSamples[reading.outlet] ?? 0) >= 2 &&
+      // Only while the readings are fresh: offline, the last two showed
+      // power and the card stayed "In use" with old data (2026-11-22).
+      (reading.isFresh(now) &&
+          (_loadSamples[reading.outlet] ?? 0) >= 2 &&
           reading.currentState != 'DISABLED' &&
           !reading.isLockedOut);
 

@@ -3,6 +3,10 @@
 
 // Pure state machine: all time is monotonic milliseconds, independent of NTP.
 enum class SocketState { Idle, Sampling, Active, Warning, LockedOut, Disabled };
+// The safe-time warning: 60 s for the user plus 3 s for the message to reach
+// the phone, so the app's countdown always starts at 60 (it shows at most 60)
+// and reaches 0 exactly at the cut-off.
+constexpr uint64_t WARNING_MS = 63000;
 struct SafetyState {
   SocketState state = SocketState::Idle;
   uint32_t revision = 0;
@@ -28,14 +32,14 @@ struct SafetyState {
         return true;
       }
     }
-    if (state == SocketState::Warning && now - warningStarted >= 60000) {
+    if (state == SocketState::Warning && now - warningStarted >= WARNING_MS) {
       state = SocketState::LockedOut; ++revision; return true;
     }
     return false;
   }
   // maxOverrides: how many extensions one run may have (no limit if left out).
   bool overrideRuntime(uint64_t now, uint32_t seconds, uint32_t maxOverrides = UINT32_MAX) {
-    if (state != SocketState::Warning || now - warningStarted >= 60000 ||
+    if (state != SocketState::Warning || now - warningStarted >= WARNING_MS ||
         seconds == 0 || seconds > 86400 || overrideCount >= maxOverrides) return false;
     deadline = now + uint64_t(seconds) * 1000;
     state = SocketState::Active; overridden = true; ++overrideCount; ++revision; return true;
