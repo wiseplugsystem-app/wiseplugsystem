@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter/foundation.dart';
 import 'package:wiseplug/models/models.dart';
 import 'package:wiseplug/services/firebase_service.dart';
 import 'package:wiseplug/firebase_options.dart';
@@ -11,13 +13,24 @@ import 'screens/profiles_tab.dart';
 import 'screens/settings_tab.dart';
 import 'screens/appliance_registration_screen.dart';
 import 'services/device_binding.dart';
+import 'services/safety_alarm_manager.dart';
 import 'services/supabase_backend.dart';
 import 'theme.dart';
+
+/// A push while the app is closed or in the background: a safety warning
+/// plays its sound on the alarm volume, so a muted phone still sounds.
+@pragma('vm:entry-point')
+Future<void> wisePlugBackgroundMessage(RemoteMessage message) async {
+  if (isSafetyAlarmPush(message.data)) await playSafetyAlarmInBackground();
+}
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+    FirebaseMessaging.onBackgroundMessage(wisePlugBackgroundMessage);
+  }
   await DeviceBinding.ensureBound();
   // Permanent store (sessions, alerts, profiles); skipped unless configured.
   await SupabaseBackend.initialize();

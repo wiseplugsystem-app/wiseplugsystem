@@ -30,6 +30,10 @@ export function staleRuns(
   for (const r of open) {
     if (r.event_id === current.eventId) continue;
     if (r.outlet === current.outlet) out.push({ id: r.id, reason: "SUPERSEDED" });
+    // The plug lists it as running: still on, even from before a restart
+    // (a run resumed after a restart keeps its event ID, so its boot part is
+    // older than the other outlet's new runs).
+    else if (current.running?.includes(r.event_id)) continue;
     else if (bootOf(r.event_id) !== boot) out.push({ id: r.id, reason: "REBOOT" });
     else if (current.running && !current.running.includes(r.event_id)) out.push({ id: r.id, reason: "NOT_RUNNING" });
   }

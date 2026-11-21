@@ -46,10 +46,66 @@ abstract class TonePlayer {
   Future<void> stop();
 }
 
+/// Safety sounds play like an alarm clock: on the phone's ALARM volume, so
+/// silent or vibrate mode does not mute them, and Do Not Disturb lets them
+/// through in its usual setting ("Alarms" allowed). iOS: the playback
+/// category, which plays with the ring/silent switch on silent.
+final safetyAlarmAudio = AudioContext(
+  android: const AudioContextAndroid(
+    usageType: AndroidUsageType.alarm,
+    contentType: AndroidContentType.sonification,
+    audioFocus: AndroidAudioFocus.gainTransient,
+    stayAwake: true,
+  ),
+  iOS: AudioContextIOS(category: AVAudioSessionCategory.playback),
+);
+
+/// A safety push (FCM data "type") that should sound the warning.
+bool isSafetyAlarmPush(Map<String, dynamic> data) => const {
+  'RUNTIME_WARNING',
+  'SAFETY_CEILING_EXCEEDED',
+  'LOCKED_OUT',
+  'OVERCURRENT',
+  'POWER_ANOMALY',
+  'SENSOR_UNAVAILABLE',
+}.contains(data['type']);
+
+/// With the app closed: a safety push plays the warning sound once on the
+/// alarm volume (silent mode, Do Not Disturb), besides the notification.
+Future<void> playSafetyAlarmInBackground() async {
+  final player = AudioPlayer();
+  try {
+    await player.setAudioContext(safetyAlarmAudio);
+    await player.play(AssetSource('sounds/warning_tone.mp3'));
+    await player.onPlayerComplete.first.timeout(
+      const Duration(seconds: 30),
+      onTimeout: () {},
+    );
+  } catch (_) {
+    // No sound possible (e.g. alarm volume off): the notification remains.
+  } finally {
+    await player.dispose();
+  }
+}
+
 class _AudioTonePlayer implements TonePlayer {
   final _player = AudioPlayer();
+  bool _alarmVolume = false;
+
+  /// On the alarm volume (see [safetyAlarmAudio]), set once.
+  Future<void> _useAlarmVolume() async {
+    if (_alarmVolume) return;
+    try {
+      await _player.setAudioContext(safetyAlarmAudio);
+      _alarmVolume = true;
+    } catch (_) {
+      // Not supported here (e.g. the web): the normal volume is used.
+    }
+  }
+
   @override
   Future<void> play(String asset, double volume) async {
+    await _useAlarmVolume();
     await _player.stop();
     await _player.setReleaseMode(ReleaseMode.stop);
     await _player.play(AssetSource(asset), volume: volume);
@@ -57,6 +113,7 @@ class _AudioTonePlayer implements TonePlayer {
 
   @override
   Future<void> loop(String asset, double volume) async {
+    await _useAlarmVolume();
     await _player.stop();
     await _player.setReleaseMode(ReleaseMode.loop);
     await _player.play(AssetSource(asset), volume: volume);

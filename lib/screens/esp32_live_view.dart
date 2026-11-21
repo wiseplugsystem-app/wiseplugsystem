@@ -181,6 +181,11 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
   RecognitionSettings _recognitionSettings = const RecognitionSettings();
   final _appliancesNamed = <String, String>{};
   final _promptedEvents = <String>{};
+
+  /// "Not now" (or a registration closed with nothing saved): ask about
+  /// that run again at this time, if it is still running.
+  final _askAgainAt = <String, DateTime>{};
+  static const _askAgainAfter = Duration(minutes: 5);
   bool _promptOpen = false;
 
   /// The Profiles tab: the user's registered appliances (Supabase).
@@ -201,10 +206,15 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
     for (final entry in _sessions.entries) {
       final reading = _readings[entry.key];
       final session = entry.value;
-      if (session.status.needsAnswer &&
+      // "Is this X?" (same data as a registered appliance) is a pop-up too.
+      final ask = session.status.needsAnswer || session.askIsThis;
+      final again = _askAgainAt[session.eventId];
+      final due = again != null && !now.isBefore(again);
+      if (ask &&
           reading != null &&
           reading.hasConnectedAppliance(now) &&
-          _promptedEvents.add(session.eventId)) {
+          (_promptedEvents.add(session.eventId) || due)) {
+        _askAgainAt.remove(session.eventId);
         _openPrompt(session);
         return;
       }
@@ -228,7 +238,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
         String? name,
         List<RegisteredAppliance> unfinished = const [],
       }) async {
-        await showRegistrationDialog(
+        final saved = await showRegistrationDialog(
           context,
           service: recognition,
           fromSession: session,
@@ -238,19 +248,13 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
           settings: _recognitionSettings,
           livePowerW: _livePowerW,
         );
+        // Closed with nothing saved: ask again later.
+        if (saved != true) _askLater(session);
         _loadAppliances();
       }
 
-      if (session.status == RecognitionStatus.unknown) {
-        // A new load may be an appliance whose registration was left unfinished.
-        await register(
-          unfinished: [
-            for (final a in _appliances)
-              if (!a.isReady(required)) a,
-          ],
-        );
-        return;
-      }
+      // A new appliance: first "New appliance on Outlet A: Register it?"
+      // (below), then the form. (Before, the form opened straight away.)
       final choice = await showRecognitionPrompt(
         context,
         session,
@@ -272,10 +276,21 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
             _notify('$error'.replaceFirst('Bad state: ', ''));
           }
         case RegisterChoice(:final typeName, :final name):
-          await register(typeName: typeName, name: name);
+          await register(
+            typeName: typeName,
+            name: name,
+            // A new load may be an appliance whose registration was left
+            // unfinished (as the form offered before).
+            unfinished: session.status == RecognitionStatus.unknown
+                ? [
+                    for (final a in _appliances)
+                      if (!a.isReady(required)) a,
+                  ]
+                : const [],
+          );
         case ContinueChoice(:final appliance):
           // This run is its next sample.
-          await showRegistrationDialog(
+          final saved = await showRegistrationDialog(
             context,
             service: recognition,
             fromSession: session,
@@ -283,14 +298,20 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
             settings: _recognitionSettings,
             livePowerW: _livePowerW,
           );
+          if (saved != true) _askLater(session);
           _loadAppliances();
         case null:
-          break;
+          // "Not now" / "Ask me later": ask again in 5 minutes.
+          _askLater(session);
       }
     } finally {
       _promptOpen = false;
     }
   }
+
+  /// Ask about [session] again after [_askAgainAfter], if it still runs.
+  void _askLater(OutletSession session) =>
+      _askAgainAt[session.eventId] = DateTime.now().add(_askAgainAfter);
 
   /// Re-reads the registered appliances (Profiles tab, unfinished registrations).
   Future<void> _loadAppliances() async {
@@ -692,54 +713,12 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
   /// and, when the user has to answer, a button that opens the prompt.
   Widget? _recognitionBadge(OutletSession? session, bool connected) {
     if (!connected || session == null) return null;
-    // Provisional: ask plainly, with a big button. One tap confirms, so the
-    // appliance gets its own limit and the run counts as a usage session.
-    if (session.status == RecognitionStatus.provisional &&
-        widget.recognition != null &&
-        session.applianceId != null) {
-      final name = session.applianceName ?? 'this appliance';
-      return Container(
-        margin: const EdgeInsets.only(top: 10),
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: _amber.withValues(alpha: .14),
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: _amber),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(
-              'Is this $name?',
-              style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 18),
-            ),
-            const SizedBox(height: 4),
-            const Text(
-              'Confirm it so WisePlug uses its own safe time and counts this use.',
-              style: TextStyle(fontSize: 16),
-            ),
-            const SizedBox(height: 10),
-            FilledButton.icon(
-              style: FilledButton.styleFrom(
-                // Dark enough for white text (at least 4.5:1).
-                backgroundColor: readableOn(_green, Colors.white),
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 14),
-              ),
-              onPressed: () => _confirmProvisional(session),
-              icon: const Icon(Icons.check_circle),
-              label: Text('Yes, it is $name'),
-            ),
-            TextButton(
-              onPressed: () => _openPrompt(session),
-              child: const Text('No, it is something else'),
-            ),
-          ],
-        ),
-      );
-    }
+    // "Is this X?" is asked in a pop-up (no question box on the card); the
+    // card offers the button below to open it again after "Not now".
     // A question waiting for the user: a clear button that opens it.
-    if (session.status.needsAnswer && widget.recognition != null) {
+    if ((session.status.needsAnswer ||
+            session.status == RecognitionStatus.provisional) &&
+        widget.recognition != null) {
       return Padding(
         padding: const EdgeInsets.only(top: 10),
         child: FilledButton.icon(
@@ -780,6 +759,9 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
   }
 
   /// "Yes, it is Fan" on a provisional label: confirms it in one tap.
+  /// Kept (not deleted) since the card's question box was removed on
+  /// 2026-11-21: the "Is this X?" pop-up confirms instead.
+  // ignore: unused_element
   Future<void> _confirmProvisional(OutletSession session) async {
     try {
       await widget.recognition!.confirm(session.eventId, session.applianceId!);
@@ -798,8 +780,9 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
   final _meterSilentSince = <String, DateTime>{};
 
   /// How long the meter must stay silent before the card says
-  /// "Not measuring": a few updates, so one missed answer does not flicker.
-  static const _meterSilentAfter = Duration(seconds: 10);
+  /// "Not measuring": long enough that short blips (the link restarts every
+  /// 5 s) show nothing; then it is a hung meter (2026-11-21: was 10 s).
+  static const _meterSilentAfter = Duration(seconds: 30);
 
   void _trackMeterSilence(Map<String, OutletReading> readings) {
     final now = DateTime.now();
@@ -864,9 +847,10 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
     if (_meterSilent(reading.outlet, now)) {
       return (
         headline: 'Not measuring',
+        // A hung meter wakes only when it loses wall power (2026-11-21).
         hint:
-            'This outlet has power, but WisePlug cannot measure or time it. '
-            'Check that the WisePlug is plugged into the wall.',
+            'Outlet ${reading.outlet}\'s meter stopped answering. Unplug '
+            'WisePlug from the wall for 10 seconds, then plug it back in.',
         icon: Icons.error_outline,
         color: _amber,
       );
@@ -1241,7 +1225,13 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
   /// Opens the registration steps for [a] (from its page or its outlet
   /// card). They follow the next run on either outlet; one already going is
   /// not used, since it may be a setting [a] already has.
-  Future<void> _continueRegistration(RegisteredAppliance a) async {
+  /// [addLevel]: a new setting for a registered appliance; [extraLevel]:
+  /// one more sample of one of its settings (its page's buttons).
+  Future<void> _continueRegistration(
+    RegisteredAppliance a, {
+    String? addLevel,
+    String? extraLevel,
+  }) async {
     final recognition = widget.recognition;
     if (recognition == null || _promptOpen) return;
     _promptOpen = true;
@@ -1252,11 +1242,52 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
         appliance: a,
         settings: _recognitionSettings,
         livePowerW: _livePowerW,
+        addLevel: addLevel,
+        extraLevel: extraLevel,
       );
     } finally {
       _promptOpen = false;
     }
     await _loadAppliances();
+  }
+
+  /// "Add a setting": its name, then its sample (the registration steps).
+  Future<void> _addSetting(BuildContext context, RegisteredAppliance a) async {
+    final name = await showDialog<String>(
+      context: context,
+      builder: (_) => _NewSettingDialog(applianceName: a.name),
+    );
+    if (name == null || name.isEmpty || !context.mounted) return;
+    if (a.levels.any((l) => l.name.toLowerCase() == name.toLowerCase())) {
+      _notify('${a.name} already has "$name". Use "Take another sample".');
+      return;
+    }
+    await _continueRegistration(a, addLevel: name);
+  }
+
+  /// "Take another sample": of which setting (if it has several).
+  Future<void> _anotherSample(
+    BuildContext context,
+    RegisteredAppliance a,
+  ) async {
+    final names = [for (final l in a.levels) l.name];
+    final level = names.length <= 1
+        ? (names.isEmpty ? 'Normal' : names.first)
+        : await showDialog<String>(
+            context: context,
+            builder: (dialogContext) => SimpleDialog(
+              title: const Text('Which setting?'),
+              children: [
+                for (final n in names)
+                  SimpleDialogOption(
+                    onPressed: () => Navigator.pop(dialogContext, n),
+                    child: Text(n, style: const TextStyle(fontSize: 18)),
+                  ),
+              ],
+            ),
+          );
+    if (level == null || !context.mounted) return;
+    await _continueRegistration(a, extraLevel: level);
   }
 
   /// The 7-use learning, in plain words: "3 of 7", then "7 · usually on for
@@ -1575,6 +1606,29 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
                   icon: const Icon(Icons.playlist_add_check),
                   label: const Text('Continue registering'),
                 ),
+              ),
+            ],
+            // Registered: a new setting (e.g. Level 5), or more samples.
+            if (ready) ...[
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => _addSetting(context, a),
+                      icon: const Icon(Icons.add),
+                      label: const Text('Add a setting'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => _anotherSample(context, a),
+                      icon: const Icon(Icons.replay),
+                      label: const Text('Take another sample'),
+                    ),
+                  ),
+                ],
               ),
             ],
             Padding(
@@ -2569,4 +2623,44 @@ class _PowerControlState extends State<_PowerControl> {
       ),
     );
   }
+}
+
+/// "Add a setting": asks the new setting's name. It owns its text field, so
+/// the field lives until the dialog has finished closing.
+class _NewSettingDialog extends StatefulWidget {
+  final String applianceName;
+  const _NewSettingDialog({required this.applianceName});
+  @override
+  State<_NewSettingDialog> createState() => _NewSettingDialogState();
+}
+
+class _NewSettingDialogState extends State<_NewSettingDialog> {
+  final _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: Text('New setting for ${widget.applianceName}'),
+    content: TextField(
+      controller: _controller,
+      autofocus: true,
+      maxLength: 40,
+      decoration: const InputDecoration(hintText: 'e.g. Level 5, High'),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(
+        onPressed: () => Navigator.pop(context, _controller.text.trim()),
+        child: const Text('Next'),
+      ),
+    ],
+  );
 }

@@ -47,17 +47,25 @@ Future<PromptChoice?> showRecognitionPrompt(
   int defaultCutoffMinutes = 30,
   List<RegisteredAppliance> unfinished = const [],
   int registrationSamples = 3,
-}) => showModalBottomSheet<PromptChoice>(
+}) => showDialog<PromptChoice>(
   context: context,
-  isScrollControlled: true,
-  showDragHandle: true,
-  // Scrolls when the question is taller than a small phone's screen.
-  builder: (_) => SingleChildScrollView(
-    child: RecognitionPromptSheet(
-      session: session,
-      defaultCutoffMinutes: defaultCutoffMinutes,
-      unfinished: unfinished,
-      registrationSamples: registrationSamples,
+  // Centered on the screen, like the registration pop-up (it was a sheet
+  // from the bottom until 2026-11-21). Tapping outside = "Not now".
+  builder: (_) => Dialog(
+    insetPadding: const EdgeInsets.all(20),
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 480),
+      // Scrolls when the question is taller than a small phone's screen.
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.only(top: 22),
+        child: RecognitionPromptSheet(
+          session: session,
+          defaultCutoffMinutes: defaultCutoffMinutes,
+          unfinished: unfinished,
+          registrationSamples: registrationSamples,
+        ),
+      ),
     ),
   ),
 );
@@ -99,6 +107,8 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
         'Another ${s.registerAs?.typeName ?? 'appliance'}?',
       RecognitionStatus.ambiguous => 'Which appliance is on $outlet?',
       RecognitionStatus.provisional => 'Is this ${s.applianceName ?? 'it'}?',
+      // Confirmed by itself at Stage 2 (same data as a registered one).
+      _ when s.askIsThis => 'Is this ${s.applianceName ?? 'it'}?',
       _ => 'New appliance on $outlet',
     };
     return SafeArea(
@@ -148,6 +158,9 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
       // for an appliance's power patterns and mean nothing to users.
       'WisePlug thinks this is ${s.applianceName}. '
           'Confirm it to use its own safe time.',
+    _ when s.askIsThis =>
+      'This has the same measurements as ${s.applianceName}. Is it '
+          '${s.applianceName}, or a new appliance?',
     _ => s.promptText ?? 'New appliance detected. Register it?',
   };
 
@@ -155,6 +168,13 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
   ApplianceKind _kind() => switch (s.status) {
     RecognitionStatus.sameTypeInUse => kindForType(s.registerAs?.typeName),
     RecognitionStatus.provisional => kindForType(
+      s.candidates
+              .where((c) => c.applianceId == s.applianceId)
+              .firstOrNull
+              ?.typeName ??
+          s.applianceName,
+    ),
+    _ when s.askIsThis => kindForType(
       s.candidates
               .where((c) => c.applianceId == s.applianceId)
               .firstOrNull
@@ -276,6 +296,18 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
             ),
             notNow,
           ];
+        case _ when s.askIsThis:
+          return [
+            FilledButton(
+              onPressed: s.applianceId == null
+                  ? null
+                  : () => pop(
+                      ConfirmChoice(s.applianceId!, s.applianceName ?? ''),
+                    ),
+              child: Text('Yes, it is ${s.applianceName}'),
+            ),
+            notNow,
+          ];
         default:
           break; // the usual actions below
       }
@@ -329,6 +361,22 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
           OutlinedButton(
             onPressed: () => pop(const RegisterChoice()),
             child: const Text('No, register a new appliance'),
+          ),
+          notNow,
+        ];
+      // Confirmed by itself at Stage 2: the same question.
+      case _ when s.askIsThis:
+        return [
+          FilledButton(
+            onPressed: s.applianceId == null
+                ? null
+                : () =>
+                      pop(ConfirmChoice(s.applianceId!, s.applianceName ?? '')),
+            child: Text('Yes, it is ${s.applianceName}'),
+          ),
+          OutlinedButton(
+            onPressed: () => pop(const RegisterChoice()),
+            child: const Text('No, it is a new appliance'),
           ),
           notNow,
         ];

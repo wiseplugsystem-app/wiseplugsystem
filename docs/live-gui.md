@@ -880,3 +880,93 @@ else keep ±10 %.
 - Heating appliances (iron, rice cooker…) draw the same power at every
   level, so they only see a note ("that is normal: keep it on") and the
   sample is still saved.
+
+## Registration pop-ups (in plain words)
+
+- **A new appliance:** first a small question, "New appliance on Outlet A —
+  Register / Not now" (and "It is X: continue registering" for one left
+  unfinished). The registration form opens only after **Register**.
+- **Same measurements as a registered appliance:** a pop-up asks "Is this
+  Chacha Fan?" with **Yes / No, register a new appliance / Not now**, at
+  about 10 s and again if WisePlug confirmed it by itself at about 60 s ("Is
+  it Chacha Fan, or a new appliance?"). With no answer, it is confirmed by
+  itself as before (its own safe time and learning). The outlet card asks too.
+- **Not now / Ask me later:** the same run asks again after 5 minutes, if
+  the appliance is still on.
+- **Appliances page:** a registered appliance has **Add a setting** (e.g.
+  Level 5: name it, then one sample) and **Take another sample** (pick the
+  setting; as many as you like).
+
+## Chargers are not cut off for a normal power rise (in plain words)
+
+- A charger draws more or less power as the battery fills. WisePlug's
+  "sudden double power" check (POWER_ANOMALY) once cut off a laptop charger
+  for this.
+- Supabase now tells the plug when the recognized appliance is a charger
+  (`varyingPower`), and the plug skips only that check for it. Too much
+  current (above 8 A for 10 s, or above 10 A) still cuts a charger off at
+  once.
+
+## A run that continues after a restart keeps its time (in plain words)
+
+- When the plug restarts during a run, the run continues with its timer.
+  Supabase used to close that run as "ended by a restart" as soon as the
+  other outlet started something, so its used time was recorded wrong.
+- Now a run the plug still lists as running is never closed this way.
+
+## Freeze recorder (in plain words)
+
+- Each part of the plug (safety loop, meters, Firebase, Supabase) notes what
+  it is doing in memory that survives a restart. If the plug freezes or
+  crashes and restarts itself, it reports what every part was doing in its
+  status (`health/freeze`, and "Last freeze/crash: …" on the Serial
+  Monitor), so the cause can be found without a cable.
+- It also counts when each meter goes silent and what the uploads were doing
+  at that moment (`health/meterSilent`). This shows whether the dropouts come
+  from the uploads. It changes no behaviour.
+
+## The warning sounds even on a muted phone (in plain words)
+
+- Safety sounds now play like an alarm clock: on the phone's **alarm
+  volume**. Silent or vibrate mode does not mute them, and Do Not Disturb
+  lets them through in its usual setting ("Alarms" allowed).
+- With the app open: the 60-second warning loops on the alarm volume.
+- With the app closed: a safety push also plays the warning sound once on
+  the alarm volume (besides the notification).
+- What Android does not allow any app to override: notifications for
+  WisePlug turned off completely, the app force-stopped, the alarm volume at
+  0, or Do Not Disturb set to "Total silence". The plug still turns the
+  appliance off at 0 s.
+
+## No false "Offline" during uploads (in plain words)
+
+- The plug can hold only one secure internet connection at a time. Right
+  after a run ended, its Supabase uploads came one after another and kept
+  the app's live updates (Firebase) waiting 24–35 s, so the app showed
+  "Offline" although Wi-Fi was fine (measured on 2026-11-21).
+- Now, between two Supabase uploads, the plug first updates Firebase once
+  (waiting at most 6 s, in case Firebase is unreachable). The app never
+  waits for more than one upload.
+
+## No question box on the outlet card (in plain words)
+
+- The amber "Is this Chacha Fan? / Yes, it is … / No, it is something else"
+  box on the outlet card asked the same question as the pop-up, so it is
+  gone. The pop-up asks it.
+- The card keeps the small yellow **Needs your answer** button (now also for
+  "Is this …?"): after "Not now" it opens the pop-up again, without waiting
+  the 5 minutes.
+
+## "Not measuring" tells the fix; centered questions (in plain words)
+
+- A meter's own chip can occasionally hang (an electrical spike) and only
+  wakes when it loses wall power; the ESP32 cannot restart it (confirmed on
+  2026-11-21: unplugging the wall woke meter A while the ESP32 kept running on
+  USB). The card now says: "Outlet A's meter stopped answering. Unplug
+  WisePlug from the wall for 10 seconds, then plug it back in." It appears
+  only after 30 s of silence (was 10 s), so short blips show nothing. The
+  safety handling of a running appliance is unchanged.
+- The questions before registration ("New appliance on Outlet A", "Is this
+  …?", "Which appliance?") are now a pop-up in the middle of the screen,
+  like the registration pop-up (before: a sheet from the bottom). Tapping
+  outside it still means "Not now".

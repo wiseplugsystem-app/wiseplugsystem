@@ -126,7 +126,8 @@ class HelpScreen extends StatelessWidget {
                 ),
                 (
                   'Not measuring',
-                  'Check that the WisePlug is plugged into the wall.',
+                  'The meter stopped answering: unplug WisePlug from the '
+                      'wall for 10 seconds, then plug it back in.',
                 ),
                 ('No connection', 'Check the WisePlug and your Wi-Fi.'),
               ],

@@ -119,6 +119,13 @@ class OutletSession {
 
   /// Stage 2 has arrived: the run is fully measured and can be registered.
   bool get measured => stage >= 2;
+
+  /// WisePlug thinks this is a registered appliance and nobody has answered
+  /// yet: "Is this X, or a new appliance?" (Stage 1, or confirmed by itself
+  /// at Stage 2: confirmed_by "stage2").
+  bool get askIsThis =>
+      status == RecognitionStatus.provisional ||
+      (status == RecognitionStatus.confirmed && confirmedBy == 'stage2');
 }
 
 /// One mode profile of an appliance ("Normal", "Low", "High").

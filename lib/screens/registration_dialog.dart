@@ -129,6 +129,8 @@ Future<bool?> showRegistrationDialog(
   List<RegisteredAppliance> unfinished = const [],
   RecognitionSettings settings = const RecognitionSettings(),
   double? Function(String outlet)? livePowerW,
+  String? addLevel,
+  String? extraLevel,
 }) => showDialog<bool>(
   context: context,
   barrierDismissible: false,
@@ -141,6 +143,8 @@ Future<bool?> showRegistrationDialog(
     unfinished: unfinished,
     settings: settings,
     livePowerW: livePowerW,
+    addLevel: addLevel,
+    extraLevel: extraLevel,
   ),
 );
 
@@ -168,6 +172,10 @@ class RegistrationDialog extends StatefulWidget {
   /// The outlet's live watts ('A' / 'B'), shown while a sample is measured.
   final double? Function(String outlet)? livePowerW;
 
+  /// For a registered [appliance] (its page): a new setting to add, or one
+  /// more sample of one of its settings. The steps start at once.
+  final String? addLevel, extraLevel;
+
   const RegistrationDialog({
     super.key,
     required this.service,
@@ -179,6 +187,8 @@ class RegistrationDialog extends StatefulWidget {
     this.settings = const RecognitionSettings(),
     this.pollEvery = const Duration(seconds: 2),
     this.livePowerW,
+    this.addLevel,
+    this.extraLevel,
   });
 
   @override
@@ -249,6 +259,10 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
   String? _extraLevel;
   int _extras = 0;
 
+  /// The extra sample is a NEW setting (added from the appliance's page):
+  /// saved as a new setting, and "same as Level X" still applies.
+  bool _newLevel = false;
+
   bool get _newAppliance => _appliance == null;
   int get _legacy => widget.settings.registrationSamples;
 
@@ -281,6 +295,12 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
   @override
   void initState() {
     super.initState();
+    // From an appliance's page: straight to the steps.
+    if (widget.addLevel != null || widget.extraLevel != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _startForAppliance();
+      });
+    }
     widget.service.types().then((t) {
       if (mounted) setState(() => _types = t);
     }, onError: (_) {});
@@ -325,6 +345,21 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
     });
     _poll();
     _timer = Timer.periodic(widget.pollEvery, (_) => _poll());
+  }
+
+  /// A new setting or one more sample for a registered appliance.
+  void _startForAppliance() {
+    _start();
+    final tracker = _tracker;
+    if (tracker == null) return;
+    setState(() {
+      _complete = true; // already registered: back to "All done" after
+      _newLevel = widget.addLevel != null;
+      _extraLevel = widget.addLevel ?? widget.extraLevel;
+      // One more sample of a saved setting: the same again is wanted.
+      tracker.allowRepeat = _newLevel ? _heatAppliance : true;
+      _step = RegistrationStep.plugIn;
+    });
   }
 
   Future<void> _poll() async {
@@ -396,7 +431,8 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
         iconKey: first ? kindForType(_type.text.trim()).key : null,
         levels: first ? _levels : null,
         level: _extraLevel ?? _level,
-        extra: _extraLevel != null,
+        // A new setting is created by its first sample, not "extra".
+        extra: _extraLevel != null && !_newLevel,
       );
       tracker.recorded(run.eventId);
       tracker.applianceId = progress.applianceId;
@@ -413,6 +449,7 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
         _timer?.cancel();
         setState(() {
           _extraLevel = null;
+          _newLevel = false;
           _extras++;
           _step = RegistrationStep.switchOff;
           _error = null;
@@ -444,6 +481,8 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
         : ' on Outlet ${widget.fromSession!.outletName}';
     final title = _newAppliance
         ? 'Something new$outlet'
+        : widget.addLevel != null || widget.extraLevel != null
+        ? 'Add to ${_appliance!.name}'
         : 'Finish adding ${_appliance!.name}';
     return Dialog(
       insetPadding: const EdgeInsets.all(20),
@@ -990,8 +1029,11 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
       ),
       _ => (
         Icons.power,
-        'One more sample of $level: turn $name off, wait 5 seconds, then '
-            'turn it on at $level and leave it on for about 1 minute.',
+        _newLevel
+            ? 'New setting $level: turn $name off, wait 5 seconds, then '
+                  'turn it on at $level and leave it on for about 1 minute.'
+            : 'One more sample of $level: turn $name off, wait 5 seconds, then '
+                  'turn it on at $level and leave it on for about 1 minute.',
       ),
     };
   }
@@ -1000,9 +1042,10 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
   /// (within recognition_config.floor_power_pct): ("Level 1", 45.0). Not
   /// while taking an extra sample (the same setting again is wanted).
   (String, double)? _sameAs(double? watts) {
-    if (watts == null || _extraLevel != null) return null;
+    // A new setting (from the appliance's page) is checked like any other.
+    if (watts == null || (_extraLevel != null && !_newLevel)) return null;
     for (final e in _savedWatts.entries) {
-      if (e.key == _level) continue;
+      if (e.key == (_newLevel ? _extraLevel : _level)) continue;
       if ((watts - e.value).abs() <= e.value * widget.settings.floorPowerPct) {
         return (e.key, e.value);
       }

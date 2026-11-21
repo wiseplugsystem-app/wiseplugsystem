@@ -33,7 +33,7 @@
 import { deviceIdOf, requireDevice } from "../_shared/auth.ts";
 import { db } from "../_shared/db.ts";
 import { HttpError, json, outletOf, readJson, serve } from "../_shared/http.ts";
-import { type Recognition, parseFeatures, recognize, recognizeWithChargers, type Stage } from "../_shared/matching.ts";
+import { isCharger, type Recognition, parseFeatures, recognize, recognizeWithChargers, type Stage } from "../_shared/matching.ts";
 import {
   learnFromConfirmed,
   loadAppliance,
@@ -55,6 +55,19 @@ async function loadCalibration(deviceId: string, outlet: string) {
 
 type Row = Record<string, unknown>;
 
+/** The run's appliance is a charger: its power follows the battery, so the
+ * plug does not trip it for a sudden rise (POWER_ANOMALY); overcurrent still
+ * applies. */
+async function varyingPowerOf(applianceId: unknown): Promise<boolean> {
+  if (typeof applianceId !== "string" || !applianceId) return false;
+  const { data, error } = await db.from("appliance_instances")
+    .select("appliance_types(icon_key)").eq("id", applianceId).maybeSingle();
+  if (error || !data) return false;
+  // One type per appliance (Supabase may give it as an object or a list).
+  const t = data.appliance_types as unknown;
+  return isCharger((Array.isArray(t) ? t[0] : t as Row | null)?.icon_key);
+}
+
 serve(async (req) => {
   requireDevice(req);
   const body = await readJson(req);
@@ -75,8 +88,8 @@ serve(async (req) => {
   // In the reference meter's units, so Outlet A and Outlet B samples compare.
   const features = calibrate(rawFeatures, calibration);
   // Every answer also carries the thermostat-rest settings for the plug.
-  const reply = (s: Row) => ({ ...sessionReply(s), restGapS: config.restGapS, restGapMinW: config.restGapMinW,
-    maxOverrides: config.maxOverrides });
+  const reply = async (s: Row) => ({ ...sessionReply(s), restGapS: config.restGapS, restGapMinW: config.restGapMinW,
+    maxOverrides: config.maxOverrides, varyingPower: await varyingPowerOf(s.appliance_id) });
   const { data: existing, error: existingError } = await db.from("outlet_sessions")
     .select("*").eq("event_id", eventId).maybeSingle();
   if (existingError) throw existingError;
@@ -84,7 +97,7 @@ serve(async (req) => {
     throw new HttpError(409, "eventId belongs to another outlet");
   }
   // A retry, a late Stage 1, or a run that has already ended: answer as before.
-  if (existing && (existing.stage >= stage || existing.ended_at)) return json(reply(existing));
+  if (existing && (existing.stage >= stage || existing.ended_at)) return json(await reply(existing));
 
   // The user (or registration) already said what this is: keep their answer.
   // At Stage 2 a user confirmation also teaches the profile (EMA), once.
@@ -97,7 +110,7 @@ serve(async (req) => {
     }
     const { data, error } = await db.from("outlet_sessions").update(update).eq("id", existing.id).select("*").single();
     if (error) throw error;
-    return json(reply(data));
+    return json(await reply(data));
   }
 
   // Close the plug's runs that have ended though their end was never reported
@@ -176,7 +189,7 @@ serve(async (req) => {
     // Another outlet claimed the same appliance a moment ago (or this run was
     // inserted by a parallel retry): decide again with the latest sessions.
     const { data: again } = await db.from("outlet_sessions").select("*").eq("event_id", eventId).maybeSingle();
-    if (again && !existing) return json(reply(again));
+    if (again && !existing) return json(await reply(again));
     result = await decide();
     ({ data: saved, error } = await write(result));
   }
@@ -188,5 +201,5 @@ serve(async (req) => {
       .eq("id", result.match.appliance.id);
     if (lastError) throw lastError;
   }
-  return json(reply(saved!), existing ? 200 : 201);
+  return json(await reply(saved!), existing ? 200 : 201);
 });

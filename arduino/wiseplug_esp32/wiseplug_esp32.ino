@@ -168,6 +168,9 @@ struct Snapshot {
   // yet); or recognize-appliance's status.
   char recognition[24] = "NONE";
   bool confirmed = false;         // MATCHED_CONFIRMED: the appliance's own cutoff applies
+  // A charger (Supabase's varyingPower): its power follows the battery, so a
+  // rise is not a POWER_ANOMALY. Overcurrent still trips it.
+  bool varying = false;
   float steadyW = 0;              // this run's steady average power (anomaly trip)
   float peak = 0;
   int64_t startEpoch = 0, capturedEpoch = 0;
@@ -246,6 +249,7 @@ struct RecognitionReply {
   uint64_t startMono = 0;  // which run it is for
   uint32_t cutoffS = 0;
   char status[24] = {}, applianceID[64] = {}, name[64] = {};
+  bool varying = false;  // the appliance is a charger (varyingPower)
 };
 QueueHandle_t sessionReports, safetyReports, recognitionReports, recognitionReplies;
 // Keeping plug and app in step: while a run is not confirmed, its last
@@ -277,6 +281,51 @@ String timestamp(int64_t ms) {
 }
 
 // ==========================================
+// FREEZE RECORDER (diagnostics only: changes no behaviour)
+// ==========================================
+// Each task notes what it is doing (a "crumb") in memory that survives a
+// watchdog or crash restart (RTC_NOINIT). After such a restart the plug
+// reports what every task was doing at that moment in its status
+// (devices/gadget-1/status/health/freeze). It also counts when a meter goes
+// silent and what the cloud tasks were doing then (health/meterSilent), to
+// find why meters drop out during uploads.
+enum CrumbTask : uint8_t { CrumbLoop = 0, CrumbMeters, CrumbFirebase, CrumbSupabase };
+constexpr uint32_t CRUMB_MAGIC = 0x57504C47;  // "WPLG": the crumbs are valid
+RTC_NOINIT_ATTR uint32_t crumbMagic;
+RTC_NOINIT_ATTR volatile uint8_t crumbs[4];
+inline void crumb(uint8_t t, uint8_t stage) { crumbs[t] = stage; }  // t: a CrumbTask
+const char* crumbText(int task, uint8_t stage) {
+  static const char* const loopText[] = {"idle", "cloud replies", "timers", "meter reading", "app command", "snapshot", "health check"};
+  static const char* const meterText[] = {"sleep", "reading meter A", "reading meter B", "restarting a meter link"};
+  static const char* const fbText[] = {"sleep", "Wi-Fi", "reading commands", "sending live data", "Wi-Fi settings", "pairing"};
+  static const char* const supaText[] = {"sleep", "safety report", "recognition", "run end", "secure upload"};
+  switch (task) {
+    case CrumbLoop: return stage < 7 ? loopText[stage] : "?";
+    case CrumbMeters: return stage < 4 ? meterText[stage] : "?";
+    case CrumbFirebase: return stage < 6 ? fbText[stage] : "?";
+    default: return stage < 5 ? supaText[stage] : "?";
+  }
+}
+char freezeInfo[160] = "";  // what the plug was doing at its last freeze or crash
+// Meter dropouts: how often each meter went silent, how often while
+// Supabase was uploading, and the cloud work at the last one.
+std::atomic<uint32_t> meterSilences[2] = {{0}, {0}}, meterSilentInUpload[2] = {{0}, {0}};
+char meterSilentLast[2][48] = {};
+// Called once in setup(), before the tasks start.
+void readFreezeRecorder() {
+  auto why = esp_reset_reason();
+  bool frozen = why == ESP_RST_TASK_WDT || why == ESP_RST_INT_WDT || why == ESP_RST_WDT || why == ESP_RST_PANIC;
+  if (frozen && crumbMagic == CRUMB_MAGIC) {
+    snprintf(freezeInfo, sizeof(freezeInfo), "%s: safety loop %s; meters %s; Firebase %s; Supabase %s",
+             why == ESP_RST_PANIC ? "crash" : "watchdog", crumbText(CrumbLoop, crumbs[CrumbLoop]),
+             crumbText(CrumbMeters, crumbs[CrumbMeters]), crumbText(CrumbFirebase, crumbs[CrumbFirebase]),
+             crumbText(CrumbSupabase, crumbs[CrumbSupabase]));
+  }
+  crumbMagic = CRUMB_MAGIC;
+  for (auto& c : crumbs) c = 0;
+}
+
+// ==========================================
 // SAFETY STATE & STORAGE (control loop only)
 // ==========================================
 bool relayEnergized(SocketState s) { return s != SocketState::Disabled && s != SocketState::LockedOut; }
@@ -299,6 +348,7 @@ void saveRun(SocketChannel& ch) {
   ch.prefs.putString("runId", d.activeProfileID);
   ch.prefs.putString("runRec", d.recognition);
   ch.prefs.putBool("runConf", d.confirmed);
+  ch.prefs.putBool("runVary", d.varying);
   ch.prefs.putBool("runOver", d.safety.overridden);
   ch.prefs.putUChar("runOvrN", uint8_t(min(d.safety.overrideCount, uint32_t(255))));
   ch.prefs.putFloat("runSteady", d.steadyW);
@@ -390,7 +440,7 @@ void endSession(SocketChannel& ch, const char* reason = "ENDED") {
   auto& d = ch.data;
   d.activeName[0] = d.activeProfileID[0] = 0;
   strlcpy(d.recognition, "NONE", sizeof(d.recognition));
-  d.confirmed = false; d.steadyW = 0; d.peak = 0;
+  d.confirmed = false; d.steadyW = 0; d.peak = 0; d.varying = false;
 }
 void lock(SocketChannel& ch) {
   // A warning still PENDING went unanswered: report the lockout, so the phone says the outlet was turned off. Checked
@@ -478,7 +528,8 @@ bool electricalTrip(SocketChannel& ch, const SensorSample& s, uint64_t now) {
   // Only for a confirmed appliance, against its own steady power in this run
   // (a provisional or unknown load may legitimately change its draw).
   const auto& d = ch.data;
-  bool anomaly = d.safety.state == SocketState::Active && d.confirmed && d.steadyW > 0 &&
+  // Not for a charger: its power rises and falls with the battery.
+  bool anomaly = d.safety.state == SocketState::Active && d.confirmed && !d.varying && d.steadyW > 0 &&
       s.power > d.steadyW * ANOMALY_FACTOR + 5.0f;
   ch.anomalySamples = anomaly ? ch.anomalySamples + 1 : 0;
   if (ch.anomalySamples < ANOMALY_SAMPLES) return false;
@@ -522,7 +573,7 @@ void handleSensor(SocketChannel& ch, const SensorSample& sample, uint64_t now) {
     // Plug-in: the conservative default applies until Supabase confirms an appliance.
     d.safety.begin(now, DEFAULT_LIMIT_S);
     d.startEpoch = epochMs(); d.peak = 0;
-    d.activeName[0] = d.activeProfileID[0] = 0; d.confirmed = false; d.steadyW = 0;
+    d.activeName[0] = d.activeProfileID[0] = 0; d.confirmed = false; d.steadyW = 0; d.varying = false;
     strlcpy(d.recognition, "RECOGNIZING", sizeof(d.recognition));
     ch.sessionOpen = true; ch.lowSince = 0;
     ch.sessionStartMono = now; ch.sessionStartEpoch = d.startEpoch; ch.lastEnergySample = now;
@@ -641,6 +692,7 @@ void sensorTask(void*) {
       SensorSample s;
       // A silent meter makes every getter wait for its own timeout; ask once
       // and skip the rest, so the other outlet's readings are not delayed.
+      crumb(CrumbMeters, uint8_t(i + 1));
       s.voltage = meters[i].voltage();
       if (isnan(s.voltage)) {
         s.power = s.current = s.pf = s.energy = s.frequency = NAN;
@@ -658,6 +710,13 @@ void sensorTask(void*) {
                       outlets[i].outlet, s.voltage);
       }
       // Self-recovery: restart a silent meter's serial link.
+      // Recorder: a meter that just went silent, and what the cloud did then.
+      if (!s.valid && s.captured - lastAnswer[i] < 1000) {
+        ++meterSilences[i];
+        if (crumbs[CrumbSupabase]) ++meterSilentInUpload[i];
+        snprintf(meterSilentLast[i], sizeof(meterSilentLast[i]), "Firebase %s, Supabase %s",
+                 crumbText(CrumbFirebase, crumbs[CrumbFirebase]), crumbText(CrumbSupabase, crumbs[CrumbSupabase]));
+      }
       if (s.valid) {
         lastAnswer[i] = s.captured;
         if (restarted[i]) Serial.printf("[%s] PZEM answering again\n", outlets[i].outlet);
@@ -665,12 +724,14 @@ void sensorTask(void*) {
       } else if (s.captured - lastAnswer[i] >= METER_RESTART_MS && s.captured - lastRestart[i] >= METER_RESTART_MS) {
         const auto& h = OUTLET_HW[i];
         lastRestart[i] = s.captured; restarted[i] = true;
+        crumb(CrumbMeters, 3);
         h.port.end();
         h.port.begin(9600, SERIAL_8N1, h.rx, h.tx);
         Serial.printf("[%s] PZEM silent for %llu s: serial link restarted\n", outlets[i].outlet,
                       (unsigned long long)((s.captured - lastAnswer[i]) / 1000));
       }
     }
+    crumb(CrumbMeters, 0);
     vTaskDelay(pdMS_TO_TICKS(200));
   }
 }
@@ -734,6 +795,13 @@ std::atomic<uint64_t> netBeat{0}, supaBeat{0};
 std::atomic<bool> publishPending{false};
 std::atomic<uint64_t> publishPendingSince{0};
 constexpr uint64_t PUBLISH_FIRST_MAX_MS = 10000;
+// Firebase gets a turn: between two Supabase uploads the plug first updates
+// Firebase once (the app's live state), waiting at most FIREBASE_TURN_MAX_MS
+// (Firebase may be unreachable). Before, the uploads after a run ended came
+// one after another and kept Firebase waiting 24-35 s, so the app showed
+// "Offline" although Wi-Fi was fine.
+std::atomic<uint32_t> firebasePublishes{0};  // successful Firebase updates
+constexpr uint64_t FIREBASE_TURN_MAX_MS = 6000;
 // Safety quiet window. publishPending only stops a NEW Supabase upload; one
 // already running holds the single secure connection for up to ~19 s (TLS
 // handshake + 15 s timeout), then Firebase must reconnect, so the warning and
@@ -1030,6 +1098,13 @@ void addStatus(JsonDocument& root, const Snapshot* s) {
   h["freeHeap"] = ESP.getFreeHeap();
   h["largestBlock"] = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
   h["lastRestart"] = lastRestart;
+  if (freezeInfo[0]) h["freeze"] = freezeInfo;  // what it was doing at its last freeze or crash
+  char silent[160];
+  snprintf(silent, sizeof(silent), "A %lu (%lu in upload; last: %s), B %lu (%lu in upload; last: %s)",
+           (unsigned long)meterSilences[0].load(), (unsigned long)meterSilentInUpload[0].load(),
+           meterSilentLast[0][0] ? meterSilentLast[0] : "-", (unsigned long)meterSilences[1].load(),
+           (unsigned long)meterSilentInUpload[1].load(), meterSilentLast[1][0] ? meterSilentLast[1] : "-");
+  h["meterSilent"] = silent;
   if (remainingMs >= 0) root[b + "remainingLimit"] = double(remainingMs) / 1000.0;
   else root[b + "remainingLimit"] = nullptr;  // null deletes the field
 }
@@ -1049,6 +1124,15 @@ int supaLastCode = 0;
 uint32_t supaLastBlock = 0;
 int supabasePost(const char* function, const String& body, String* response = nullptr) {
   int code = -1;
+  // Firebase's turn first, if it has not updated since the last upload.
+  static uint32_t publishesAtLastPost = 0;
+  static bool postedBefore = false;
+  if (postedBefore) {
+    uint64_t waitFrom = monotonicMs();
+    while (firebasePublishes.load() == publishesAtLastPost && monotonicMs() - waitFrom < FIREBASE_TURN_MAX_MS) {
+      vTaskDelay(pdMS_TO_TICKS(100));
+    }
+  }
   TlsTurn turn(pdMS_TO_TICKS(10000));
   if (!turn.held) return supaLastCode = -1;
   http.end(); tls.stop();  // free Firebase's connection for this one
@@ -1057,11 +1141,13 @@ int supabasePost(const char* function, const String& body, String* response = nu
     supaHttp.setTimeout(15000);  // slow or weak connections: 15 s (was 8)
     supaHttp.addHeader("Content-Type", "application/json");
     supaHttp.addHeader("x-device-key", SUPABASE_DEVICE_KEY);
+    crumb(CrumbSupabase, 4);
     code = supaHttp.POST(body);
     if (response && code > 0) *response = supaHttp.getString();
     supaHttp.end();
   }
   supaTls.stop();  // and this one's, for Firebase's next call
+  publishesAtLastPost = firebasePublishes.load(); postedBefore = true;
   supaLastCode = code;
   if (WiFi.status() == WL_CONNECTED) noteCloud(supabaseHealth, code, "Supabase");
   return code;
@@ -1125,6 +1211,7 @@ bool sendRecognition(const RecognitionReport& r) {
   strlcpy(c.status, reply["status"] | "", sizeof(c.status));
   strlcpy(c.applianceID, reply["applianceId"] | "", sizeof(c.applianceID));
   strlcpy(c.name, reply["applianceName"] | "", sizeof(c.name));
+  c.varying = reply["varyingPower"] | false;
   xQueueSend(recognitionReplies, &c, 0);
   return true;
 }
@@ -1173,6 +1260,7 @@ void sendSupabase() {
   while (monotonicMs() >= safetyRetryAt && xQueuePeek(safetyReports, &r, 0) == pdTRUE) {
     int64_t at = datedAt(r.at, r.mono);
     if (!at) break;  // clock not set yet
+    crumb(CrumbSupabase, 1);
     if (!supabaseDone(postSafety(r, at))) {
       Serial.printf("Safety report not delivered yet (HTTP %d, largest free block %lu), retrying in 10 s\n",
                     supaLastCode, (unsigned long)supaLastBlock);
@@ -1184,6 +1272,7 @@ void sendSupabase() {
   RecognitionReport f;
   while (monotonicMs() >= recognitionRetryAt && xQueuePeek(recognitionReports, &f, 0) == pdTRUE) {
     // A run that has ended needs no cutoff, and Stage 2 replaces Stage 1.
+    crumb(CrumbSupabase, 2);
     if (!stillNeeded(f) || sendRecognition(f)) { xQueueReceive(recognitionReports, &f, 0); continue; }
     // Unreachable or failing: the run keeps its current (default) cutoff; try again soon.
     Serial.printf("[%s] Stage %d not delivered yet (HTTP %d, largest free block %lu), retrying\n",
@@ -1195,6 +1284,7 @@ void sendSupabase() {
   while (monotonicMs() >= sessionRetryAt && xQueuePeek(sessionReports, &sum, 0) == pdTRUE) {
     int64_t end = datedAt(sum.endEpoch, sum.endMono);
     if (!end) break;  // clock not set yet
+    crumb(CrumbSupabase, 3);
     if (!supabaseDone(postSession(sum, end))) {
       Serial.printf("Run end not delivered yet (HTTP %d, largest free block %lu), retrying in 10 s\n",
                     supaLastCode, (unsigned long)supaLastBlock);
@@ -1582,14 +1672,16 @@ void networkTask(void*) {
   for (;;) {
     uint64_t now = monotonicMs();
     netBeat = now;  // D: the safety loop checks this heartbeat
+    crumb(CrumbFirebase, 1);
     updateWifi(now);
     bool connected = netMode == NetMode::Online && WiFi.status() == WL_CONNECTED;
+    crumb(CrumbFirebase, 5);
     handlePairing(now, connected);  // binding only when near (see PAIRING)
     for (int i = 0; i < 2; ++i) {
       if (xQueueReceive(outlets[i].snapshots, &latest[i], 0) == pdTRUE) available[i] = true;
     }
     if (connected) {
-      if (now - lastCommands >= 1000) { lastCommands = now; readCommands(); }
+      if (now - lastCommands >= 1000) { lastCommands = now; crumb(CrumbFirebase, 2); readCommands(); }
       // A state change is published at once (not up to 1 s later), and
       // before Supabase's reports (publishPending, see above).
       static uint32_t publishedRev[2] = {UINT32_MAX, UINT32_MAX};
@@ -1601,16 +1693,19 @@ void networkTask(void*) {
         JsonDocument root;
         for (int i = 0; i < 2; ++i) addOutlet(root, i, latest[i]);
         addStatus(root, latest);
+        crumb(CrumbFirebase, 3);
         if (firebasePatch(root) == HTTP_CODE_OK) {
           publishedRev[0] = latest[0].safety.revision; publishedRev[1] = latest[1].safety.revision;
           publishPending = false;
+          ++firebasePublishes;  // Firebase had its turn (see FIREBASE_TURN_MAX_MS)
         }
       }
-      if (now - lastConfig >= 10000) { lastConfig = now; checkWifiConfig(); }
+      if (now - lastConfig >= 10000) { lastConfig = now; crumb(CrumbFirebase, 4); checkWifiConfig(); }
     }
 #ifdef OTA_PASSWORD
     handleOta(connected, latest, available[0] && available[1]);
 #endif
+    crumb(CrumbFirebase, 0);
     vTaskDelay(pdMS_TO_TICKS(netMode == NetMode::Setup ? 10 : 100));  // snappy setup page
   }
 }
@@ -1628,6 +1723,7 @@ void supabaseTask(void*) {
     // Safety quiet window: an outlet is about to warn, or is warning.
     if (safetyQuiet) appFirst = true;
     if (!appFirst && netMode == NetMode::Online && WiFi.status() == WL_CONNECTED) sendSupabase();
+    crumb(CrumbSupabase, 0);
     vTaskDelay(pdMS_TO_TICKS(appFirst ? 200 : 1000));
   }
 }
@@ -1659,6 +1755,7 @@ uint64_t restoreRun(SocketChannel& ch) {
   ch.prefs.getString("runRec", d.recognition, sizeof(d.recognition));
   if (!d.recognition[0]) strlcpy(d.recognition, "UNKNOWN", sizeof(d.recognition));
   d.confirmed = ch.prefs.getBool("runConf", false);
+  d.varying = ch.prefs.getBool("runVary", false);
   d.steadyW = ch.prefs.getFloat("runSteady", 0);
   d.peak = ch.prefs.getFloat("runPeak", 0);
   d.startEpoch = ch.prefs.getLong64("runStart", 0);
@@ -1711,6 +1808,7 @@ void setup() {
   // Relays stay off until the persisted safety state is known.
   for (const auto& h : OUTLET_HW) { digitalWrite(h.relay, !h.relayOn); pinMode(h.relay, OUTPUT); }
   Serial.begin(115200);
+  readFreezeRecorder();  // before the tasks start (they overwrite the crumbs)
   tlsLock = xSemaphoreCreateRecursiveMutex();
   configASSERT(tlsLock);
 #ifdef SUPABASE_FUNCTIONS_URL
@@ -1794,10 +1892,12 @@ void setup() {
   // 1 = power-on, 3 = software reset, 4/5 = crash, 6/7 = watchdog, 9 = brownout.
   // Any reboot while a session runs locks both outlets ("Power cut" in the app).
   Serial.printf("SYSTEM READY (reset reason %d, free heap %u)\n", int(esp_reset_reason()), ESP.getFreeHeap());
+  if (freezeInfo[0]) Serial.printf("Last freeze/crash: %s\n", freezeInfo);
 }
 
 void loop() {
   uint64_t now = monotonicMs();
+  crumb(CrumbLoop, 1);  // recorder: Supabase's answers (and saving the run)
   // recognize-appliance's answer for a run (Stage 1 or 2).
   //  * MATCHED_CONFIRMED: the appliance's own cutoff (it may be longer than the
   //    default: Supabase, over authenticated HTTPS, has confirmed what it is).
@@ -1827,6 +1927,7 @@ void loop() {
     bool matched = confirmed || strcmp(reply.status, "MATCHED_PROVISIONAL") == 0;
     strlcpy(d.activeProfileID, matched ? reply.applianceID : "", sizeof(d.activeProfileID));
     strlcpy(d.activeName, matched ? reply.name : "", sizeof(d.activeName));
+    d.varying = matched && reply.varying;
     if (news) Serial.printf("[%s] Stage %d: %s%s%s, cutoff %lu s\n", ch.outlet, reply.stage, reply.status,
                   matched ? " " : "", matched ? reply.name : "", (unsigned long)limit);
   }
@@ -1834,6 +1935,7 @@ void loop() {
   for (auto& ch : outlets) {
     auto& d = ch.data;
     auto& safety = d.safety;
+    crumb(CrumbLoop, 2);  // recorder: safe-time timers, warnings, lockouts
     // "Near limit" (runtime_warning) once the run reaches its current cutoff.
     if (safety.tick(now, currentLimitS(safety))) {
       if (safety.state == SocketState::Warning) beginAlert(ch, "SAFETY_CEILING_EXCEEDED", now); else lock(ch);
@@ -1856,6 +1958,7 @@ void loop() {
     SensorSample sample;
     if (xQueueReceive(ch.sensors, &sample, 0) == pdTRUE) {
       if (sample.valid) ch.lastValid = now;
+      crumb(CrumbLoop, 3);
       handleSensor(ch, sample, now);
       if (sample.valid) meterRecovered(ch);
     }
@@ -1863,7 +1966,7 @@ void loop() {
     if ((safety.state == SocketState::Active || safety.state == SocketState::Sampling) &&
         now - ch.lastValid > SENSOR_TIMEOUT_MS) beginAlert(ch, "SENSOR_UNAVAILABLE", now);
     Command cmd;
-    if (xQueueReceive(ch.commands, &cmd, 0) == pdTRUE) handleCommand(ch, cmd, now);
+    if (xQueueReceive(ch.commands, &cmd, 0) == pdTRUE) { crumb(CrumbLoop, 4); handleCommand(ch, cmd, now); }
     // A meter still silent SENSOR_NOTIFY_MS into its warning: now tell the phone.
     if (ch.sensorNotifyAt && now >= ch.sensorNotifyAt) {
       ch.sensorNotifyAt = 0;
@@ -1893,10 +1996,13 @@ void loop() {
         d.alert.trigger = d.capturedEpoch - int64_t(now - safety.warningStarted);
         d.alert.expiry = d.alert.trigger + 60000; persistSafety(ch);
       }
+      crumb(CrumbLoop, 5);
       xQueueOverwrite(ch.snapshots, &d);
     }
   }
   safetyQuiet = quiet;  // the Supabase task waits while an outlet nears or is in its warning
+  crumb(CrumbLoop, 6);
   healthCheck(now);  // A/B/D: memory, heartbeats, safe self-restart
+  crumb(CrumbLoop, 0);
   delay(10);
 }
