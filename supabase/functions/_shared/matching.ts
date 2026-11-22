@@ -319,8 +319,10 @@ export function evaluateProfile(x: Features, a: Appliance, p: Profile, stage: St
       ? Math.max(
         tolerance(f, p, c),
         Math.abs(mean) * c.floorPowerPctCharger,
-        Math.abs(mean),
-        c.chargerMaxPowerW - mean,
+        // charger_max_power_w > 0: any power up to it passes (0-140 W).
+        // 0 (since 2026-11-22): off, so a charger is only asked about within
+        // its own signature (floor_power_pct_charger, e.g. +-50 %).
+        ...(c.chargerMaxPowerW > 0 ? [Math.abs(mean), c.chargerMaxPowerW - mean] : []),
       )
       : f === "avg_pf" && a.varyingPower
       ? Math.max(tolerance(f, p, c), c.floorPfCharger)
@@ -670,7 +672,8 @@ export function recognizeWithChargers(input: RecognizeInput): Recognition {
       // Close to a registered charger (its PF a little outside
       // floor_pf_charger, e.g. a nearly full phone): that charger, not new.
       const pf = x.avg_pf, w = x.avg_power_w;
-      const near = has(w) && w <= c.chargerMaxPowerW && has(pf)
+      // charger_max_power_w 0: off (a "new" reading stays new).
+      const near = c.chargerMaxPowerW > 0 && has(w) && w <= c.chargerMaxPowerW && has(pf)
         ? free.filter((a) => a.profiles.some((p) => {
           const m = p.mean.avg_pf;
           return isReady(p, c) && has(m) && Math.abs(pf - m) <= nearPf;

@@ -279,6 +279,12 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
                 chosen == null ? 'Confirm' : 'Yes, it is ${chosen.name}',
               ),
             ),
+            // Another appliance can look like a charger (a charger's power
+            // follows the phone or laptop on it): the user can say it is new.
+            OutlinedButton(
+              onPressed: () => pop(const RegisterChoice()),
+              child: const Text("No, it's a new appliance"),
+            ),
             TextButton(
               onPressed: () => pop(null),
               child: const Text('Ask me later'),
@@ -294,6 +300,12 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
                     ),
               child: Text('Yes, it is ${s.applianceName}'),
             ),
+            // Another appliance can look like a charger (a charger's power
+            // follows the phone or laptop on it): the user can say it is new.
+            OutlinedButton(
+              onPressed: () => pop(const RegisterChoice()),
+              child: const Text("No, it's a new appliance"),
+            ),
             notNow,
           ];
         case _ when s.askIsThis:
@@ -305,6 +317,12 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
                       ConfirmChoice(s.applianceId!, s.applianceName ?? ''),
                     ),
               child: Text('Yes, it is ${s.applianceName}'),
+            ),
+            // Another appliance can look like a charger (a charger's power
+            // follows the phone or laptop on it): the user can say it is new.
+            OutlinedButton(
+              onPressed: () => pop(const RegisterChoice()),
+              child: const Text("No, it's a new appliance"),
             ),
             notNow,
           ];

@@ -1036,3 +1036,18 @@ The Active / Idle badge is unchanged.
   the updates were still fresh.
 - Now that rule needs fresh updates (under 30 s old), so the card shows
   "No connection · Last seen …" like the other outlet.
+
+## A new appliance that looks like a charger (in plain words)
+
+- A charger's power follows the phone or laptop on it, so a registered
+  charger's signature can be very wide (luzie charger: 27–109 W). A new small
+  appliance (e.g. 36 W) then looked like the charger, and the question only
+  offered "Yes, it is luzie charger" / "Not now": it could not be registered.
+- Now the charger question also has **"No, it's a new appliance"**, which
+  opens registration. Once registered, the new appliance is recognized as
+  itself (its own, narrow signature wins over the charger's wide one).
+- The charger is only matched within its own signature: the "any power from
+  0 to 140 W" rules are off (`recognition_config.charger_max_power_w = 0`;
+  any value from 5 W turns them back on).
+- Measured on 2026-11-22: power, power factor and steadiness cannot always
+  tell a charger from another small appliance, so the user's answer decides.
