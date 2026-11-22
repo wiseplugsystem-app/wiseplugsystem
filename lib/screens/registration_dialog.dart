@@ -398,6 +398,32 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
         }
         return;
       }
+      // The run matched a DIFFERENT registered appliance (e.g. your Fan):
+      // asked before it is saved as a sample of this one. (Not the run that
+      // opened the pop-up: the user already answered for it.)
+      if (step == RegistrationStep.record &&
+          latest != null &&
+          latest.eventId != tracker.initialEventId &&
+          !_askedOther.contains(latest.eventId)) {
+        if (_otherMatch(latest) case final other?) {
+          _askedOther.add(latest.eventId);
+          final save = await _confirmOther(other);
+          if (!mounted) return;
+          if (save != true) {
+            tracker.skip(latest.eventId);
+            setState(() {
+              _run = latest;
+              _step = RegistrationStep.plugIn;
+              _measuringSince = null;
+              _error =
+                  'Not saved: that looked like your $other. Turn it off, '
+                  'then plug in ${_applianceName.isEmpty ? 'the new appliance' : _applianceName} '
+                  'and turn it on.';
+            });
+            return;
+          }
+        }
+      }
       if (step == RegistrationStep.record && latest != null) {
         await _record(tracker, latest);
       } else if (mounted) {
@@ -418,6 +444,47 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
       _busy = false;
     }
   }
+
+  /// Runs already asked about by [_confirmOther] (asked once each).
+  final _askedOther = <String>{};
+
+  /// The registered appliance(s) [run] matched, other than the one being
+  /// registered ("Fan", "Fan or Charger"), or null.
+  String? _otherMatch(OutletSession run) {
+    final mine = _applianceId;
+    if (run.applianceId != null && run.applianceId != mine) {
+      return run.applianceName ?? 'another appliance';
+    }
+    if (run.status == RecognitionStatus.ambiguous &&
+        run.candidates.isNotEmpty &&
+        run.candidates.every((c) => c.applianceId != mine)) {
+      return run.candidates.map((c) => c.name).join(' or ');
+    }
+    return null;
+  }
+
+  /// "This looks like your Fan. Save it as a sample of Desk lamp anyway?"
+  Future<bool?> _confirmOther(String other) => showDialog<bool>(
+    context: context,
+    builder: (c) => AlertDialog(
+      title: Text('Is this your $other?'),
+      content: Text(
+        'This run looks like your $other, not '
+        '${_applianceName.isEmpty ? 'the new appliance' : _applianceName}. '
+        'Save it as a sample anyway?',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(c, false),
+          child: const Text("No, don't save it"),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(c, true),
+          child: const Text('Yes, save it'),
+        ),
+      ],
+    ),
+  );
 
   Future<void> _record(RegistrationTracker tracker, OutletSession run) async {
     try {

@@ -1051,3 +1051,33 @@ The Active / Idle badge is unchanged.
   any value from 5 W turns them back on).
 - Measured on 2026-11-22: power, power factor and steadiness cannot always
   tell a charger from another small appliance, so the user's answer decides.
+
+## "Show all appliances" and no duplicates by mistake (in plain words)
+
+- WisePlug already compares every new reading with ALL the appliances you
+  registered (any outlet, any plug) before it calls anything "new". Three
+  things were added to the question it asks:
+- **"Show all appliances"**: opens the full list of your appliances (sorted
+  by name) and "New appliance", which opens the full list of types. Use it
+  when the match is wrong, e.g. it asked "Is this Phone charger?" but it is
+  your Fan. One that runs on the other outlet is greyed out ("In use on
+  Outlet B": one appliance cannot be in two sockets); one still being
+  registered continues its registration.
+- **Asked before a duplicate**: when the reading matched a registered
+  appliance and you tap "new appliance", WisePlug asks once more: "This looks
+  like your Fan. Register a new appliance anyway?" ("No, go back" /
+  "Yes, it is new"). A reading that matched nothing registers straight away.
+- **Asked before a wrong sample**: while registering, a run that looks like a
+  different registered appliance (e.g. the Fan was switched on instead) is not
+  saved without asking: "Is this your Fan? Save it as a sample anyway?". "No"
+  skips it and says to plug in the new appliance.
+- Nothing else changed: no server, database or firmware changes; the matching
+  rules, tolerances, safety limits and learning are the same.
+
+## General wording in the "which appliance" pop-up (in plain words)
+
+- When a reading matched your charger(s), the pop-up asked "Which charger is
+  on Outlet A?" and "Which charger is this: …?", even if a fan was plugged in.
+  It now says "Which appliance is on Outlet A?" and "Which appliance is
+  this: …?". Only the wording changed; the names in the list (your own
+  appliance names) and how the pop-up works are the same.

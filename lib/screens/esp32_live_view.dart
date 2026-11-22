@@ -265,6 +265,8 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
             if (!a.isReady(required)) a,
         ],
         registrationSamples: required,
+        // "Show all appliances": every registered one, to pick by hand.
+        all: _appliances,
       );
       if (!mounted) return;
       switch (choice) {

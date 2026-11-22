@@ -650,7 +650,7 @@ export function recognizeWithChargers(input: RecognizeInput): Recognition {
     return {
       status: "AMBIGUOUS", match: null, candidates: sorted.map((k) => mark(candidate(k))),
       suggested: mark(candidate(sorted.find((k) => lastUsedHere(k.appliance, here)) ?? top)), registerAs: null,
-      promptText: `Which charger is this: ${names.slice(0, -1).join(", ")} or ${names[names.length - 1]}?`,
+      promptText: `Which appliance is this: ${names.slice(0, -1).join(", ")} or ${names[names.length - 1]}?`,
       cutoffS: c.defaultCutoffS, reason: why, chargerChoice: true,
     };
   };
@@ -658,7 +658,7 @@ export function recognizeWithChargers(input: RecognizeInput): Recognition {
   switch (r.status) {
     case "MATCHED_PROVISIONAL":
       if (r.match && chargerIds.has(r.match.appliance.id)) {
-        return offer(r.match.appliance, `${r.reason}; a charger: confirm it or pick the charger, no new appliance.`) ??
+        return offer(r.match.appliance, `${r.reason}; it looks like one of your appliances: confirm it, pick another one, or register a new appliance.`) ??
           { ...r, candidates: r.candidates.map(mark), chargerChoice: true };
       }
       return r;

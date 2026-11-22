@@ -47,6 +47,7 @@ Future<PromptChoice?> showRecognitionPrompt(
   int defaultCutoffMinutes = 30,
   List<RegisteredAppliance> unfinished = const [],
   int registrationSamples = 3,
+  List<RegisteredAppliance> all = const [],
 }) => showDialog<PromptChoice>(
   context: context,
   // Centered on the screen, like the registration pop-up (it was a sheet
@@ -64,6 +65,7 @@ Future<PromptChoice?> showRecognitionPrompt(
           defaultCutoffMinutes: defaultCutoffMinutes,
           unfinished: unfinished,
           registrationSamples: registrationSamples,
+          all: all,
         ),
       ),
     ),
@@ -75,12 +77,17 @@ class RecognitionPromptSheet extends StatefulWidget {
   final int defaultCutoffMinutes;
   final List<RegisteredAppliance> unfinished;
   final int registrationSamples;
+
+  /// Every registered appliance, for "Show all appliances" (pick it by hand
+  /// when the match is wrong).
+  final List<RegisteredAppliance> all;
   const RecognitionPromptSheet({
     super.key,
     required this.session,
     this.defaultCutoffMinutes = 30,
     this.unfinished = const [],
     this.registrationSamples = 3,
+    this.all = const [],
   });
 
   @override
@@ -96,13 +103,129 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
 
   OutletSession get s => widget.session;
 
+  /// "Show all appliances" was tapped: the full list is shown.
+  bool _showAll = false;
+
+  /// The registered appliance(s) this reading matched ("Fan", "Fan or
+  /// Charger"), or null when it matched none.
+  String? _lookalike() {
+    switch (s.status) {
+      case RecognitionStatus.provisional:
+        return s.applianceName;
+      case RecognitionStatus.ambiguous:
+        final names = [for (final c in s.candidates) c.name];
+        return names.isEmpty ? null : names.join(' or ');
+      case _ when s.askIsThis:
+        return s.applianceName;
+      default:
+        return null;
+    }
+  }
+
+  /// "Register a new appliance" when the reading matched a registered one:
+  /// asked once more, so a duplicate is never registered by mistake.
+  Future<void> _registerNew(RegisterChoice choice) async {
+    final like = _lookalike();
+    if (like == null) {
+      Navigator.pop(context, choice);
+      return;
+    }
+    final yes = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('Register a new appliance?'),
+        content: Text(
+          'This looks like your $like. If it is, tap "No, go back" and '
+          'choose it, so it is not registered twice.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(c, false),
+            child: const Text('No, go back'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(c, true),
+            child: const Text('Yes, it is new'),
+          ),
+        ],
+      ),
+    );
+    if (yes == true && mounted) Navigator.pop(context, choice);
+  }
+
+  /// "Show all appliances": every registered appliance (picked by hand when
+  /// the match is wrong), then "New appliance", which opens the full list of
+  /// appliance types.
+  List<Widget> _showAllSection() {
+    if (widget.all.isEmpty) return const [];
+    if (!_showAll) {
+      return [
+        TextButton.icon(
+          onPressed: () => setState(() => _showAll = true),
+          icon: const Icon(Icons.expand_more),
+          label: const Text('Show all appliances'),
+        ),
+        const SizedBox(height: 6),
+      ];
+    }
+    final list = [...widget.all]
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    return [
+      Text(
+        'All your appliances:',
+        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+      ),
+      for (final a in list)
+        Builder(
+          builder: (_) {
+            // One appliance cannot be in two sockets.
+            final elsewhere = a.runningOn != null && a.runningOn != s.outlet;
+            final ready = a.isReady(widget.registrationSamples);
+            return ListTile(
+              contentPadding: EdgeInsets.zero,
+              enabled: !elsewhere,
+              leading: ApplianceIcon(a.kind, size: 24, label: a.name),
+              title: Text(a.name),
+              subtitle: Text(
+                elsewhere
+                    ? 'In use on Outlet ${outletLetter(a.runningOn!)}'
+                    : ready
+                    ? a.typeName
+                    : 'Still registering '
+                          '(${a.samplesDone(widget.registrationSamples)} of '
+                          '${a.samplesNeeded(widget.registrationSamples)} done)',
+                style: const TextStyle(fontSize: 14),
+              ),
+              onTap: elsewhere
+                  ? null
+                  : () => Navigator.pop(
+                      context,
+                      ready ? ConfirmChoice(a.id, a.name) : ContinueChoice(a),
+                    ),
+            );
+          },
+        ),
+      ListTile(
+        contentPadding: EdgeInsets.zero,
+        leading: const Icon(Icons.add_circle_outline),
+        title: const Text('New appliance'),
+        subtitle: const Text(
+          'Choose its type from the full list',
+          style: TextStyle(fontSize: 14),
+        ),
+        onTap: () => _registerNew(const RegisterChoice()),
+      ),
+      const SizedBox(height: 8),
+    ];
+  }
+
   @override
   Widget build(BuildContext context) {
     final outlet = 'Outlet ${s.outletName}';
     final title = switch (s.status) {
       // A charger: "which charger / phone is it", never a new appliance.
       RecognitionStatus.ambiguous when s.chargerChoice =>
-        'Which charger is on $outlet?',
+        'Which appliance is on $outlet?',
       RecognitionStatus.sameTypeInUse =>
         'Another ${s.registerAs?.typeName ?? 'appliance'}?',
       RecognitionStatus.ambiguous => 'Which appliance is on $outlet?',
@@ -144,6 +267,7 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
             const SizedBox(height: 14),
             _SafetyBanner(minutes: widget.defaultCutoffMinutes),
             const SizedBox(height: 18),
+            ..._showAllSection(),
             for (final action in _withUnfinished(_actions()))
               Padding(padding: const EdgeInsets.only(bottom: 8), child: action),
           ],
@@ -282,7 +406,7 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
             // Another appliance can look like a charger (a charger's power
             // follows the phone or laptop on it): the user can say it is new.
             OutlinedButton(
-              onPressed: () => pop(const RegisterChoice()),
+              onPressed: () => _registerNew(const RegisterChoice()),
               child: const Text("No, it's a new appliance"),
             ),
             TextButton(
@@ -303,7 +427,7 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
             // Another appliance can look like a charger (a charger's power
             // follows the phone or laptop on it): the user can say it is new.
             OutlinedButton(
-              onPressed: () => pop(const RegisterChoice()),
+              onPressed: () => _registerNew(const RegisterChoice()),
               child: const Text("No, it's a new appliance"),
             ),
             notNow,
@@ -321,7 +445,7 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
             // Another appliance can look like a charger (a charger's power
             // follows the phone or laptop on it): the user can say it is new.
             OutlinedButton(
-              onPressed: () => pop(const RegisterChoice()),
+              onPressed: () => _registerNew(const RegisterChoice()),
               child: const Text("No, it's a new appliance"),
             ),
             notNow,
@@ -359,7 +483,7 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
             ),
           ),
           OutlinedButton(
-            onPressed: () => pop(const RegisterChoice()),
+            onPressed: () => _registerNew(const RegisterChoice()),
             child: const Text('Register new appliance'),
           ),
           TextButton(
@@ -377,7 +501,7 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
             child: Text('Yes, it is ${s.applianceName}'),
           ),
           OutlinedButton(
-            onPressed: () => pop(const RegisterChoice()),
+            onPressed: () => _registerNew(const RegisterChoice()),
             child: const Text('No, register a new appliance'),
           ),
           notNow,
@@ -393,7 +517,7 @@ class _RecognitionPromptSheetState extends State<RecognitionPromptSheet> {
             child: Text('Yes, it is ${s.applianceName}'),
           ),
           OutlinedButton(
-            onPressed: () => pop(const RegisterChoice()),
+            onPressed: () => _registerNew(const RegisterChoice()),
             child: const Text('No, it is a new appliance'),
           ),
           notNow,
