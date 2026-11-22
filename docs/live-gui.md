@@ -1081,3 +1081,55 @@ The Active / Idle badge is unchanged.
   It now says "Which appliance is on Outlet A?" and "Which appliance is
   this: …?". Only the wording changed; the names in the list (your own
   appliance names) and how the pop-up works are the same.
+
+## The countdown alarm on Android phones (in plain words)
+
+- **The problem:** on the APK the countdown was silent, even with the app
+  open. The warning sound was played by the app itself, so it stopped when
+  Android paused or closed the app; with the app closed the push only played
+  it once.
+- **Now (Android only):** WisePlug's own Android part
+  (`packages/wiseplug_alarm`) rings like an alarm clock:
+  - the warning sound repeats on the **alarm volume** (silent or vibrate mode
+    does not mute it), with vibration;
+  - a notification counts down to the plug's real cut-off time and says which
+    appliance and which outlet, with **Stop alarm** and **Open WisePlug**; on
+    the lock screen it can fill the screen (Android 14+: if allowed);
+  - it stops by itself at the cut-off, when the "switched off" push arrives,
+    when you tap Stop alarm, or when the warning ends in the app (Keep it on,
+    Turn off, Silence).
+- **It starts three ways, and each warning rings only once:**
+  1. app open: the safety pop-up;
+  2. app closed or phone locked: the warning push (it now also carries the
+     cut-off time and the appliance name: `evaluate-safety-alert`);
+  3. backup: while the app is open and an appliance runs, Android is asked
+     for an alarm at that outlet's deadline. If no push arrived (no internet),
+     it checks the outlet in Firebase and rings only if the warning is real
+     (or the plug cannot be reached; the plug cuts the power by itself anyway).
+- Tapping the notification opens WisePlug, and the pop-up shows the plug's own
+  countdown (in sync, not restarted). Outlets A and B ring separately.
+- **Settings > Safety alarm setup** checks the phone: notifications, alarm
+  volume, Do Not Disturb, battery optimization, background activity, alarms &
+  reminders, full-screen alerts. It opens the right page for each, shows the
+  steps for the phone's brand (Xiaomi, Samsung, Oppo/Realme/OnePlus,
+  Vivo/iQOO, Huawei/Honor, Infinix/Tecno/itel, Asus) and has a 15-second test
+  alarm. At app start, a reminder appears if something is off.
+- **What no app can change:** brand pages such as Auto-start can only be
+  opened, never switched on by the app. A phone that force-stops WisePlug, or
+  has no internet and no backup alarm, cannot ring. The cut-off itself always
+  happens on the WisePlug, with or without the phone.
+- The web and everything else stay as they were. The only change to existing
+  behavior on Android: the warning sound plays through this alarm instead of
+  the app's audio player (which falls back to the old sound if the alarm is
+  not available).
+
+## The warning sound is now a WAV file (in plain words)
+
+- `assets/sounds/warning_tone.mp3` became `assets/sounds/warning_tone.wav`
+  (the same sound and length, 7.6 s; 16-bit PCM, 48 kHz stereo, converted with
+  Windows' own Media Foundation). The app's warning loop and the closed-app
+  sound now play the WAV. A WAV needs no decoding, so it starts right away on
+  every phone and browser.
+- The phone notification sound (`android/app/src/main/res/raw/wiseplug_alert.mp3`,
+  used by the notification channels and the Android countdown alarm) is not
+  changed.

@@ -13,6 +13,7 @@ import 'screens/profiles_tab.dart';
 import 'screens/settings_tab.dart';
 import 'screens/appliance_registration_screen.dart';
 import 'services/device_binding.dart';
+import 'services/countdown_alarm.dart';
 import 'services/safety_alarm_manager.dart';
 import 'services/supabase_backend.dart';
 import 'theme.dart';
@@ -21,6 +22,11 @@ import 'theme.dart';
 /// plays its sound on the alarm volume, so a muted phone still sounds.
 @pragma('vm:entry-point')
 Future<void> wisePlugBackgroundMessage(RemoteMessage message) async {
+  // Android: the safe-time warning rings the countdown alarm (looping on the
+  // alarm volume, a countdown notification) until the plug's cut-off; the
+  // cut-off push stops it. If that is not possible, the sound plays once.
+  if (await CountdownAlarm.startFromPush(message.data)) return;
+  await CountdownAlarm.stopFromPush(message.data);
   if (isSafetyAlarmPush(message.data)) await playSafetyAlarmInBackground();
 }
 

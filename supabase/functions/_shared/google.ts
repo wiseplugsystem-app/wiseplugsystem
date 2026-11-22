@@ -66,7 +66,7 @@ export interface PushResult {
 
 /**
  * Every safety push sounds the same warning sound as the app
- * (assets/sounds/warning_tone.mp3), so users learn one sound. Android: the
+ * (assets/sounds/warning_tone.wav), so users learn one sound. Android: the
  * "wiseplug_safety_v2" channel the app creates (MainActivity.kt) with
  * res/raw/wiseplug_alert.mp3; before the app has been opened once (or with an
  * app older than 1.2.0), the phone's default sound. iOS: the file must be

@@ -10,10 +10,12 @@ import '../models/appliance_icons.dart';
 import '../models/esp32_data.dart';
 import '../models/gadget_status.dart';
 import '../models/recognition.dart';
+import '../services/countdown_alarm.dart';
 import '../services/device_binding.dart';
 import '../services/esp32_service.dart';
 import '../services/recognition_service.dart';
 import '../widgets/wiseplug_logo.dart';
+import 'alarm_setup_screen.dart';
 import 'esp32_dashboard.dart';
 import 'help_screen.dart';
 import 'recognition_prompt.dart';
@@ -1800,6 +1802,24 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
               ),
             ),
             const Divider(height: 1),
+            // Android: what the phone must allow so the countdown alarm
+            // sounds with the app closed or the phone locked.
+            if (CountdownAlarm.supported) ...[
+              ListTile(
+                leading: const Icon(Icons.alarm),
+                title: const Text('Safety alarm setup'),
+                subtitle: const Text(
+                  'So the warning sounds with the app closed or locked',
+                ),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const AlarmSetupScreen(),
+                  ),
+                ),
+              ),
+              const Divider(height: 1),
+            ],
             ListTile(
               leading: const Icon(Icons.account_circle_outlined),
               title: const Text('My account'),

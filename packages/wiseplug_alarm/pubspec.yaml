@@ -1,0 +1,19 @@
+name: wiseplug_alarm
+description: "WisePlug's own Android countdown alarm: a looping alarm-volume sound with a countdown notification, a backup exact alarm, and the phone-setup helpers."
+version: 1.0.0
+publish_to: none
+
+environment:
+  sdk: ^3.13.5
+  flutter: '>=3.3.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.example.wiseplug_alarm
+        pluginClass: WiseplugAlarmPlugin

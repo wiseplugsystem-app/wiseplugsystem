@@ -13,6 +13,9 @@ import { hasServiceAccount, sendPush } from "../_shared/google.ts";
 import { HttpError, json, outletOf, readJson, serve } from "../_shared/http.ts";
 import { ALERT_TYPES, type AlertType, evaluate } from "../_shared/safety.ts";
 
+/** The plug's warning, safety deadline to cut-off (firmware safety_state.h WARNING_MS). */
+const WARNING_MS = 63_000;
+
 const n = (v: unknown, max: number) =>
   typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.min(v, max) : 0;
 
@@ -93,6 +96,14 @@ serve(async (req) => {
         type,
         outlet,
         severity: result.severity,
+        // The Android countdown alarm (app closed): when the warning began,
+        // the plug's cut-off (63 s later, safety_state.h WARNING_MS) and
+        // the appliance. Not for a time the plug only estimated.
+        applianceName,
+        ...(body.timeEstimated === true ? {} : { occurredAt: String(occurredMs) }),
+        ...(type === "RUNTIME_WARNING" && body.timeEstimated !== true
+          ? { endsAt: String(occurredMs + WARNING_MS) }
+          : {}),
       });
       notified = push.sent;
       if (push.invalidTokens.length) await db.from("push_tokens").delete().in("token", push.invalidTokens);

@@ -2,8 +2,9 @@
 
 ## Warning sound (from a free sound website)
 
-- `assets/sounds/warning_tone.mp3`: plays, looped, during the 60-second
-  safety warning in the app
+- `assets/sounds/warning_tone.wav`: plays, looped, during the 60-second
+  safety warning in the app (converted on 2026-11-22 from the original
+  MP3 to WAV, 16-bit PCM, 48 kHz stereo, 7.6 s; the sound is unchanged)
 - `android/app/src/main/res/raw/wiseplug_alert.mp3`: the same sound, for the
   phone notification when the app is closed
 

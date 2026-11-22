@@ -3,8 +3,11 @@ import 'dart:async';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
 
+import '../models/esp32_data.dart';
+import 'countdown_alarm.dart';
+
 /// The warning sounds and their volume. The warning sound
-/// (assets/sounds/warning_tone.mp3, chosen by the project; see
+/// (assets/sounds/warning_tone.wav, chosen by the project; see
 /// assets/sounds/LICENSE.md) loops for the whole countdown. The cutoff tone is
 /// made by `tool/make_warning_tone.ts`. [repeatEvery], [finalStretch] and
 /// [finalRepeatEvery] belong to the old two-beep pattern and are unused now.
@@ -25,7 +28,7 @@ class WarningSoundConfig {
     this.finalStretch = const Duration(seconds: 10),
     this.finalRepeatEvery = const Duration(seconds: 1),
     this.volume = 1.0,
-    this.warningTone = 'sounds/warning_tone.mp3',
+    this.warningTone = 'sounds/warning_tone.wav',
     this.cutoffTone = 'sounds/cutoff_tone.wav',
   });
 
@@ -76,7 +79,7 @@ Future<void> playSafetyAlarmInBackground() async {
   final player = AudioPlayer();
   try {
     await player.setAudioContext(safetyAlarmAudio);
-    await player.play(AssetSource('sounds/warning_tone.mp3'));
+    await player.play(AssetSource('sounds/warning_tone.wav'));
     await player.onPlayerComplete.first.timeout(
       const Duration(seconds: 30),
       onTimeout: () {},
@@ -153,12 +156,25 @@ class SafetyAlarmManager {
 
   bool get isPlaying => _warning;
 
+  /// The outlets in warning, for the Android countdown alarm (null: unknown).
+  Iterable<OutletReading> Function()? _warnings;
+
+  /// The Android countdown alarm (CountdownAlarm) plays instead of [_player].
+  bool _native = false;
+
   /// Starts the warning pattern. [remaining] is the time left until the
-  /// cutoff (null when unknown: the normal rate).
-  Future<void> playSafetyAlarm({Duration? Function()? remaining}) async {
+  /// cutoff (null when unknown: the normal rate). [warnings]: the outlets in
+  /// warning; on the Android app they ring the native countdown alarm (alarm
+  /// volume, countdown notification), which also keeps ringing with the app
+  /// closed. Elsewhere, or if it is not available, the sound below plays.
+  Future<void> playSafetyAlarm({
+    Duration? Function()? remaining,
+    Iterable<OutletReading> Function()? warnings,
+  }) async {
     if (_warning) return;
     _warning = true;
     _remaining = remaining;
+    _warnings = warnings;
     await _beep();
   }
 
@@ -168,6 +184,16 @@ class SafetyAlarmManager {
     if (!_warning) return;
     final left = _remaining?.call();
     if (left != null && left <= Duration.zero) return; // the cutoff is due
+    final warnings = _warnings;
+    if (_output == null &&
+        warnings != null &&
+        CountdownAlarm.supported &&
+        await CountdownAlarm.startForReadings(warnings())) {
+      _native = _warning;
+      CountdownAlarm.ringing = _warning;
+      if (!_warning) unawaited(CountdownAlarm.stopAll());
+      return;
+    }
     try {
       await _player.loop(config.warningTone, config.volume);
     } catch (error) {
@@ -203,6 +229,12 @@ class SafetyAlarmManager {
     _warning = false;
     _next?.cancel();
     _next = null;
+    // The Android countdown alarm (and its notification) stops too.
+    if (_native) {
+      _native = false;
+      CountdownAlarm.ringing = false;
+      unawaited(CountdownAlarm.stopAll());
+    }
   }
 
   Future<void> _play(String asset) async {

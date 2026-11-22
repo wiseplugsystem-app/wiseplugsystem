@@ -7,6 +7,8 @@ import '../theme.dart';
 import '../models/appliance_icons.dart';
 import '../models/esp32_data.dart';
 import '../models/gadget_status.dart';
+import '../screens/alarm_setup_screen.dart';
+import '../services/countdown_alarm.dart';
 import '../services/esp32_service.dart';
 import '../services/safety_alarm_manager.dart';
 
@@ -122,8 +124,23 @@ class _SafetyAlertListenerState extends State<SafetyAlertListener> {
           _readings = readings;
           _checkCutoff();
           _evaluate();
+          // Android: an outlet that goes into warning while the pop-up is
+          // open rings too, and each running appliance keeps a backup alarm
+          // at its deadline (for when the warning push does not arrive).
+          if (_route != null && _warningSounding) {
+            unawaited(
+              CountdownAlarm.ringNewWarnings(
+                _safeTime.where((r) => r.isWarning),
+              ),
+            );
+          }
+          unawaited(CountdownAlarm.syncBackups(readings));
         }, onError: (Object _) {}),
       );
+    // Android: reminds once per start if a setting the alarm needs is off.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(remindAlarmSetup(context));
+    });
   }
 
   void _evaluate() {
@@ -160,7 +177,13 @@ class _SafetyAlertListenerState extends State<SafetyAlertListener> {
     );
     if (_safeTime.any((r) => r.isWarning)) {
       _warningSounding = true;
-      unawaited(_alarm.playSafetyAlarm(remaining: _untilCutoff));
+      unawaited(
+        _alarm.playSafetyAlarm(
+          remaining: _untilCutoff,
+          // The Android countdown alarm rings each outlet in warning.
+          warnings: () => _safeTime.where((r) => r.isWarning),
+        ),
+      );
     } else {
       unawaited(_alarm.playCutoff()); // cut at once, e.g. an electrical trip
     }
