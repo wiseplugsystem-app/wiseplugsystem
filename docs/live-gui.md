@@ -1201,3 +1201,15 @@ The Active / Idle badge is unchanged.
   are being registered in order; heating appliances are saved as before.
 - Recognition still names the appliance; it may not tell Speed 1 from
   Speed 2 apart (they are the same appliance, so the safe time is the same).
+
+## Live watts in every registration step; "already saved" no longer comes too early (in plain words)
+
+- The registration pop-up now shows **"Now: 53.4 W"** in every step while
+  the appliance is on (before, only while measuring), so you can see which
+  setting the plug is reading.
+- A run that the plug recognized in its first seconds as a setting already
+  saved (Level 3 drawing about the same as Level 2) said "already saved, turn
+  it off" right away, before the "Did you switch to Level 3?" question could
+  come. Now, while settings are registered in order, it keeps measuring and
+  then asks. The orange hint says "This looks like Level 2 (about 53 W). If
+  you are on Level 3, keep it on: WisePlug will ask you."

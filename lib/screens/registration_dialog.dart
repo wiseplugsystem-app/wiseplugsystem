@@ -92,6 +92,11 @@ class RegistrationTracker {
     // The same setting again (e.g. a fan speed already done): never saved,
     // unless the user said they switched setting (levels a few watts apart).
     if (!allowRepeat && isRepeat(s) && !_switched.contains(s.eventId)) {
+      // Settings registered in order: measured to the end first, then the
+      // user is asked "Did you switch to Level 3?" (not refused early).
+      if (askFirst && s.isOpen && !s.measured) {
+        return RegistrationStep.measuring;
+      }
       if (!s.isOpen) {
         _used.add(s.eventId);
         return RegistrationStep.plugIn;
@@ -120,6 +125,11 @@ class RegistrationTracker {
   /// to the next setting: saved as that one.
   final _switched = <String>{};
   void switched(String eventId) => _switched.add(eventId);
+
+  /// The user is asked about a run that looks like a saved setting (settings
+  /// registered in order, not a heating appliance): it is measured to the
+  /// end instead of refused at once.
+  bool askFirst = false;
 
   /// [s] is a fully measured new run that would be refused as a setting this
   /// appliance already has (see [next]): worth asking about first.
@@ -396,6 +406,8 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
           if (r != null && tracker.isFresh(r)) r,
       ]..sort((a, b) => b.startedAt.compareTo(a.startedAt));
       final latest = fresh.isEmpty ? null : fresh.first;
+      tracker.askFirst =
+          _level != null && _extraLevel == null && !_heatAppliance;
       // Levels only a few watts apart (Level 1 50 W, Level 2 55 W): a run
       // that looks like a setting already saved is ASKED about ("Did you
       // switch to Level 2?") instead of refused. "Yes" saves it as the next
@@ -1310,6 +1322,20 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
         textAlign: TextAlign.center,
         style: const TextStyle(fontSize: 16),
       ),
+      // While the appliance is on but not being measured (e.g. "already
+      // saved", "turn it off"): its live watts too, so the user sees which
+      // setting the plug is reading.
+      if ((!_complete || _extraLevel != null) &&
+          _step != RegistrationStep.measuring &&
+          _run?.isOpen == true)
+        if (_liveWatts() case final w?) ...[
+          const SizedBox(height: 14),
+          Text(
+            'Now: ${w.toStringAsFixed(1)} W',
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
+          ),
+        ],
       if ((!_complete || _extraLevel != null) &&
           _step == RegistrationStep.measuring) ...[
         // What the plug measures right now, so the user sees it working.
@@ -1333,8 +1359,9 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
                 ? 'This looks the same as $level (about ${w.round()} W). '
                       'Heating appliances use the same power at every level, '
                       'so that is normal: keep it on.'
-                : 'This looks the same as $level (about ${w.round()} W). '
-                      'Turn it off and set a DIFFERENT level.',
+                : 'This looks like $level (about ${w.round()} W). If you '
+                      'are on ${_level ?? 'the next setting'}, keep it on: '
+                      'WisePlug will ask you.',
             textAlign: TextAlign.center,
             style: TextStyle(
               fontSize: 16,
