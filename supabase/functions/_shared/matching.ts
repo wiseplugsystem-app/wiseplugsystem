@@ -79,6 +79,8 @@ export interface Appliance {
   /** A charger: its power follows the battery (fast when low, slow when nearly
    * full), so its power is compared with floor_power_pct_charger. */
   varyingPower?: boolean;
+  /** Its type is surely not a heating appliance ([isNonHeating]): 4 h while learning. */
+  nonHeating?: boolean;
   profiles: Profile[];
 }
 
@@ -449,9 +451,26 @@ const candidate = (r: ProfileResult): Candidate => ({
  * it has learned its typical use (the existing 7-use rule), the average
  * runtime x learned_margin, at least min_learned_cutoff, never above its own.
  */
+/**
+ * Types that are surely not heating appliances (2026-11-23): while still
+ * learning (before 7 uses) they get NON_HEATING_LEARNING_CUTOFF_S (4 h)
+ * instead of the 30-minute default. Everything else (heating, "Other",
+ * unknown) keeps the default. lib/models/recognition.dart has the same list.
+ */
+export const NON_HEATING_ICON_KEYS: ReadonlySet<string> = new Set([
+  "fan", "tv", "refrigerator", "laptop_charger", "phone_charger", "lamp",
+]);
+export const NON_HEATING_LEARNING_CUTOFF_S = 4 * 3600;
+export const isNonHeating = (iconKey: unknown): boolean =>
+  typeof iconKey === "string" && NON_HEATING_ICON_KEYS.has(iconKey);
+
 export function confirmedCutoffS(a: Appliance, c: Config): number {
   // Still learning: the default, or a heating cap if shorter (a kettle: 15 min).
-  if (!a.isLearned || !has(a.baselineRuntimeS)) return Math.min(c.defaultCutoffS, a.ownCutoffS);
+  // A non-heating type (fan, charger…): 4 h instead of the default.
+  if (!a.isLearned || !has(a.baselineRuntimeS)) {
+    const learning = a.nonHeating ? Math.max(c.defaultCutoffS, NON_HEATING_LEARNING_CUTOFF_S) : c.defaultCutoffS;
+    return Math.min(learning, a.ownCutoffS);
+  }
   const learned = Math.max(a.baselineRuntimeS * c.learnedMargin, c.minLearnedCutoffS);
   return Math.round(Math.min(learned, a.ownCutoffS));
 }

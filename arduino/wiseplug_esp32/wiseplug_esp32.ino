@@ -98,6 +98,12 @@ constexpr uint32_t MAX_CONFIRMED_LIMIT_S = 7 * 24 * 3600;
 // spoiled reading (a fan motor's electrical noise) is not enough, and if the
 // meter answers again within the 60 s the warning ends and the run goes on.
 constexpr uint64_t SENSOR_TIMEOUT_MS = 5000;
+// 2026-11-23 (the user): a silent meter no longer switches a running
+// appliance off. Only the safe time (and a brownout / power cut) does, plus
+// the electrical trips (OVERCURRENT, POWER_ANOMALY), which need readings.
+// The card still shows "Not measuring"; the safe time keeps counting.
+// true = the old rule (SENSOR_UNAVAILABLE warning, 60 s, then off).
+constexpr bool SENSOR_SILENT_TURNS_OFF = false;
 // A meter that has not answered for this long has its serial link restarted
 // (again every METER_RESTART_MS while it stays silent): noise from a switching
 // load can leave the PZEM's UART stuck until then.
@@ -1987,7 +1993,8 @@ void loop() {
       if (sample.valid) meterRecovered(ch);
     }
     // No good reading for SENSOR_TIMEOUT_MS (not just one spoiled reading).
-    if ((safety.state == SocketState::Active || safety.state == SocketState::Sampling) &&
+    if (SENSOR_SILENT_TURNS_OFF &&
+        (safety.state == SocketState::Active || safety.state == SocketState::Sampling) &&
         now - ch.lastValid > SENSOR_TIMEOUT_MS) beginAlert(ch, "SENSOR_UNAVAILABLE", now);
     Command cmd;
     if (xQueueReceive(ch.commands, &cmd, 0) == pdTRUE) { crumb(CrumbLoop, 4); handleCommand(ch, cmd, now); }

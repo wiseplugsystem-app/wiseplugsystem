@@ -10,6 +10,7 @@ import {
   emaUpdate,
   FEATURES,
   isCharger,
+  isNonHeating,
   type Features,
   parseFeatures,
   profileColumns,
@@ -104,6 +105,7 @@ export function applianceFromRow(
     activeOn: activeOn.get(String(r.id)) ?? null,
     profiles: profileRows.filter((p) => p.appliance_id === r.id).map(profileFromRow),
     varyingPower: isCharger((r.appliance_types as Row | null)?.icon_key),
+    nonHeating: isNonHeating((r.appliance_types as Row | null)?.icon_key),
   };
 }
 

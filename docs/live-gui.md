@@ -1245,3 +1245,22 @@ The Active / Idle badge is unchanged.
   the warning, it reads the name from the safety log (`alert_logs`), where the
   plug saved it just before switching off: "The black electricfan on Outlet B
   reached its safe time, so WisePlug turned it off."
+
+## Version 2.0: 4 hours for non-heating appliances; a silent meter no longer switches off (in plain words)
+
+- **4 hours while learning (non-heating types).** A registered fan, phone or
+  laptop charger, TV, lamp or refrigerator that has not finished its 7 uses
+  gets 4 hours instead of 30 minutes (`NON_HEATING_ICON_KEYS` in
+  `supabase/functions/_shared/matching.ts`, the same list in the app's
+  `RegisteredAppliance.safeTimeSeconds`). Heating types (iron, rice cooker,
+  kettle, hair dryer…), "Other" types and unrecognized loads keep 30 minutes
+  (or their own lower cap): an unknown load could be a heater. After 7 uses
+  the safe time is learned from real use, as before.
+- **A silent meter no longer switches a running appliance off**
+  (`SENSOR_SILENT_TURNS_OFF = false` in the firmware). The card still shows
+  "Not measuring" and the safe time keeps counting. An appliance is switched
+  off only when its safe time runs out (warning first), after a brownout /
+  power cut while it ran, or by the electrical trips the user chose to keep
+  (OVERCURRENT, POWER_ANOMALY), which need readings.
+- Note: while the meter is silent the plug cannot see an appliance being
+  unplugged, so that run keeps counting until the meter answers again.

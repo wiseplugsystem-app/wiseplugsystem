@@ -1,6 +1,8 @@
 // Rule-based appliance recognition as the app sees it: the run on each outlet
 // (Supabase outlet_sessions, written by recognize-appliance) and the user's
 // registered appliances with their mode profiles.
+import 'dart:math' as math;
+
 import 'appliance_icons.dart';
 import 'esp32_data.dart' show sensorNumber;
 
@@ -149,6 +151,20 @@ class ApplianceMode {
 }
 
 /// A registered appliance (an appliance_instances row) and its modes.
+/// Types that are surely not heating appliances (2026-11-23): while still
+/// learning they get [nonHeatingLearningSeconds] (4 h) instead of the 30-minute
+/// default. The same list as NON_HEATING_ICON_KEYS in
+/// supabase/functions/_shared/matching.ts.
+const nonHeatingKinds = {
+  'fan',
+  'tv',
+  'refrigerator',
+  'laptop_charger',
+  'phone_charger',
+  'lamp',
+};
+const nonHeatingLearningSeconds = 4 * 3600;
+
 class RegisteredAppliance {
   final String id, name, typeName;
 
@@ -188,8 +204,12 @@ class RegisteredAppliance {
     final own = cutoffMinutes * 60;
     final usual = baselineRuntimeSeconds;
     // Still learning: the default, or a heating cap if shorter (a kettle).
+    // A non-heating type (fan, charger…): 4 h instead of the default.
     if (!isLearned || usual == null) {
-      return (s.defaultCutoffMinutes * 60).clamp(0, own);
+      final learning = nonHeatingKinds.contains(kind.key)
+          ? math.max(s.defaultCutoffMinutes * 60, nonHeatingLearningSeconds)
+          : s.defaultCutoffMinutes * 60;
+      return learning.clamp(0, own);
     }
     final learned = (usual * s.learnedMargin).clamp(
       s.minLearnedCutoffMinutes * 60.0,
