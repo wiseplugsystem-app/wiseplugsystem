@@ -264,6 +264,22 @@ class SupabaseBackend {
     return rows.map(SafetyAlertLog.fromRow).toList();
   }
 
+  /// The appliance a safe-time warning was about, from the safety log: the
+  /// plug sends its name with the warning ([alertId]) and with the cut-off
+  /// (`<alertId>_LOCKED`). Null when neither is logged or names it.
+  Future<String?> applianceNameOfAlert(String alertId) async {
+    final rows = await _client
+        .from('alert_logs')
+        .select('appliance_name')
+        .eq('device_id', deviceId)
+        .inFilter('event_id', [alertId, '${alertId}_LOCKED']);
+    for (final r in rows) {
+      final name = r['appliance_name']?.toString() ?? '';
+      if (name.isNotEmpty && name != 'Unknown appliance') return name;
+    }
+    return null;
+  }
+
   /// This phone stops receiving pushes (on sign-out).
   Future<void> removePushToken(String token) =>
       _client.from('push_tokens').delete().eq('token', token);

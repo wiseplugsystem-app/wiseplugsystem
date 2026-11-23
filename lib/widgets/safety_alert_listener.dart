@@ -11,6 +11,10 @@ import '../screens/alarm_setup_screen.dart';
 import '../services/countdown_alarm.dart';
 import '../services/esp32_service.dart';
 import '../services/safety_alarm_manager.dart';
+import '../services/supabase_backend.dart';
+
+/// The appliance each safe-time warning was about, by the plug's alert id.
+final _warningNames = <String, String>{};
 
 /// App-wide safety watchdog. Place it below the Navigator (e.g. around the
 /// signed-in home screen) so its dialog covers every tab and pushed screen.
@@ -122,6 +126,7 @@ class _SafetyAlertListenerState extends State<SafetyAlertListener> {
       ..add(
         widget.service.streamOutlets().listen((readings) {
           _readings = readings;
+          _rememberNames(readings);
           _checkCutoff();
           _evaluate();
           // Android: an outlet that goes into warning while the pop-up is
@@ -141,6 +146,38 @@ class _SafetyAlertListenerState extends State<SafetyAlertListener> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) unawaited(remindAlarmSetup(context));
     });
+  }
+
+  /// Safety-log lookups already asked for (each warning once).
+  final _looked = <String>{};
+
+  /// The appliance each warning was about (by the plug's alert id, which
+  /// stays the same after the cut-off): while the plug names it, and else
+  /// from the safety log (the plug sends the name with the warning and the
+  /// cut-off, just before it ends the run and forgets it).
+  void _rememberNames(Map<String, OutletReading> readings) {
+    for (final r in readings.values) {
+      if (r.alertID.isEmpty || !r.isSafeTimeAlert) continue;
+      if (_SafetyAlertDialogState._known(r) && (r.isWarning || r.isLockedOut)) {
+        _warningNames[r.alertID] = r.appliance;
+      } else if (r.isLockedOut &&
+          !_warningNames.containsKey(r.alertID) &&
+          _looked.add(r.alertID) &&
+          SupabaseBackend.configured) {
+        unawaited(_lookUpName(r.alertID));
+      }
+    }
+  }
+
+  Future<void> _lookUpName(String alertID) async {
+    try {
+      final name = await SupabaseBackend().applianceNameOfAlert(alertID);
+      if (name == null || !mounted) return;
+      _warningNames[alertID] = name;
+      _updates.value++; // the open pop-up shows it
+    } catch (_) {
+      // Offline: "Unknown appliance" stays; asked again on the next start.
+    }
   }
 
   void _evaluate() {
@@ -652,10 +689,16 @@ class _SafetyAlertDialogState extends State<_SafetyAlertDialog> {
     'Unknown appliance',
     'Recognizing appliance',
   }.contains(r.appliance);
-  static ApplianceKind _kindOf(OutletReading r) =>
-      _known(r) ? kindForType(r.appliance) : unknownKind;
+  static ApplianceKind _kindOf(OutletReading r) {
+    if (_known(r)) return kindForType(r.appliance);
+    final name = _warningNames[r.alertID];
+    return name == null ? unknownKind : kindForType(name);
+  }
+
+  /// After the cut-off the plug has ended the run and no longer names it:
+  /// the name the warning had (remembered, or from the safety log).
   static String _nameOf(OutletReading r) =>
-      _known(r) ? r.appliance : 'Unknown appliance';
+      _known(r) ? r.appliance : _warningNames[r.alertID] ?? 'Unknown appliance';
 
   Widget _choice(
     String label,

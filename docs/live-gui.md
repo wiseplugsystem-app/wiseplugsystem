@@ -1233,3 +1233,15 @@ The Active / Idle badge is unchanged.
   "Yes, save it" saves the sample by itself the moment it is measured; "No,
   I'll switch it" shows "already saved" at once, so you can switch setting
   without waiting.
+
+## The pop-up names the appliance that was switched off (in plain words)
+
+- When a safe-time warning went unanswered, the plug switched the outlet off
+  and ended the run, and ending a run clears its name. So the pop-up then
+  said "The Unknown appliance on Outlet B reached its safe time…", although
+  the phone notification named it correctly.
+- Now the pop-up keeps the name the warning had (by the plug's alert id,
+  which stays the same after the switch-off). If the app was not open during
+  the warning, it reads the name from the safety log (`alert_logs`), where the
+  plug saved it just before switching off: "The black electricfan on Outlet B
+  reached its safe time, so WisePlug turned it off."
