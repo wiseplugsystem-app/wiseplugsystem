@@ -88,8 +88,6 @@ internal object PhoneSetup {
             "sound" -> candidates += Intent(Settings.ACTION_SOUND_SETTINGS)
             "dnd" -> candidates += Intent(Settings.ACTION_ZEN_MODE_PRIORITY_SETTINGS)
             "autostart" -> candidates += autostartPages(pkg)
-            "brandBattery" -> candidates += brandBatteryPages(pkg)
-            "brandPermissions" -> candidates += brandPermissionPages(pkg)
             "appInfo" -> {}
         }
         candidates += Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, app)
@@ -130,34 +128,5 @@ internal object PhoneSetup {
         component("com.transsion.phonemaster", "com.cyin.himgr.autostart.AutoStartActivity"),
         // Asus
         component("com.asus.mobilemanager", "com.asus.mobilemanager.autostart.AutoStartActivity"),
-    )
-
-    /** Each brand's own battery page for this app ("No restrictions"). */
-    private fun brandBatteryPages(pkg: String) = listOf(
-        // Samsung: Device care > Battery
-        component("com.samsung.android.lool", "com.samsung.android.sm.battery.ui.BatteryActivity"),
-        component("com.samsung.android.lool", "com.samsung.android.sm.ui.battery.BatteryActivity"),
-        component("com.samsung.android.sm", "com.samsung.android.sm.ui.battery.BatteryActivity"),
-        // Xiaomi: battery saver for this app
-        component("com.miui.powerkeeper", "com.miui.powerkeeper.ui.HiddenAppsConfigActivity")
-            .putExtra("package_name", pkg).putExtra("package_label", "WisePlug"),
-        // Huawei / Honor: app launch
-        component("com.huawei.systemmanager", "com.huawei.systemmanager.power.ui.HwPowerManagerActivity"),
-        // Vivo: high background power use
-        component("com.vivo.abe", "com.vivo.applicationbehaviorengine.ui.ExcessivePowerManagerActivity"),
-        // Oppo / Realme / OnePlus
-        component("com.coloros.oppoguardelf", "com.coloros.powermanager.fuelgaue.PowerUsageModelActivity"),
-        // Transsion: Phone Master power saving
-        component("com.transsion.phonemaster", "com.cyin.himgr.powermanager.views.activity.PowerManagerActivity"),
-    )
-
-    /** Xiaomi's "Other permissions" (lock screen, pop-ups in the background). */
-    private fun brandPermissionPages(pkg: String) = listOf(
-        Intent("miui.intent.action.APP_PERM_EDITOR")
-            .setClassName("com.miui.securitycenter", "com.miui.permcenter.permissions.PermissionsEditorActivity")
-            .putExtra("extra_pkgname", pkg),
-        Intent("miui.intent.action.APP_PERM_EDITOR")
-            .setClassName("com.miui.securitycenter", "com.miui.permcenter.permissions.AppPermissionsEditorActivity")
-            .putExtra("extra_pkgname", pkg),
     )
 }

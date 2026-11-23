@@ -19,20 +19,24 @@ class WiseplugAlarm {
   }
 
   /// Rings [eventId] on [outlet] ('A'/'B') until [endsAt] (the plug's
-  /// cut-off). An event rings once. True when the alarm was started.
+  /// cut-off), or until the outlet's live data at [path] in Firebase
+  /// ([databaseUrl]) shows the warning is over. An event rings once. True
+  /// when the alarm was started.
   static Future<bool> start({
     required String eventId,
     required String outlet,
     required String appliance,
     required DateTime endsAt,
-    bool test = false,
+    String path = '',
+    String databaseUrl = '',
   }) async =>
       await _call<bool>('start', {
         'eventId': eventId,
         'outlet': outlet,
         'appliance': appliance,
         'endsAt': endsAt.millisecondsSinceEpoch,
-        'test': test,
+        'path': path,
+        'databaseUrl': databaseUrl,
       }) ??
       false;
 
@@ -68,8 +72,8 @@ class WiseplugAlarm {
   }
 
   /// Opens a settings page ('notifications', 'battery', 'exactAlarms',
-  /// 'fullScreen', 'sound', 'dnd', 'autostart', 'brandBattery',
-  /// 'brandPermissions', 'appInfo'); falls back to the app's settings.
+  /// 'fullScreen', 'sound', 'dnd', 'autostart', 'appInfo'); falls back
+  /// to the app's settings.
   static Future<bool> open(String page) async =>
       await _call<bool>('open', {'page': page}) ?? false;
 

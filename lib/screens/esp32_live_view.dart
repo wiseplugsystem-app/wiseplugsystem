@@ -1807,7 +1807,7 @@ class _Esp32LiveViewState extends State<Esp32LiveView> {
             if (CountdownAlarm.supported) ...[
               ListTile(
                 leading: const Icon(Icons.alarm),
-                title: const Text('Safety alarm setup'),
+                title: const Text('Alarm permissions'),
                 subtitle: const Text(
                   'So the warning sounds with the app closed or locked',
                 ),

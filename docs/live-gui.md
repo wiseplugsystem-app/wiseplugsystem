@@ -1133,3 +1133,28 @@ The Active / Idle badge is unchanged.
 - The phone notification sound (`android/app/src/main/res/raw/wiseplug_alert.mp3`,
   used by the notification channels and the Android countdown alarm) is not
   changed.
+
+## The countdown notification: only off-screen, only "Open WisePlug", stops only when handled (in plain words)
+
+- **Only when WisePlug is not on the screen.** With the app open, the app's
+  own pop-up handles the countdown (unchanged) and there is no notification.
+  Leave the app (background, closed, locked) while it still counts down and
+  the notification comes back; open the app and it goes away. The sound is
+  the same one all along, so it never restarts or plays twice.
+- **One button: "Open WisePlug"** (tapping the notification does the same).
+  It opens the app on the pop-up and does NOT stop the alarm. The "Stop
+  alarm" button was removed.
+- **It cannot be swiped away** or cleared with "Clear all" while it counts
+  down. Android 14+ may still let a user swipe it: then it is shown again at
+  once.
+- **It stops only when the warning is over:** "Turn off now" or "Keep it on"
+  in the app (the plug then reports the outlet out of its warning in
+  Firebase, and the alarm sees that), the cut-off time, the "switched off"
+  push, or the appliance already off. Opening the app, locking the phone or
+  closing the app do not stop it.
+- **Only the safe-time countdown uses the alarm.** Other safety pushes (meter
+  not reading, too much power, fault, switched off) keep their normal
+  notification and sound; the closed-app alarm tone no longer plays for them.
+- **"Safety alarm setup" is now "Alarm permissions"**, with only the
+  permission checks (Auto-start became one of them on the phones that have
+  it). The brand steps, the test alarm and the text below were removed.

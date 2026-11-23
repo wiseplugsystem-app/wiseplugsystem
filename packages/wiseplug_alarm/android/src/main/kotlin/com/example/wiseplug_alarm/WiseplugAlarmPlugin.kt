@@ -26,6 +26,8 @@ class WiseplugAlarmPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Acti
 
     override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
         context = flutterPluginBinding.applicationContext
+        // Whether WisePlug is on the screen: the countdown notification shows only when not.
+        (context as? android.app.Application)?.let { AppVisibility.register(it) }
         channel = MethodChannel(flutterPluginBinding.binaryMessenger, "wiseplug/alarm")
         channel.setMethodCallHandler(this)
     }
@@ -44,7 +46,8 @@ class WiseplugAlarmPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Acti
                         call.argument<String>("outlet") ?: "A",
                         call.argument<String>("appliance") ?: "An appliance",
                         (call.argument<Number>("endsAt") ?: 0).toLong(),
-                        call.argument<Boolean>("test") ?: false,
+                        call.argument<String>("path") ?: "",
+                        call.argument<String>("databaseUrl") ?: "",
                     ),
                 )
                 "stop" -> {

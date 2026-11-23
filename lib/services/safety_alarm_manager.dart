@@ -73,6 +73,12 @@ bool isSafetyAlarmPush(Map<String, dynamic> data) => const {
   'SENSOR_UNAVAILABLE',
 }.contains(data['type']);
 
+/// The safe-time countdown push: the only push that may use the alarm
+/// volume (the safe time is up and the 60-second countdown started).
+bool isCountdownPush(Map<String, dynamic> data) =>
+    data['type'] == 'RUNTIME_WARNING' ||
+    data['type'] == 'SAFETY_CEILING_EXCEEDED';
+
 /// With the app closed: a safety push plays the warning sound once on the
 /// alarm volume (silent mode, Do Not Disturb), besides the notification.
 Future<void> playSafetyAlarmInBackground() async {
@@ -229,11 +235,14 @@ class SafetyAlarmManager {
     _warning = false;
     _next?.cancel();
     _next = null;
-    // The Android countdown alarm (and its notification) stops too.
+    // The Android countdown alarm stops too, when this happens on the screen
+    // ("Turn off now", "Keep it on", the warning over). Off the screen
+    // (background, closing the app) it keeps ringing: it stops by itself at
+    // the cut-off or when the outlet's warning is over in Firebase.
     if (_native) {
       _native = false;
       CountdownAlarm.ringing = false;
-      unawaited(CountdownAlarm.stopAll());
+      if (CountdownAlarm.appVisible) unawaited(CountdownAlarm.stopAll());
     }
   }
 

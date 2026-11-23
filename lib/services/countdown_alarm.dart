@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:wiseplug_alarm/wiseplug_alarm.dart';
 
 import '../models/esp32_data.dart';
@@ -23,6 +24,19 @@ class CountdownAlarm {
   /// The plug's warning, deadline to cut-off (safety_state.h WARNING_MS).
   static const warning = Duration(milliseconds: 63000);
 
+  /// WisePlug is on the screen (or about to be): the app's own pop-up
+  /// handles the countdown; the notification side does not show.
+  static bool get appVisible {
+    final state = WidgetsBinding.instance.lifecycleState;
+    return state == null ||
+        state == AppLifecycleState.resumed ||
+        state == AppLifecycleState.inactive;
+  }
+
+  /// The outlet's live data in Firebase, watched by the alarm to stop when
+  /// the warning is over ("Turn off now", "Keep it on", or turned off).
+  static String outletPath(String letter) => 'telemetry_logs/outlet_$letter';
+
   /// 'outlet_1' / 'outlet_2' (Supabase, pushes) -> 'A' / 'B'.
   static String letter(String? outlet) =>
       outlet == 'outlet_2' || outlet == 'B' ? 'B' : 'A';
@@ -36,6 +50,9 @@ class CountdownAlarm {
   /// False when the native alarm is not available.
   static Future<bool> startForReadings(Iterable<OutletReading> warnings) async {
     if (!supported) return false;
+    // Not on the screen: the push or the backup alarm rings it (with its
+    // notification); the app does not play a second sound.
+    if (!appVisible) return _available();
     final now = DateTime.now();
     var any = false;
     for (final r in warnings) {
@@ -45,6 +62,8 @@ class CountdownAlarm {
         outlet: letter(r.outlet),
         appliance: r.appliance,
         endsAt: endsAt(r, now),
+        path: outletPath(letter(r.outlet)),
+        databaseUrl: Esp32Service.databaseUrl,
       );
       // Already rang or was stopped counts as handled too: no second sound.
       any = started || any || await _available();
@@ -86,11 +105,14 @@ class CountdownAlarm {
       return false;
     }
     final name = '${data['applianceName'] ?? ''}';
+    final outlet = letter('${data['outlet']}');
     return WiseplugAlarm.start(
       eventId: eventId,
-      outlet: letter('${data['outlet']}'),
+      outlet: outlet,
       appliance: name.isEmpty ? 'An appliance' : name,
       endsAt: at,
+      path: outletPath(outlet),
+      databaseUrl: Esp32Service.databaseUrl,
     );
   }
 
@@ -131,7 +153,7 @@ class CountdownAlarm {
           deadline: deadline,
           sessionId: r.sessionID,
           appliance: r.appliance,
-          path: 'telemetry_logs/outlet_$outlet',
+          path: outletPath(outlet),
           databaseUrl: Esp32Service.databaseUrl,
         );
       } else if (!r.isWarning && _backups[outlet] != '') {

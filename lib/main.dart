@@ -27,7 +27,12 @@ Future<void> wisePlugBackgroundMessage(RemoteMessage message) async {
   // cut-off push stops it. If that is not possible, the sound plays once.
   if (await CountdownAlarm.startFromPush(message.data)) return;
   await CountdownAlarm.stopFromPush(message.data);
-  if (isSafetyAlarmPush(message.data)) await playSafetyAlarmInBackground();
+  // Only the safe-time countdown uses the alarm volume. Every other safety
+  // push (meter silent, too much power, fault, switched off, …) keeps its
+  // normal notification and sound, without the alarm.
+  if (isSafetyAlarmPush(message.data) && isCountdownPush(message.data)) {
+    await playSafetyAlarmInBackground();
+  }
 }
 
 void main() async {

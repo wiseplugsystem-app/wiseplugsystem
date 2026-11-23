@@ -5,111 +5,36 @@ import 'package:flutter/material.dart';
 import 'package:wiseplug_alarm/wiseplug_alarm.dart';
 
 import '../services/countdown_alarm.dart';
-import '../theme.dart';
 
-/// The phone brands that stop apps in the background, and what to switch on.
-/// Android does not let an app read or change these settings: WisePlug can
-/// only open the page, the user switches it on.
+/// The phone brands that stop apps in the background unless Auto-start (or
+/// their own name for it) is on. Android does not let an app read or change
+/// it: WisePlug can only open the page, the user switches it on.
 class _Brand {
   final String name;
-  final List<String> steps;
 
-  /// The settings pages to offer ('autostart', 'brandBattery',
-  /// 'brandPermissions'), each with its button label.
-  final Map<String, String> pages;
-  final String? note;
-  const _Brand(this.name, this.steps, this.pages, {this.note});
+  /// What the brand calls its Auto-start page.
+  final String autostart;
+  const _Brand(this.name, this.autostart);
 }
 
 _Brand? _brandFor(String manufacturer, String brand) {
   bool any(List<String> names) =>
       names.any((n) => manufacturer.contains(n) || brand.contains(n));
   if (any(['xiaomi', 'redmi', 'poco'])) {
-    return const _Brand(
-      'Xiaomi, Redmi, POCO',
-      [
-        'Auto-start: turn it ON for WisePlug.',
-        'Battery saver: choose "No restrictions".',
-        'Other permissions: allow "Show on Lock screen" and "Display pop-up '
-            'windows while running in the background".',
-        'Recent apps: press and hold WisePlug, then tap the lock, so it is '
-            'not closed when you clear the recent apps.',
-      ],
-      {
-        'autostart': 'Open Auto-start',
-        'brandBattery': 'Open Battery saver',
-        'brandPermissions': 'Open Other permissions',
-      },
-    );
-  }
-  if (any(['samsung'])) {
-    return const _Brand(
-      'Samsung',
-      [
-        'Battery: choose "Unrestricted".',
-        'Settings > Battery > Background usage limits: make sure WisePlug is '
-            'NOT in "Sleeping apps" or "Deep sleeping apps".',
-        'Notifications: allow them, and show them on the Lock screen.',
-      ],
-      {'brandBattery': 'Open Battery'},
-    );
+    return const _Brand('Xiaomi, Redmi, POCO', 'Auto-start');
   }
   if (any(['oppo', 'realme', 'oneplus'])) {
-    return const _Brand(
-      'Oppo, Realme, OnePlus',
-      [
-        'Auto launch (Auto-start): turn it ON for WisePlug.',
-        'Battery: choose "Allow background activity" (or "Don\'t optimize").',
-        'Recent apps: press and hold WisePlug, then tap "Lock".',
-        'Notifications: allow Lock screen and Banners.',
-      ],
-      {'autostart': 'Open Auto launch', 'brandBattery': 'Open Battery'},
-    );
+    return const _Brand('Oppo, Realme, OnePlus', 'Auto launch');
   }
-  if (any(['vivo', 'iqoo'])) {
-    return const _Brand(
-      'Vivo, iQOO',
-      [
-        'Auto-start: turn it ON for WisePlug.',
-        'Battery > Background power consumption: choose "Allow high '
-            'background power consumption".',
-        'Recent apps: pull WisePlug down to lock it.',
-      ],
-      {'autostart': 'Open Auto-start', 'brandBattery': 'Open Battery'},
-    );
-  }
+  if (any(['vivo', 'iqoo'])) return const _Brand('Vivo, iQOO', 'Auto-start');
   if (any(['huawei', 'honor'])) {
-    return const _Brand(
-      'Huawei, Honor',
-      [
-        'App launch: find WisePlug, turn off "Manage automatically", then '
-            'turn ON Auto-launch, Secondary launch and Run in background.',
-        'Recent apps: pull WisePlug down to lock it.',
-      ],
-      {'autostart': 'Open App launch', 'brandBattery': 'Open Battery'},
-      note:
-          'Phones without Google services (newer Huawei) cannot receive the '
-          'warning push. The backup alarm still rings if WisePlug was opened '
-          'while the appliance was running.',
-    );
+    return const _Brand('Huawei, Honor', 'App launch');
   }
   if (any(['infinix', 'tecno', 'itel', 'transsion'])) {
-    return const _Brand(
-      'Infinix, Tecno, itel',
-      [
-        'Phone Master > Auto-start: allow WisePlug.',
-        'Phone Master > Power saving: turn it off for WisePlug.',
-        'Recent apps: lock WisePlug.',
-      ],
-      {'autostart': 'Open Auto-start', 'brandBattery': 'Open Power saving'},
-    );
+    return const _Brand('Infinix, Tecno, itel', 'Auto-start');
   }
-  if (any(['asus'])) {
-    return const _Brand('Asus', [
-      'Auto-start Manager: allow WisePlug.',
-    ], {'autostart': 'Open Auto-start Manager'});
-  }
-  return null; // Motorola, Nokia, Google…: Android's own settings are enough
+  if (any(['asus'])) return const _Brand('Asus', 'Auto-start Manager');
+  return null; // Samsung, Motorola, Nokia, Google…: no Auto-start page
 }
 
 /// One thing the countdown alarm needs, from [WiseplugAlarm.status].
@@ -127,9 +52,11 @@ class _Check {
   });
 }
 
-List<_Check> _checks(Map<String, Object?> s) {
+/// [autostartDone]: the brand's Auto-start page was opened from here.
+List<_Check> _checks(Map<String, Object?> s, {bool autostartDone = false}) {
   final sdk = (s['sdk'] as num?)?.toInt() ?? 0;
   final volume = (s['alarmVolume'] as num?)?.toInt() ?? 0;
+  final brand = _brandFor('${s['manufacturer']}', '${s['brand']}');
   return [
     _Check(
       'Notifications',
@@ -200,6 +127,22 @@ List<_Check> _checks(Map<String, Object?> s) {
         fixLabel: 'Allow',
         fix: () => WiseplugAlarm.open('fullScreen'),
       ),
+    // Phones that close apps in the background: their Auto-start page. The
+    // app cannot read it, so it counts as done once opened from here.
+    if (brand != null)
+      _Check(
+        brand.autostart,
+        ok: autostartDone,
+        okText: 'Opened: make sure WisePlug is switched on there',
+        offText:
+            'Switch it on for WisePlug, or the alarm may not sound with the '
+            'app closed',
+        fixLabel: 'Open',
+        fix: () async {
+          await WiseplugAlarm.open('autostart');
+          await WiseplugAlarm.setFlag('brand_done', true);
+        },
+      ),
   ];
 }
 
@@ -212,21 +155,17 @@ Future<void> remindAlarmSetup(BuildContext context) async {
   _remindedThisStart = true;
   final s = await WiseplugAlarm.status();
   if (s == null || !context.mounted) return;
-  final off = _checks(s).where((c) => !c.ok).length;
-  final brand = _brandFor('${s['manufacturer']}', '${s['brand']}');
-  final brandOpen = brand != null && !await WiseplugAlarm.getFlag('brand_done');
-  if ((off == 0 && !brandOpen) || !context.mounted) return;
+  final done = await WiseplugAlarm.getFlag('brand_done');
+  final off = _checks(s, autostartDone: done).where((c) => !c.ok).length;
+  if (off == 0 || !context.mounted) return;
   final messenger = ScaffoldMessenger.maybeOf(context);
   final navigator = Navigator.of(context);
   messenger?.showSnackBar(
     SnackBar(
       duration: const Duration(seconds: 12),
       content: Text(
-        off > 0
-            ? 'Safety alarm: $off phone setting${off == 1 ? '' : 's'} '
-                  'to check, so the warning sounds with the app closed.'
-            : 'Safety alarm: one more step for ${brand!.name} phones, so the '
-                  'warning sounds with the app closed.',
+        'Alarm permissions: $off phone setting${off == 1 ? '' : 's'} '
+        'to check, so the warning sounds with the app closed.',
       ),
       action: SnackBarAction(
         label: 'Fix',
@@ -238,9 +177,8 @@ Future<void> remindAlarmSetup(BuildContext context) async {
   );
 }
 
-/// "Safety alarm setup": what the phone must allow so the countdown alarm
-/// sounds with the app closed or the phone locked, with a button for each,
-/// the steps for this phone's brand, and a test alarm.
+/// "Alarm permissions": what the phone must allow so the countdown alarm
+/// sounds with the app closed or the phone locked, with a button for each.
 class AlarmSetupScreen extends StatefulWidget {
   const AlarmSetupScreen({super.key});
 
@@ -251,7 +189,7 @@ class AlarmSetupScreen extends StatefulWidget {
 class _AlarmSetupScreenState extends State<AlarmSetupScreen>
     with WidgetsBindingObserver {
   Map<String, Object?>? _status;
-  bool _brandDone = false;
+  bool _autostartDone = false;
   bool _loaded = false;
 
   @override
@@ -279,46 +217,22 @@ class _AlarmSetupScreenState extends State<AlarmSetupScreen>
     if (!mounted) return;
     setState(() {
       _status = s;
-      _brandDone = done;
+      _autostartDone = done;
       _loaded = true;
     });
-  }
-
-  Future<void> _test() async {
-    final started = await WiseplugAlarm.start(
-      eventId: 'test_${DateTime.now().millisecondsSinceEpoch}',
-      outlet: 'A',
-      appliance: 'Test',
-      endsAt: DateTime.now().add(const Duration(seconds: 15)),
-      test: true,
-    );
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          started
-              ? 'Test alarm for 15 s. Lock the phone or close WisePlug to '
-                    'try it; tap "Stop alarm" to end it.'
-              : 'The test alarm could not start: allow notifications first.',
-        ),
-      ),
-    );
   }
 
   @override
   Widget build(BuildContext context) {
     final s = _status;
-    final brand = s == null
-        ? null
-        : _brandFor('${s['manufacturer']}', '${s['brand']}');
     return Scaffold(
-      appBar: AppBar(title: const Text('Safety alarm setup')),
+      appBar: AppBar(title: const Text('Alarm permissions')),
       body: !_loaded
           ? const Center(child: CircularProgressIndicator())
           : s == null
           ? const Padding(
               padding: EdgeInsets.all(20),
-              child: Text('The safety alarm setup is for Android phones.'),
+              child: Text('Alarm permissions are for Android phones.'),
             )
           : ListView(
               padding: const EdgeInsets.all(16),
@@ -333,7 +247,7 @@ class _AlarmSetupScreenState extends State<AlarmSetupScreen>
                 Card(
                   child: Column(
                     children: [
-                      for (final c in _checks(s))
+                      for (final c in _checks(s, autostartDone: _autostartDone))
                         ListTile(
                           leading: Icon(
                             c.ok ? Icons.check_circle : Icons.warning_amber,
@@ -353,77 +267,6 @@ class _AlarmSetupScreenState extends State<AlarmSetupScreen>
                         ),
                     ],
                   ),
-                ),
-                if (brand != null) ...[
-                  const SizedBox(height: 16),
-                  Text(
-                    'On ${brand.name} phones',
-                    style: const TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    'These phones close apps in the background. WisePlug '
-                    'cannot switch these on by itself: open each page and '
-                    'switch it on.',
-                    style: TextStyle(color: context.muted, fontSize: 16),
-                  ),
-                  const SizedBox(height: 8),
-                  for (final (i, step) in brand.steps.indexed)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 6),
-                      child: Text(
-                        '${i + 1}. $step',
-                        style: const TextStyle(fontSize: 16),
-                      ),
-                    ),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
-                      for (final e in brand.pages.entries)
-                        OutlinedButton(
-                          onPressed: () => WiseplugAlarm.open(e.key),
-                          child: Text(e.value),
-                        ),
-                      OutlinedButton(
-                        onPressed: () => WiseplugAlarm.open('appInfo'),
-                        child: const Text('Open app settings'),
-                      ),
-                    ],
-                  ),
-                  if (brand.note != null) ...[
-                    const SizedBox(height: 8),
-                    Text(
-                      brand.note!,
-                      style: TextStyle(color: context.muted, fontSize: 16),
-                    ),
-                  ],
-                  CheckboxListTile(
-                    contentPadding: EdgeInsets.zero,
-                    value: _brandDone,
-                    title: const Text('I did these steps'),
-                    onChanged: (v) async {
-                      await WiseplugAlarm.setFlag('brand_done', v == true);
-                      await _refresh();
-                    },
-                  ),
-                ],
-                const SizedBox(height: 16),
-                FilledButton.icon(
-                  onPressed: _test,
-                  icon: const Icon(Icons.alarm),
-                  label: const Text('Test the alarm (15 s)'),
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  'Even with everything allowed, a phone that force-stops '
-                  'WisePlug (or has no internet) cannot ring. The power is '
-                  'still cut by the WisePlug itself at the end of the safe '
-                  'time, with or without the phone.',
-                  style: TextStyle(color: context.muted, fontSize: 14),
                 ),
               ],
             ),

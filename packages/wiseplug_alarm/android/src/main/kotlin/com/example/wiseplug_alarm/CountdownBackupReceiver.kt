@@ -1,7 +1,6 @@
 package com.example.wiseplug_alarm
 
 import android.app.AlarmManager
-import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -41,13 +40,21 @@ class CountdownBackupReceiver : BroadcastReceiver() {
                     }
                 }.start()
             }
-            ACTION_DISMISS -> {
-                // "Stop alarm" on the fallback notification.
-                val eventId = intent.getStringExtra(CountdownAlarmService.EXTRA_EVENT)
-                val outlet = intent.getStringExtra(CountdownAlarmService.EXTRA_OUTLET) ?: "A"
-                if (eventId != null) AlarmStore.markDone(context, eventId)
-                context.getSystemService(NotificationManager::class.java)
-                    .cancel(CountdownAlarmService.notificationId(outlet))
+            ACTION_REPOST -> {
+                // The countdown notification was dismissed anyway (Android 14+
+                // lets users swipe ongoing ones): shown again while it rings.
+                if (intent.getBooleanExtra(EXTRA_FALLBACK, false)) {
+                    CountdownAlarmService.postInsistent(
+                        context,
+                        intent.getStringExtra(CountdownAlarmService.EXTRA_EVENT) ?: return,
+                        intent.getStringExtra(CountdownAlarmService.EXTRA_OUTLET) ?: "A",
+                        intent.getStringExtra(CountdownAlarmService.EXTRA_APPLIANCE) ?: "An appliance",
+                        intent.getLongExtra(CountdownAlarmService.EXTRA_ENDS_AT, 0L),
+                        fullScreen = false,
+                    )
+                } else {
+                    CountdownAlarmService.repost()
+                }
             }
         }
     }
@@ -68,7 +75,10 @@ class CountdownBackupReceiver : BroadcastReceiver() {
             if (state == "WARNING") {
                 val eventId = reading["alertID"]?.toString()?.ifEmpty { null } ?: "backup_${session}_$outlet"
                 val endsAt = number(reading["countdownExpiry"]) ?: (deadline + WARNING_MS)
-                CountdownAlarmService.start(context, eventId, outlet, reading["appliance"]?.toString() ?: appliance, endsAt)
+                CountdownAlarmService.start(
+                    context, eventId, outlet, reading["appliance"]?.toString() ?: appliance, endsAt,
+                    b.optString("path"), b.optString("databaseUrl"),
+                )
                 return
             }
             if (fresh) {
@@ -85,7 +95,10 @@ class CountdownBackupReceiver : BroadcastReceiver() {
         // so the phone warns.
         val endsAt = deadline + WARNING_MS
         if (endsAt > now) {
-            CountdownAlarmService.start(context, "backup_${session}_$outlet", outlet, appliance, endsAt)
+            CountdownAlarmService.start(
+                context, "backup_${session}_$outlet", outlet, appliance, endsAt,
+                b.optString("path"), b.optString("databaseUrl"),
+            )
         }
     }
 
@@ -115,7 +128,8 @@ class CountdownBackupReceiver : BroadcastReceiver() {
     companion object {
         private const val TAG = "WisePlugAlarm"
         const val ACTION_FIRE = "com.example.wiseplug_alarm.BACKUP_FIRE"
-        const val ACTION_DISMISS = "com.example.wiseplug_alarm.DISMISS"
+        const val ACTION_REPOST = "com.example.wiseplug_alarm.REPOST"
+        const val EXTRA_FALLBACK = "fallback"
 
         /** The plug's warning: 63 s from the deadline to the cut-off (safety_state.h WARNING_MS). */
         const val WARNING_MS = 63_000L
