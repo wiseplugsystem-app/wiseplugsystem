@@ -399,25 +399,30 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
         return;
       }
       // The run matched a DIFFERENT registered appliance (e.g. your Fan):
-      // asked before it is saved as a sample of this one. (Not the run that
-      // opened the pop-up: the user already answered for it.)
+      // asked which one it is before it is saved as a sample of this one.
+      // (Not the run that opened the pop-up: the user already answered for
+      // it.) Once the user has said "It's <this one>", the next samples that
+      // look like the same appliance are saved without asking again.
       if (step == RegistrationStep.record &&
           latest != null &&
           latest.eventId != tracker.initialEventId &&
           !_askedOther.contains(latest.eventId)) {
-        if (_otherMatch(latest) case final other?) {
+        if (_otherMatch(latest) case final other?
+            when !_lookalikesConfirmed) {
           _askedOther.add(latest.eventId);
           final save = await _confirmOther(other);
           if (!mounted) return;
-          if (save != true) {
+          if (save == true) {
+            _lookalikesConfirmed = true;
+          } else {
             tracker.skip(latest.eventId);
             setState(() {
               _run = latest;
               _step = RegistrationStep.plugIn;
               _measuringSince = null;
               _error =
-                  'Not saved: that looked like your $other. Turn it off, '
-                  'then plug in ${_applianceName.isEmpty ? 'the new appliance' : _applianceName} '
+                  'Not saved: that was your $other. Turn it off, then plug '
+                  'in ${_applianceName.isEmpty ? 'the new appliance' : _applianceName} '
                   'and turn it on.';
             });
             return;
@@ -463,28 +468,32 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
     return null;
   }
 
-  /// "This looks like your Fan. Save it as a sample of Desk lamp anyway?"
-  Future<bool?> _confirmOther(String other) => showDialog<bool>(
-    context: context,
-    builder: (c) => AlertDialog(
-      title: Text('Is this your $other?'),
-      content: Text(
-        'This run looks like your $other, not '
-        '${_applianceName.isEmpty ? 'the new appliance' : _applianceName}. '
-        'Save it as a sample anyway?',
+  /// The user said a run that looked like another appliance is the one being
+  /// registered: later lookalike samples are saved without asking again.
+  bool _lookalikesConfirmed = false;
+
+  /// "Which appliance is this? Its readings look like your Fan."
+  /// [It's my Fan (don't save)] / [It's Desk lamp (save it)]. True: save.
+  Future<bool?> _confirmOther(String other) {
+    final mine = _applianceName.isEmpty ? 'the new appliance' : _applianceName;
+    return showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('Which appliance is this?'),
+        content: Text('Its readings look like your $other.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(c, false),
+            child: Text("It's my $other (don't save)"),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(c, true),
+            child: Text("It's $mine (save it)"),
+          ),
+        ],
       ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(c, false),
-          child: const Text("No, don't save it"),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.pop(c, true),
-          child: const Text('Yes, save it'),
-        ),
-      ],
-    ),
-  );
+    );
+  }
 
   Future<void> _record(RegistrationTracker tracker, OutletSession run) async {
     try {

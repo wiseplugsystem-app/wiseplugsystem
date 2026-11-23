@@ -1158,3 +1158,33 @@ The Active / Idle badge is unchanged.
 - **"Safety alarm setup" is now "Alarm permissions"**, with only the
   permission checks (Auto-start became one of them on the phones that have
   it). The brand steps, the test alarm and the text below were removed.
+
+## "Not measuring" no longer gets stuck with a working meter (in plain words)
+
+- The plug asks each meter for its readings and waits 100 ms for a 25-byte
+  answer. A stray byte (electrical noise) or an answer that came a little
+  late stayed in the plug's receive buffer, and the NEXT answer was read
+  starting with it: the check failed, and every answer after it was read out
+  of step too. The card showed "Not measuring" although the meter was fine;
+  a restart or unplugging fixed it because that empties the buffer.
+- Now the plug throws away any leftover bytes right before each request
+  (firmware `sensorTask`), so one bad byte spoils at most one reading.
+- Nothing else changed: the self-recovery (link restarted after 5 s), the
+  60-second safety rule for a silent meter during a run, the app's 30-second
+  "Not measuring" card and its text.
+
+## Registering an appliance that looks like one you already have (in plain words)
+
+- While registering, a sample that looked like an appliance you already have
+  (e.g. your Fan) asked "Is this your Fan? Save it anyway?" with
+  "No, don't save it" / "Yes, save it". The natural answer "No" (it is not the
+  Fan) threw the sample away, every time, so the new appliance never got its
+  samples.
+- Now it asks **"Which appliance is this?"** ("Its readings look like your
+  Fan.") with buttons that name the appliances: **"It's my Fan (don't
+  save)"** and **"It's <new appliance> (save it)"**.
+- It asks **once per registration**: after "It's <new appliance>", the next
+  samples that look like the Fan are saved without asking again.
+- If both appliances really have the same readings, WisePlug cannot tell
+  them apart afterwards and asks "Is this Fan or <new appliance>?" when one is
+  plugged in (the existing behavior for appliances with close readings).

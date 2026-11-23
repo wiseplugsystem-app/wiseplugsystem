@@ -9,7 +9,7 @@
 // Appliance recognition is rule-based and happens in Supabase
 // (recognize-appliance). The plug measures each run (recognition_window.h),
 // sends a Stage 1 and a Stage 2 summary, and applies the cutoff it gets back.
-// Until an appliance is MATCHED_CONFIRMED, and whenever Supabase cannot be
+// Until an appliaance is MATCHED_CONFIRMED, and whenever Supabase cannot be
 // reached, the run uses the conservative DEFAULT_LIMIT_S. The plug no longer
 // matches appliances itself.
 //
@@ -694,6 +694,12 @@ void sensorTask(void*) {
       // A silent meter makes every getter wait for its own timeout; ask once
       // and skip the rest, so the other outlet's readings are not delayed.
       crumb(CrumbMeters, uint8_t(i + 1));
+      // Leftover bytes (electrical noise, or an answer that arrived after the
+      // library's 100 ms wait) would be read as the start of the next answer,
+      // fail its check and leave the reads after it out of step: "Not
+      // measuring" with a working meter. They are thrown away before each
+      // request (at most a buffer's worth, so constant noise cannot hold it).
+      for (int n = 0; n < 256 && OUTLET_HW[i].port.available() > 0; ++n) OUTLET_HW[i].port.read();
       s.voltage = meters[i].voltage();
       if (isnan(s.voltage)) {
         s.power = s.current = s.pf = s.energy = s.frequency = NAN;
