@@ -89,8 +89,9 @@ class RegistrationTracker {
     if (!isFresh(s)) {
       return s.isOpen ? RegistrationStep.restart : RegistrationStep.plugIn;
     }
-    // The same setting again (e.g. a fan speed already done): never saved.
-    if (!allowRepeat && isRepeat(s)) {
+    // The same setting again (e.g. a fan speed already done): never saved,
+    // unless the user said they switched setting (levels a few watts apart).
+    if (!allowRepeat && isRepeat(s) && !_switched.contains(s.eventId)) {
       if (!s.isOpen) {
         _used.add(s.eventId);
         return RegistrationStep.plugIn;
@@ -114,6 +115,21 @@ class RegistrationTracker {
 
   /// [eventId] could not be used (the server refused it): skip it.
   void skip(String eventId) => _used.add(eventId);
+
+  /// Runs that look like a saved setting, but the user said they switched
+  /// to the next setting: saved as that one.
+  final _switched = <String>{};
+  void switched(String eventId) => _switched.add(eventId);
+
+  /// [s] is a fully measured new run that would be refused as a setting this
+  /// appliance already has (see [next]): worth asking about first.
+  bool looksRepeated(OutletSession s) =>
+      !allowRepeat &&
+      isRepeat(s) &&
+      s.measured &&
+      isFresh(s) &&
+      !_used.contains(s.eventId) &&
+      !_switched.contains(s.eventId);
 }
 
 /// Shows the registration pop-up for the run [fromSession]: WisePlug detected
@@ -380,12 +396,40 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
           if (r != null && tracker.isFresh(r)) r,
       ]..sort((a, b) => b.startedAt.compareTo(a.startedAt));
       final latest = fresh.isEmpty ? null : fresh.first;
+      // Levels only a few watts apart (Level 1 50 W, Level 2 55 W): a run
+      // that looks like a setting already saved is ASKED about ("Did you
+      // switch to Level 2?") instead of refused. "Yes" saves it as the next
+      // setting; "No" is the old "already done" (switch it, try again).
+      // Asked once per run, only while registering settings in order.
+      if (latest != null &&
+          _level != null &&
+          _extraLevel == null &&
+          !_heatAppliance &&
+          !_askedSwitch.containsKey(latest.eventId)) {
+        final saved = tracker.looksRepeated(latest)
+            ? latest.modeName
+            : latest.measured &&
+                  tracker.isFresh(latest) &&
+                  !tracker._used.contains(latest.eventId)
+            ? _sameAs(latest.measuredPowerW)?.$1
+            : null;
+        if (saved != null && saved != _level) {
+          final yes = await _confirmSwitched(saved, latest.measuredPowerW);
+          if (!mounted) return;
+          _askedSwitch[latest.eventId] = yes == true;
+          if (yes == true) tracker.switched(latest.eventId);
+        }
+      }
       var step = tracker.next(latest);
       // About the same power as a setting already sampled: not saved (fans
       // and others): "use a different level". A heating appliance's levels
-      // draw the same power, so it is only told, and still saved.
+      // draw the same power, so it is only told, and still saved. (Saved
+      // after all when the user said they switched setting, above.)
       final same = _sameAs(latest?.measuredPowerW);
-      if (step == RegistrationStep.record && same != null && !_heatAppliance) {
+      if (step == RegistrationStep.record &&
+          same != null &&
+          !_heatAppliance &&
+          _askedSwitch[latest?.eventId] != true) {
         if (!latest!.isOpen) tracker.skip(latest.eventId);
         step = RegistrationStep.alreadyDone;
         if (mounted) {
@@ -407,8 +451,7 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
           latest != null &&
           latest.eventId != tracker.initialEventId &&
           !_askedOther.contains(latest.eventId)) {
-        if (_otherMatch(latest) case final other?
-            when !_lookalikesConfirmed) {
+        if (_otherMatch(latest) case final other? when !_lookalikesConfirmed) {
           _askedOther.add(latest.eventId);
           final save = await _confirmOther(other);
           if (!mounted) return;
@@ -466,6 +509,37 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
       return run.candidates.map((c) => c.name).join(' or ');
     }
     return null;
+  }
+
+  /// Runs asked "Did you switch to Level 2?" and the answer (true: switched,
+  /// saved as the next setting).
+  final _askedSwitch = <String, bool>{};
+
+  /// "This looks like Level 1 (about 50 W). Did you switch to Level 2?"
+  /// True: save it as the next setting.
+  Future<bool?> _confirmSwitched(String saved, double? watts) {
+    final next = _level ?? 'the next setting';
+    final about = watts == null ? '' : ' (about ${watts.round()} W)';
+    return showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: Text('Did you switch to $next?'),
+        content: Text(
+          'This looks like $saved$about. Some appliances use almost the same '
+          'power at each setting.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(c, false),
+            child: Text("No, I'll switch it"),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(c, true),
+            child: const Text('Yes, save it'),
+          ),
+        ],
+      ),
+    );
   }
 
   /// The user said a run that looked like another appliance is the one being

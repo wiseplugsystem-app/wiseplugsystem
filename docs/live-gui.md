@@ -1188,3 +1188,16 @@ The Active / Idle badge is unchanged.
 - If both appliances really have the same readings, WisePlug cannot tell
   them apart afterwards and asks "Is this Fan or <new appliance>?" when one is
   plugged in (the existing behavior for appliances with close readings).
+
+## Settings only a few watts apart (in plain words)
+
+- Registering a fan with Speed 1 at 50 W and Speed 2 at 55 W: a sample
+  within 10 % of a setting already saved (`floor_power_pct`) was refused as
+  "already done", so Speed 2 could never be saved.
+- Now WisePlug asks: **"Did you switch to Speed 2?"** ("This looks like
+  Speed 1 (about 55 W). Some appliances use almost the same power at each
+  setting.") with **"No, I'll switch it"** (not saved, as before) and **"Yes,
+  save it"** (saved as Speed 2). Asked once per run, only while the settings
+  are being registered in order; heating appliances are saved as before.
+- Recognition still names the appliance; it may not tell Speed 1 from
+  Speed 2 apart (they are the same appliance, so the safe time is the same).
