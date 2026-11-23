@@ -1213,3 +1213,23 @@ The Active / Idle badge is unchanged.
   come. Now, while settings are registered in order, it keeps measuring and
   then asks. The orange hint says "This looks like Level 2 (about 53 W). If
   you are on Level 3, keep it on: WisePlug will ask you."
+
+## "Did you switch?" also when several appliances fit (in plain words)
+
+- When a registration run looked like several registered fans at once
+  ("Which appliance?", AMBIGUOUS), the plug gave no setting name, so the
+  "Did you switch to Level 2?" question was skipped and the sample refused as
+  "already saved". Now it asks in that case too ("This looks like Level 1…",
+  from this appliance's own choice, else the closest saved setting by watts).
+- Measured on 2026-11-23: one fan's levels were only 4-5 W apart, while the
+  same level measured anywhere from 44.6 W to 52.3 W. Watts alone cannot tell
+  such levels apart; the user's answer decides.
+
+## "Did you switch?" comes at once (in plain words)
+
+- The question "Did you switch to Level 2?" used to come only after the
+  minute of measuring. Now it comes as soon as the run looks like a saved
+  setting (in its first seconds). Measuring still takes its full minute:
+  "Yes, save it" saves the sample by itself the moment it is measured; "No,
+  I'll switch it" shows "already saved" at once, so you can switch setting
+  without waiting.

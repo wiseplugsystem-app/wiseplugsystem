@@ -133,10 +133,11 @@ class RegistrationTracker {
 
   /// [s] is a fully measured new run that would be refused as a setting this
   /// appliance already has (see [next]): worth asking about first.
+  /// Asked as soon as it looks like one (while still measuring, or measured).
   bool looksRepeated(OutletSession s) =>
       !allowRepeat &&
       isRepeat(s) &&
-      s.measured &&
+      (s.measured || s.isOpen) &&
       isFresh(s) &&
       !_used.contains(s.eventId) &&
       !_switched.contains(s.eventId);
@@ -419,8 +420,23 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
           !_heatAppliance &&
           !_askedSwitch.containsKey(latest.eventId)) {
         final saved = tracker.looksRepeated(latest)
-            ? latest.modeName
-            : latest.measured &&
+            // "Which appliance?" (several fans fit) has no setting of its
+            // own: this appliance's setting among the choices, or else the
+            // closest saved one by watts, or "a saved setting".
+            ? (latest.modeName?.isNotEmpty == true ? latest.modeName : null) ??
+                  latest.candidates
+                      .where(
+                        (c) =>
+                            c.applianceId == tracker.applianceId &&
+                            c.modeName.isNotEmpty,
+                      )
+                      .firstOrNull
+                      ?.modeName ??
+                  _sameAs(latest.measuredPowerW)?.$1 ??
+                  'a saved setting'
+            // As soon as its watts look like a saved setting (asked early,
+            // so the user does not wait the minute for the question).
+            : (latest.measured || latest.isOpen) &&
                   tracker.isFresh(latest) &&
                   !tracker._used.contains(latest.eventId)
             ? _sameAs(latest.measuredPowerW)?.$1
@@ -430,9 +446,28 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
           if (!mounted) return;
           _askedSwitch[latest.eventId] = yes == true;
           if (yes == true) tracker.switched(latest.eventId);
+          if (yes != true) _declinedAs[latest.eventId] = saved;
         }
       }
       var step = tracker.next(latest);
+      // "No, I'll switch it" (asked while measuring): "already saved" at
+      // once, so the user switches setting without waiting the minute.
+      final declined = _declinedAs[latest?.eventId];
+      if (declined != null &&
+          (step == RegistrationStep.measuring ||
+              step == RegistrationStep.record)) {
+        final run = latest!;
+        if (!run.isOpen) tracker.skip(run.eventId);
+        if (mounted) {
+          setState(() {
+            _run = latest;
+            _step = RegistrationStep.alreadyDone;
+            _repeatMode = declined;
+            _measuringSince = null;
+          });
+        }
+        return;
+      }
       // About the same power as a setting already sampled: not saved (fans
       // and others): "use a different level". A heating appliance's levels
       // draw the same power, so it is only told, and still saved. (Saved
@@ -526,6 +561,9 @@ class _RegistrationDialogState extends State<RegistrationDialog> {
   /// Runs asked "Did you switch to Level 2?" and the answer (true: switched,
   /// saved as the next setting).
   final _askedSwitch = <String, bool>{};
+
+  /// Runs answered "No, I'll switch it", with the setting they looked like.
+  final _declinedAs = <String, String>{};
 
   /// "This looks like Level 1 (about 50 W). Did you switch to Level 2?"
   /// True: save it as the next setting.
